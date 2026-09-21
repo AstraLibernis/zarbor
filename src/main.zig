@@ -50,7 +50,7 @@ const usage =
     \\
     \\Each algo sets its own defaults for anything you do not pass:
     \\  --algo=random_forest   bagged, unshrunk, 1024-leaf trees, sqrt(p)/split
-    \\  --algo=linear          Adam + L1/L2 on the binned design matrix
+    \\  --algo=linear          L-BFGS + L1/L2 on the binned design matrix
     \\
 ;
 

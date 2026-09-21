@@ -331,6 +331,16 @@ pub const Dataset = struct {
     /// Cut points per feature; `edges[f][i]` is the inclusive upper bound of
     /// real-value bin `i`. Length is `n_bins[f] - 2`.
     edges: [][]f32,
+    /// `means[f][b]` is the mean of the training values that landed in bin `b`
+    /// of numeric feature `f`; empty for categorical features. Slot 0 is the
+    /// missing bin and holds the column mean instead.
+    ///
+    /// Only the linear model reads this: it has to pick one number to stand
+    /// for a whole bin, and the midpoint of the bin's two edges is a biased
+    /// stand-in whenever the values inside are skewed -- which, under quantile
+    /// cuts on a heavy-tailed column, they usually are. Trees never care,
+    /// since they only ever compare bin indices.
+    means: [][]f32,
     kinds: []ColumnKind,
     names: [][]u8,
     /// Level strings for each categorical feature, indexed by dictionary id;
@@ -351,6 +361,8 @@ pub const Dataset = struct {
         gpa.free(d.n_bins);
         for (d.edges) |e| gpa.free(e);
         gpa.free(d.edges);
+        for (d.means) |m| if (m.len != 0) gpa.free(m);
+        gpa.free(d.means);
         gpa.free(d.kinds);
         for (d.names) |n| gpa.free(n);
         gpa.free(d.names);
@@ -380,6 +392,16 @@ pub const Dataset = struct {
     }
 };
 
+/// The value a numeric bin stands for when no training value landed in it:
+/// the midpoint of its edges, or the one finite edge for the two unbounded
+/// end bins. `real_bin` is the bin index with the missing bin removed.
+pub fn binMidpoint(edges: []const f32, real_bin: usize) f32 {
+    if (edges.len == 0) return 0;
+    if (real_bin == 0) return edges[0];
+    if (real_bin >= edges.len) return edges[edges.len - 1];
+    return 0.5 * (edges[real_bin - 1] + edges[real_bin]);
+}
+
 fn lowerBound(edges: []const f32, v: f32) usize {
     var lo: usize = 0;
     var hi: usize = edges.len;
@@ -401,6 +423,7 @@ const BinCtx = struct {
     bins: []u8,
     n_bins: []u16,
     edges: [][]f32,
+    means: [][]f32,
     n_rows: usize,
     max_bin: u16,
     policy: config.BinPolicy,
@@ -491,6 +514,39 @@ const BinCtx = struct {
 
         for (vals, out) |v, *b| {
             b.* = if (std.math.isNan(v)) 0 else @intCast(lowerBound(edges, v) + 1);
+        }
+
+        const nb: usize = edges.len + 2;
+        const means = try self.gpa.alloc(f32, nb);
+        // Published before the two fallible allocations below, so a failure
+        // there leaves it for the caller's errdefer to free.
+        self.means[f] = means;
+        const sums = try self.gpa.alloc(f64, nb);
+        defer self.gpa.free(sums);
+        const cnts = try self.gpa.alloc(u32, nb);
+        defer self.gpa.free(cnts);
+        @memset(sums, 0);
+        @memset(cnts, 0);
+        for (vals, out) |v, b| {
+            if (std.math.isNan(v)) continue;
+            sums[b] += v;
+            cnts[b] += 1;
+        }
+        var all: f64 = 0;
+        var seen: u64 = 0;
+        for (sums[1..], cnts[1..]) |sm, c| {
+            all += sm;
+            seen += c;
+        }
+        // Bin 0 is missing and holds no values of its own. The column mean
+        // puts a missing entry at the centre, where it contributes nothing
+        // once the column is standardised.
+        means[0] = if (seen == 0) 0 else @floatCast(all / @as(f64, @floatFromInt(seen)));
+        for (means[1..], sums[1..], cnts[1..], 1..) |*m, sm, c, b| {
+            m.* = if (c == 0)
+                binMidpoint(edges, b - 1)
+            else
+                @floatCast(sm / @as(f64, @floatFromInt(c)));
         }
     }
 };
@@ -710,6 +766,10 @@ pub fn quantise(
     // already allocated. Freeing only the outer array leaked every numeric
     // feature's cut points on the `BinningFailed` path.
     errdefer for (edges) |e| if (e.len != 0) gpa.free(e);
+    const means = try gpa.alloc([]f32, n_features);
+    errdefer gpa.free(means);
+    @memset(means, &.{});
+    errdefer for (means) |m| if (m.len != 0) gpa.free(m);
     const kinds = try gpa.alloc(ColumnKind, n_features);
     errdefer gpa.free(kinds);
     const names = try gpa.alloc([]u8, n_features);
@@ -728,6 +788,7 @@ pub fn quantise(
         .bins = bins,
         .n_bins = n_bins,
         .edges = edges,
+        .means = means,
         .n_rows = src.n_rows,
         .max_bin = cfg.max_bin,
         .policy = cfg.bin_policy,
@@ -773,6 +834,7 @@ pub fn quantise(
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
+        .means = means,
         .kinds = kinds,
         .names = names,
         .levels = levels,
@@ -814,6 +876,13 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
     errdefer for (edges[0..e]) |x| gpa.free(x);
     while (e < ds.edges.len) : (e += 1) edges[e] = try gpa.dupe(f32, ds.edges[e]);
 
+    const means = try gpa.alloc([]f32, ds.means.len);
+    errdefer gpa.free(means);
+    @memset(means, &.{});
+    var mn: usize = 0;
+    errdefer for (means[0..mn]) |x| if (x.len != 0) gpa.free(x);
+    while (mn < ds.means.len) : (mn += 1) means[mn] = try gpa.dupe(f32, ds.means[mn]);
+
     const names = try gpa.alloc([]u8, ds.names.len);
     errdefer gpa.free(names);
     var nm: usize = 0;
@@ -849,6 +918,7 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
+        .means = means,
         .kinds = kinds,
         .names = names,
         .levels = levels,
@@ -1018,12 +1088,17 @@ pub fn applySchema(
         .bins_rm = bins_rm,
         .n_bins = try gpa.dupe(u16, schema.n_bins),
         .edges = try gpa.alloc([]f32, n),
+        // Prediction reads the bin-to-value mapping saved with the model, not
+        // this one, and a table being scored has no training values to
+        // average anyway.
+        .means = try gpa.alloc([]f32, n),
         .kinds = try gpa.dupe(ColumnKind, schema.kinds),
         .names = try gpa.alloc([]u8, n),
         .levels = try gpa.alloc([][]u8, n),
         .labels = &.{},
     };
     @memset(out.edges, &.{});
+    @memset(out.means, &.{});
     @memset(out.names, &.{});
     @memset(out.levels, &.{});
     errdefer out.deinit();

@@ -70,6 +70,10 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         names[f] = try std.fmt.allocPrint(gpa, "f{d}", .{f});
     }
 
+    const means = try gpa.alloc([]f32, n_features);
+    errdefer gpa.free(means);
+    @memset(means, &.{});
+
     // Mirror of `bins`, since the histogram kernel reads row-major.
     const bins_rm = try gpa.alloc(u8, n_features * n_rows);
     errdefer gpa.free(bins_rm);
@@ -85,6 +89,9 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
+        // Left empty on purpose: `buildDesign` must still work from edges
+        // alone, which is the path a hand-built dataset takes.
+        .means = means,
         .kinds = kinds,
         .names = names,
         .levels = levels,
@@ -725,4 +732,72 @@ test "a categorical column cannot overflow the bin byte" {
         // path reports CategoricalTooWide directly, before any binning.
         try testing.expectError(error.BinningFailed, data.quantise(gpa, pool, &f, .{}, null, &.{}));
     }
+}
+
+test "a numeric bin is represented by the mean of its values, not its midpoint" {
+    // The linear model has to pick one number to stand for a whole bin. The
+    // midpoint of the bin's edges is the obvious choice and a biased one: the
+    // top bin of a quantile split is unbounded above, so its midpoint is the
+    // cut itself no matter how far the values inside run. On the EV set that
+    // bias cost 0.0003 AUC against scikit-learn -- the entire remaining gap
+    // once the solver was fixed.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    // Six zeros then a right tail. With two real bins the single cut lands on
+    // 0, so bin 1 is the zeros and bin 2 is {1, 2, 3, 400}.
+    const nums = [_]f32{ 0, 0, 0, 0, 0, 0, 1, 2, 3, 400 };
+    const colours = [_][]const u8{"a"} ** nums.len;
+    var f = try frameWith(gpa, &colours, &nums);
+    defer f.deinit();
+
+    var ds = try data.quantise(gpa, pool, &f, .{ .max_bin = 3 }, null, &.{});
+    defer ds.deinit();
+
+    try testing.expectEqual(@as(u16, 3), ds.n_bins[1]);
+    try testing.expectEqualSlices(f32, &.{0}, ds.edges[1]);
+    try testing.expectEqual(@as(usize, 3), ds.means[1].len);
+
+    // Slot 0 is the missing bin, which holds no values of its own and takes
+    // the column mean so a missing entry sits at the centre.
+    try testing.expectApproxEqAbs(@as(f32, 40.6), ds.means[1][0], 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 0.0), ds.means[1][1], 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 101.5), ds.means[1][2], 1e-3);
+
+    // What the midpoint rule would have said for that top bin, for contrast:
+    // the cut itself, off by two orders of magnitude.
+    try testing.expectApproxEqAbs(@as(f32, 0.0), data.binMidpoint(ds.edges[1], 1), 1e-6);
+
+    // A categorical bin *is* its level, so there is nothing to average.
+    try testing.expectEqual(@as(usize, 0), ds.means[0].len);
+
+    // A row subset carries the representatives with it; a train/valid split
+    // that dropped them would fit one half on a different design matrix.
+    const rows = [_]u32{ 0, 6, 9 };
+    var part = try data.subset(gpa, &ds, &rows);
+    defer part.deinit();
+    try testing.expectEqualSlices(f32, ds.means[1], part.means[1]);
+
+    // And the linear model must actually use them. Same column, now as the
+    // only feature under a labelled frame, so the fitted design's bin-to-value
+    // table can be compared against the means directly. Without this the
+    // wiring could be cut and every other test would still pass, since the
+    // hand-built fixtures all take the midpoint fallback.
+    const labels = [_][]const u8{ "No", "Yes" } ** (nums.len / 2);
+    var lf = try frameWith(gpa, &labels, &nums);
+    defer lf.deinit();
+    var enc = try data.LabelEncoder.fromColumn(gpa, &lf, 0, null);
+    defer enc.deinit();
+    var lds = try data.quantise(gpa, pool, &lf, .{ .max_bin = 3 }, .{ .col = 0, .enc = &enc }, &.{});
+    defer lds.deinit();
+
+    var res = try linear.train(gpa, pool, &lds, null, .{
+        .algo = .linear,
+        .lin_epochs = 5,
+        .lin_standardize = false,
+        .verbose_eval = 0,
+    }, null);
+    defer res.model.deinit();
+    try testing.expectEqualSlices(f32, lds.means[0], res.model.design.repr[0]);
 }

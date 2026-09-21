@@ -11,9 +11,12 @@
 //! resolution and a real gain in robustness: quantile edges bound the influence
 //! of outliers, which plain OLS on raw columns handles badly.
 //!
-//! Fitting is full-batch Adam with an L2 term folded into the gradient and L1
-//! applied as a proximal soft-threshold after each step, so `alpha` genuinely
-//! produces zeros rather than merely small coefficients.
+//! Fitting is L-BFGS by default: it estimates the problem's curvature from
+//! recent steps, which is what lets it reach the optimum in a few dozen passes
+//! instead of the few thousand a fixed-step first-order method needs. An L1
+//! term switches it to OWL-QN, the orthant-wise variant, so `alpha` still
+//! produces exact zeros rather than merely small coefficients.
+//! `--lin_solver=adam` keeps the first-order fitter available.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -68,15 +71,6 @@ pub const Design = struct {
     }
 };
 
-/// The value a numeric bin stands for: the midpoint of its edges, or the one
-/// finite edge for the two unbounded end bins.
-fn binValue(edges: []const f32, real_bin: usize) f32 {
-    if (edges.len == 0) return 0;
-    if (real_bin == 0) return edges[0];
-    if (real_bin >= edges.len) return edges[edges.len - 1];
-    return 0.5 * (edges[real_bin - 1] + edges[real_bin]);
-}
-
 fn buildDesign(
     gpa: std.mem.Allocator,
     ds: *const Dataset,
@@ -94,19 +88,27 @@ fn buildDesign(
         if (nb <= 1) continue; // nothing but the missing bin: no information
         switch (ds.kinds[f]) {
             .numeric => {
-                // Bin 0 is missing; give it the feature's mean so a missing
-                // entry sits at the centre and contributes nothing once
-                // standardised.
                 const table = try gpa.alloc(f32, nb);
                 repr[f] = table;
-                var sum: f64 = 0;
-                var seen: usize = 0;
-                for (1..nb) |b| {
-                    table[b] = binValue(ds.edges[f], b - 1);
-                    sum += table[b];
-                    seen += 1;
+                // Binning computed the mean of the values that landed in each
+                // bin, which is what a bin should stand for. Fall back to the
+                // midpoint of the bin's edges for a dataset assembled without
+                // going through `quantise`; that is a biased stand-in under a
+                // skewed within-bin distribution, and on the EV set it costs
+                // 0.0003 AUC against the means.
+                if (ds.means[f].len == nb) {
+                    @memcpy(table, ds.means[f]);
+                } else {
+                    var sum: f64 = 0;
+                    for (1..nb) |b| {
+                        table[b] = data.binMidpoint(ds.edges[f], b - 1);
+                        sum += table[b];
+                    }
+                    // Bin 0 is missing; give it the feature's mean so a
+                    // missing entry sits at the centre and contributes
+                    // nothing once standardised.
+                    table[0] = if (nb <= 1) 0 else @floatCast(sum / @as(f64, @floatFromInt(nb - 1)));
                 }
-                table[0] = if (seen == 0) 0 else @floatCast(sum / @as(f64, @floatFromInt(seen)));
                 try cols.append(gpa, .{ .feature = @intCast(f), .bin = numeric_col, .center = 0, .scale = 1 });
             },
             .categorical => {
@@ -212,28 +214,70 @@ const ScoreCtx = struct {
 
 // ----------------------------------------------------------------- fitting
 
-/// Per-row derivative of the loss with respect to the linear predictor.
-const ResidCtx = struct {
+/// Fixed chunk count for the reductions that feed the line search. Fixed, not
+/// one per thread: a backtracking step is accepted or rejected on a
+/// comparison between two objective values, so the sum has to come out
+/// bit-identical however the pool happens to hand the chunks out.
+const reduce_chunks: usize = 64;
+/// Below this row count the reduction is cheaper inline than across the pool.
+const reduce_parallel_min: usize = 8192;
+
+/// Per-row loss, its derivative with respect to the linear predictor, and the
+/// intercept's share of the gradient — one pass, because the line search runs
+/// this far more often than it runs anything else.
+///
+/// `begin`/`end` index chunks, not rows, so a chunk always covers the same
+/// rows and the partial sums always combine in the same order.
+const EvalCtx = struct {
     z: []const f32,
     labels: []const f32,
     resid: []f32,
+    loss: []f64,
+    rsum: []f64,
     objective: config.Objective,
     scale_pos_weight: f32,
+    want_loss: bool,
+    size: usize,
+    n: usize,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
-        const self: *ResidCtx = @ptrCast(@alignCast(ctx));
-        var i = begin;
-        while (i < end) : (i += 1) {
-            const y = self.labels[i];
-            switch (self.objective) {
-                .logistic => {
-                    const p = 1.0 / (1.0 + @exp(-self.z[i]));
-                    const w: f32 = if (y > 0.5) self.scale_pos_weight else 1.0;
-                    self.resid[i] = w * (p - y);
-                },
-                .squared_error => self.resid[i] = self.z[i] - y,
+        const self: *EvalCtx = @ptrCast(@alignCast(ctx));
+        var c = begin;
+        while (c < end) : (c += 1) {
+            const lo = @min(c * self.size, self.n);
+            const hi = @min(lo + self.size, self.n);
+            var l: f64 = 0;
+            var rs: f64 = 0;
+            var i = lo;
+            while (i < hi) : (i += 1) {
+                const y: f64 = self.labels[i];
+                const zi: f64 = self.z[i];
+                var r: f64 = undefined;
+                switch (self.objective) {
+                    .logistic => {
+                        const wt: f64 = if (y > 0.5) self.scale_pos_weight else 1.0;
+                        r = wt * (1.0 / (1.0 + @exp(-zi)) - y);
+                        if (self.want_loss) {
+                            // log(1+e^z) - y*z, pivoted on the sign of z so
+                            // neither exponential can overflow.
+                            const sp = if (zi > 0)
+                                zi + @log(1.0 + @exp(-zi))
+                            else
+                                @log(1.0 + @exp(zi));
+                            l += wt * (sp - y * zi);
+                        }
+                    },
+                    .squared_error => {
+                        r = zi - y;
+                        if (self.want_loss) l += 0.5 * r * r;
+                    },
+                }
+                self.resid[i] = @floatCast(r);
+                rs += r;
             }
+            self.loss[c] = l;
+            self.rsum[c] = rs;
         }
     }
 };
@@ -243,7 +287,7 @@ const GradCtx = struct {
     design: *const Design,
     ds: *const Dataset,
     resid: []const f32,
-    grad: []f32,
+    grad: []f64,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -253,7 +297,7 @@ const GradCtx = struct {
             const col = self.design.cols[c];
             var acc: f64 = 0;
             for (self.resid, 0..) |r, row| acc += @as(f64, r) * self.design.value(col, self.ds, row);
-            self.grad[c] = @floatCast(acc);
+            self.grad[c] = acc;
         }
     }
 };
@@ -279,6 +323,396 @@ const ScoreAllCtx = struct {
     }
 };
 
+/// The objective both solvers minimise:
+///
+///     f(w, b) = (1/n) Σ lossᵢ  +  ½·l2·‖w‖²  +  l1·‖w‖₁
+///
+/// with `l2 = lambda/n` and `l1 = alpha/n`, so `lambda` and `alpha` are stated
+/// against the *summed* loss — the same convention the tree models use, and
+/// the same one as scikit-learn's `C = 1/lambda`. The intercept is the last
+/// slot of the parameter vector and is in neither penalty.
+///
+/// Parameters are f64 even though the model stores f32: L-BFGS measures
+/// progress by differencing successive parameter vectors, and in f32 those
+/// differences are rounding noise long before the solver is done.
+const Problem = struct {
+    pool: *Pool,
+    design: *const Design,
+    ds: *const Dataset,
+    objective: config.Objective,
+    scale_pos_weight: f32,
+    l2: f64,
+    l1: f64,
+    /// `p` coefficients, then the intercept.
+    theta: []f64,
+    /// f32 mirror of `theta[0..p]`, which is what the scoring kernel reads.
+    wf: []f32,
+    z: []f32,
+    resid: []f32,
+    loss_part: []f64,
+    rsum_part: []f64,
+    chunks: usize,
+    size: usize,
+
+    inline fn p(pr: *const Problem) usize {
+        return pr.theta.len - 1;
+    }
+
+    /// Smooth part of the objective at `th`. Leaves `resid` and the
+    /// intercept's gradient share behind, so a following `grad` call costs
+    /// only the column pass.
+    fn value(pr: *Problem, th: []const f64, want_loss: bool) f64 {
+        const np = pr.p();
+        for (pr.wf, th[0..np]) |*d, s| d.* = @floatCast(s);
+
+        var sctx = ScoreAllCtx{
+            .design = pr.design,
+            .ds = pr.ds,
+            .w = pr.wf,
+            .intercept = @floatCast(th[np]),
+            .z = pr.z,
+        };
+        pr.pool.parallelFor(pr.ds.n_rows, &sctx, ScoreAllCtx.run, 1024);
+
+        var ectx = EvalCtx{
+            .z = pr.z,
+            .labels = pr.ds.labels,
+            .resid = pr.resid,
+            .loss = pr.loss_part,
+            .rsum = pr.rsum_part,
+            .objective = pr.objective,
+            .scale_pos_weight = pr.scale_pos_weight,
+            .want_loss = want_loss,
+            .size = pr.size,
+            .n = pr.ds.n_rows,
+        };
+        pr.pool.parallelFor(pr.chunks, &ectx, EvalCtx.run, 1);
+
+        if (!want_loss) return 0;
+        var l: f64 = 0;
+        for (pr.loss_part[0..pr.chunks]) |x| l += x;
+        l /= @floatFromInt(pr.ds.n_rows);
+        var sq: f64 = 0;
+        for (th[0..np]) |c| sq += c * c;
+        return l + 0.5 * pr.l2 * sq;
+    }
+
+    /// Gradient of the smooth part. Reads the `resid` the last `value` call
+    /// left behind, so the two must be called in that order on the same point.
+    fn grad(pr: *Problem, th: []const f64, out: []f64) void {
+        const np = pr.p();
+        var gctx = GradCtx{ .design = pr.design, .ds = pr.ds, .resid = pr.resid, .grad = out[0..np] };
+        pr.pool.parallelFor(np, &gctx, GradCtx.run, 1);
+
+        const n: f64 = @floatFromInt(pr.ds.n_rows);
+        for (out[0..np], th[0..np]) |*d, c| d.* = d.* / n + pr.l2 * c;
+        var rs: f64 = 0;
+        for (pr.rsum_part[0..pr.chunks]) |x| rs += x;
+        out[np] = rs / n;
+    }
+
+    fn l1norm(pr: *const Problem, th: []const f64) f64 {
+        if (pr.l1 == 0) return 0;
+        var s: f64 = 0;
+        for (th[0..pr.p()]) |c| s += @abs(c);
+        return pr.l1 * s;
+    }
+};
+
+fn dot(a: []const f64, b: []const f64) f64 {
+    var s: f64 = 0;
+    for (a, b) |x, y| s += x * y;
+    return s;
+}
+
+/// y += a·x
+fn axpy(y: []f64, x: []const f64, a: f64) void {
+    for (y, x) |*d, s| d.* += a * s;
+}
+
+// --------------------------------------------------------------- L-BFGS
+
+/// Curvature pairs kept. Ten is the usual choice: the extra pairs buy little
+/// and each costs two vectors the length of the parameter vector.
+const lbfgs_history: usize = 10;
+const ls_max: usize = 40;
+const armijo_c1: f64 = 1e-4;
+/// A gradient this small is below what an f32-scored design can resolve, so
+/// treat it as converged rather than let a tight `lin_tol` spin on rounding.
+const grad_floor: f64 = 1e-12;
+/// Reject a curvature pair whose sᵀy is this small: it would make ρ enormous
+/// and the next direction meaningless. Skipping keeps the older pairs.
+const curvature_floor: f64 = 1e-12;
+
+/// OWL-QN's choice of subgradient — the one of least magnitude, which at a
+/// coefficient sitting on zero is zero unless the smooth gradient is steep
+/// enough to push it off. Equals the plain gradient when there is no L1 term.
+fn pseudoGrad(pr: *const Problem, g: []const f64, out: []f64) void {
+    if (pr.l1 == 0) {
+        @memcpy(out, g);
+        return;
+    }
+    const np = pr.p();
+    for (out[0..np], g[0..np], pr.theta[0..np]) |*o, gv, c| {
+        o.* = if (c > 0)
+            gv + pr.l1
+        else if (c < 0)
+            gv - pr.l1
+        else if (gv + pr.l1 < 0)
+            gv + pr.l1
+        else if (gv - pr.l1 > 0)
+            gv - pr.l1
+        else
+            0;
+    }
+    out[np] = g[np]; // the intercept is unpenalised
+}
+
+/// Clip a trial point back into the orthant the step started from, so the L1
+/// term stays differentiable along the whole step. A coefficient that tried to
+/// cross zero lands exactly on zero, which is how OWL-QN delivers the sparsity
+/// an L1 penalty is asked for.
+fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
+    const np = t.len - 1;
+    for (t[0..np], from[0..np], pg[0..np]) |*v, o, s| {
+        const orthant = if (o != 0) o else -s;
+        if (v.* * orthant <= 0) v.* = 0;
+    }
+}
+
+/// Limited-memory BFGS: approximate the inverse Hessian from the last few
+/// steps and gradient differences, so the step direction already carries the
+/// problem's curvature and no learning rate has to be guessed. `alpha` > 0
+/// switches on OWL-QN, which is the same recursion with the subgradient and
+/// orthant projection above.
+fn fitLbfgs(
+    gpa: std.mem.Allocator,
+    pr: *Problem,
+    cfg: config.Config,
+    log: ?*std.Io.Writer,
+) !u32 {
+    const n = pr.theta.len;
+    const m = @min(lbfgs_history, cfg.lin_epochs);
+
+    const g = try gpa.alloc(f64, n);
+    defer gpa.free(g);
+    const pg = try gpa.alloc(f64, n);
+    defer gpa.free(pg);
+    const dir = try gpa.alloc(f64, n);
+    defer gpa.free(dir);
+    const trial = try gpa.alloc(f64, n);
+    defer gpa.free(trial);
+    const hs = try gpa.alloc(f64, m * n);
+    defer gpa.free(hs);
+    const hy = try gpa.alloc(f64, m * n);
+    defer gpa.free(hy);
+    const rho = try gpa.alloc(f64, m);
+    defer gpa.free(rho);
+    const alph = try gpa.alloc(f64, m);
+    defer gpa.free(alph);
+
+    var f = pr.value(pr.theta, true) + pr.l1norm(pr.theta);
+    pr.grad(pr.theta, g);
+
+    var stored: usize = 0; // curvature pairs held
+    var head: usize = 0; // slot the next pair goes in
+    var iter: u32 = 0;
+    while (iter < cfg.lin_epochs) : (iter += 1) {
+        pseudoGrad(pr, g, pg);
+        var gmax: f64 = 0;
+        for (pg) |v| gmax = @max(gmax, @abs(v));
+        if (gmax <= grad_floor) break;
+
+        // Two-loop recursion: dir ← H·pg, newest pair first on the way down
+        // and oldest first on the way back up.
+        @memcpy(dir, pg);
+        for (0..stored) |i| {
+            const k = (head + m - 1 - i) % m;
+            alph[k] = rho[k] * dot(hs[k * n ..][0..n], dir);
+            axpy(dir, hy[k * n ..][0..n], -alph[k]);
+        }
+        if (stored != 0) {
+            // Scale the identity the recursion starts from by the last pair's
+            // curvature; without this the first step of every iteration is
+            // the wrong size by orders of magnitude.
+            const k = (head + m - 1) % m;
+            const y = hy[k * n ..][0..n];
+            const yy = dot(y, y);
+            if (yy > 0) {
+                const gamma = dot(hs[k * n ..][0..n], y) / yy;
+                for (dir) |*v| v.* *= gamma;
+            }
+        }
+        for (0..stored) |i| {
+            const k = (head + m - stored + i) % m;
+            const beta = rho[k] * dot(hy[k * n ..][0..n], dir);
+            axpy(dir, hs[k * n ..][0..n], alph[k] - beta);
+        }
+        for (dir) |*v| v.* = -v.*;
+
+        // The quasi-Newton step may leave the current orthant; the components
+        // that would are dropped rather than followed. Untested on its own,
+        // and not for want of trying: `projectOrthant` clips the trial point
+        // back regardless, so removing this changes how fast the solver gets
+        // there and not where it lands. Kept because it is the formulation
+        // OWL-QN is stated in and the projection alone is a weaker guarantee.
+        if (pr.l1 != 0) {
+            for (dir[0 .. n - 1], pg[0 .. n - 1]) |*dv, s| {
+                if (dv.* * -s <= 0) dv.* = 0;
+            }
+        }
+
+        var dg = dot(dir, pg);
+        if (!(dg < 0)) {
+            // A stale history, or every component clipped away. Fall back to
+            // steepest descent and start the history over.
+            for (dir, pg) |*dv, s| dv.* = -s;
+            dg = dot(dir, pg);
+            stored = 0;
+            head = 0;
+            if (!(dg < 0)) break;
+        }
+
+        // With no curvature yet, unit length is arbitrary; scale by the
+        // gradient so the first trial point is not absurdly far away.
+        var step: f64 = if (stored == 0) @min(1.0, 1.0 / gmax) else 1.0;
+        var f_new: f64 = f;
+        var accepted = false;
+        for (0..ls_max) |_| {
+            for (trial, pr.theta, dir) |*t, th, dv| t.* = th + step * dv;
+            if (pr.l1 != 0) projectOrthant(trial, pr.theta, pg);
+            f_new = pr.value(trial, true) + pr.l1norm(trial);
+            // After projection the step actually taken is not `step * dir`,
+            // so Armijo has to be measured against the realised move.
+            var expected = step * dg;
+            if (pr.l1 != 0) {
+                expected = 0;
+                for (pg, trial, pr.theta) |s, t, th| expected += s * (t - th);
+            }
+            if (f_new <= f + armijo_c1 * expected) {
+                accepted = true;
+                break;
+            }
+            step *= 0.5;
+        }
+        // No improvement anywhere along the ray: f32 scoring noise now
+        // dominates the objective, which is as converged as this gets.
+        if (!accepted) break;
+
+        var dmax: f64 = 0;
+        const s_slot = hs[head * n ..][0..n];
+        for (s_slot, trial, pr.theta) |*sv, t, th| {
+            sv.* = t - th;
+            dmax = @max(dmax, @abs(sv.*));
+        }
+        @memcpy(pr.theta, trial);
+        f = f_new;
+
+        // `value` left `resid` at the accepted point, so this is its gradient.
+        const y_slot = hy[head * n ..][0..n];
+        @memcpy(y_slot, g);
+        pr.grad(pr.theta, g);
+        for (y_slot, g) |*yv, gv| yv.* = gv - yv.*;
+
+        const sy = dot(s_slot, y_slot);
+        if (sy > curvature_floor) {
+            rho[head] = 1.0 / sy;
+            head = (head + 1) % m;
+            if (stored < m) stored += 1;
+        }
+
+        if (log) |wr| {
+            if (cfg.verbose_eval != 0 and
+                (iter % cfg.verbose_eval == 0 or iter + 1 == cfg.lin_epochs))
+            {
+                try wr.print("[{d:>4}] f={d:.8} |g|max={e:.3}\n", .{ iter, f, gmax });
+                try wr.flush();
+            }
+        }
+        if (dmax < cfg.lin_tol) {
+            iter += 1;
+            break;
+        }
+    }
+    return iter;
+}
+
+// ----------------------------------------------------------------- Adam
+
+inline fn softThreshold(v: f64, t: f64) f64 {
+    if (t == 0) return v;
+    if (v > t) return v - t;
+    if (v < -t) return v + t;
+    return 0;
+}
+
+/// Full-batch Adam with the L1 term applied as a proximal soft-threshold after
+/// each step, so `alpha` genuinely produces zeros rather than merely small
+/// coefficients. Needs no objective evaluation and so no line search, at the
+/// cost of an order of magnitude more passes than `lbfgs` for the same
+/// accuracy.
+fn fitAdam(
+    gpa: std.mem.Allocator,
+    pr: *Problem,
+    cfg: config.Config,
+    log: ?*std.Io.Writer,
+) !u32 {
+    const n = pr.theta.len;
+    const np = n - 1;
+
+    const g = try gpa.alloc(f64, n);
+    defer gpa.free(g);
+    const m1 = try gpa.alloc(f64, np);
+    defer gpa.free(m1);
+    const v1 = try gpa.alloc(f64, np);
+    defer gpa.free(v1);
+    @memset(m1, 0);
+    @memset(v1, 0);
+
+    const beta1: f64 = 0.9;
+    const beta2: f64 = 0.999;
+    const eps: f64 = 1e-8;
+    const lr: f64 = cfg.lin_lr;
+
+    var epoch: u32 = 0;
+    while (epoch < cfg.lin_epochs) : (epoch += 1) {
+        _ = pr.value(pr.theta, false);
+        pr.grad(pr.theta, g);
+
+        const t: f64 = @floatFromInt(epoch + 1);
+        const bc1 = 1.0 - std.math.pow(f64, beta1, t);
+        const bc2 = 1.0 - std.math.pow(f64, beta2, t);
+
+        var max_delta: f64 = 0;
+        for (pr.theta[0..np], g[0..np], m1, v1) |*coef, gv, *mm, *vv| {
+            mm.* = beta1 * mm.* + (1 - beta1) * gv;
+            vv.* = beta2 * vv.* + (1 - beta2) * gv * gv;
+            const step = lr * (mm.* / bc1) / (@sqrt(vv.* / bc2) + eps);
+            const before = coef.*;
+            coef.* = softThreshold(coef.* - step, lr * pr.l1);
+            max_delta = @max(max_delta, @abs(coef.* - before));
+        }
+        // The intercept is deliberately unpenalised, and takes a plain step.
+        pr.theta[np] -= lr * g[np];
+
+        if (log) |wr| {
+            if (cfg.verbose_eval != 0 and
+                (epoch % (cfg.verbose_eval * 10) == 0 or epoch + 1 == cfg.lin_epochs))
+            {
+                try wr.print("[{d:>4}] |dw|max={e:.3}\n", .{ epoch, max_delta });
+                try wr.flush();
+            }
+        }
+        if (max_delta < cfg.lin_tol) {
+            epoch += 1;
+            break;
+        }
+    }
+    return epoch;
+}
+
+// ---------------------------------------------------------------- driver
+
 pub const TrainResult = struct {
     model: Linear,
     epochs: u32,
@@ -287,13 +721,6 @@ pub const TrainResult = struct {
     /// See `booster.TrainResult.valid_ns`.
     valid_ns: u64,
 };
-
-inline fn softThreshold(v: f32, t: f32) f32 {
-    if (t == 0) return v;
-    if (v > t) return v - t;
-    if (v < -t) return v + t;
-    return 0;
-}
 
 pub fn train(
     gpa: std.mem.Allocator,
@@ -310,104 +737,70 @@ pub fn train(
     errdefer design.deinit();
     const p = design.cols.len;
 
-    const w = try gpa.alloc(f32, p);
-    errdefer gpa.free(w);
-    @memset(w, 0);
+    const theta = try gpa.alloc(f64, p + 1);
+    defer gpa.free(theta);
+    @memset(theta, 0);
 
-    const grad = try gpa.alloc(f32, p);
-    defer gpa.free(grad);
-    const m1 = try gpa.alloc(f32, p);
-    defer gpa.free(m1);
-    const v1 = try gpa.alloc(f32, p);
-    defer gpa.free(v1);
-    @memset(m1, 0);
-    @memset(v1, 0);
-
+    const wf = try gpa.alloc(f32, p);
+    defer gpa.free(wf);
     const z = try gpa.alloc(f32, ds.n_rows);
     defer gpa.free(z);
     const resid = try gpa.alloc(f32, ds.n_rows);
     defer gpa.free(resid);
+    const loss_part = try gpa.alloc(f64, reduce_chunks);
+    defer gpa.free(loss_part);
+    const rsum_part = try gpa.alloc(f64, reduce_chunks);
+    defer gpa.free(rsum_part);
 
     // Start the intercept at the base rate so the first steps do not have to
     // travel there; for logistic that is the log-odds of the label mean.
     var sum: f64 = 0;
     for (ds.labels) |y| sum += y;
     const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
-    var intercept: f32 = switch (cfg.objective) {
+    theta[p] = switch (cfg.objective) {
         .logistic => blk: {
             const q = std.math.clamp(mean, 1e-6, 1 - 1e-6);
-            break :blk @floatCast(@log(q / (1 - q)));
+            break :blk @log(q / (1 - q));
         },
-        .squared_error => @floatCast(mean),
+        .squared_error => mean,
     };
 
-    const n_f: f32 = @floatFromInt(ds.n_rows);
-    const beta1: f32 = 0.9;
-    const beta2: f32 = 0.999;
-    const eps: f32 = 1e-8;
-    // L1/L2 are specified per the whole objective, so divide by n to match the
-    // mean-loss gradient the steps are taken against.
-    const l2: f32 = cfg.lambda / n_f;
-    const l1: f32 = cfg.alpha / n_f;
+    const n_f: f64 = @floatFromInt(ds.n_rows);
+    const chunks: usize = if (ds.n_rows >= reduce_parallel_min) reduce_chunks else 1;
+    var pr = Problem{
+        .pool = pool,
+        .design = &design,
+        .ds = ds,
+        .objective = cfg.objective,
+        .scale_pos_weight = cfg.scale_pos_weight,
+        // L1/L2 are stated against the summed loss, so divide by n to match
+        // the mean-loss gradient the steps are taken against.
+        .l2 = @as(f64, cfg.lambda) / n_f,
+        .l1 = @as(f64, cfg.alpha) / n_f,
+        .theta = theta,
+        .wf = wf,
+        .z = z,
+        .resid = resid,
+        .loss_part = loss_part,
+        .rsum_part = rsum_part,
+        .chunks = chunks,
+        .size = (ds.n_rows + chunks - 1) / chunks,
+    };
 
-    var epoch: u32 = 0;
-    while (epoch < cfg.lin_epochs) : (epoch += 1) {
-        var sctx = ScoreAllCtx{ .design = &design, .ds = ds, .w = w, .intercept = intercept, .z = z };
-        pool.parallelFor(ds.n_rows, &sctx, ScoreAllCtx.run, 1024);
+    const epochs = switch (cfg.lin_solver) {
+        .lbfgs => try fitLbfgs(gpa, &pr, cfg, log),
+        .adam => try fitAdam(gpa, &pr, cfg, log),
+    };
 
-        var rctx = ResidCtx{
-            .z = z,
-            .labels = ds.labels,
-            .resid = resid,
-            .objective = cfg.objective,
-            .scale_pos_weight = cfg.scale_pos_weight,
-        };
-        pool.parallelFor(ds.n_rows, &rctx, ResidCtx.run, 8192);
-
-        var gctx = GradCtx{ .design = &design, .ds = ds, .resid = resid, .grad = grad };
-        pool.parallelFor(p, &gctx, GradCtx.run, 1);
-
-        const t: f32 = @floatFromInt(epoch + 1);
-        const bc1 = 1.0 - std.math.pow(f32, beta1, t);
-        const bc2 = 1.0 - std.math.pow(f32, beta2, t);
-
-        var max_delta: f32 = 0;
-        for (w, grad, m1, v1) |*coef, g_raw, *mm, *vv| {
-            // L2 belongs in the gradient; L1 is applied as a prox step below
-            // so it can land exactly on zero.
-            const g = g_raw / n_f + l2 * coef.*;
-            mm.* = beta1 * mm.* + (1 - beta1) * g;
-            vv.* = beta2 * vv.* + (1 - beta2) * g * g;
-            const step = cfg.lin_lr * (mm.* / bc1) / (@sqrt(vv.* / bc2) + eps);
-            const before = coef.*;
-            coef.* = softThreshold(coef.* - step, cfg.lin_lr * l1);
-            max_delta = @max(max_delta, @abs(coef.* - before));
-        }
-
-        // The intercept is deliberately unpenalised.
-        var rsum: f64 = 0;
-        for (resid) |r| rsum += r;
-        intercept -= cfg.lin_lr * @as(f32, @floatCast(rsum / @as(f64, n_f)));
-
-        if (log) |wr| {
-            if (cfg.verbose_eval != 0 and
-                (epoch % (cfg.verbose_eval * 10) == 0 or epoch + 1 == cfg.lin_epochs))
-            {
-                try wr.print("[{d:>4}] |dw|max={e:.3}\n", .{ epoch, max_delta });
-                try wr.flush();
-            }
-        }
-        if (max_delta < cfg.lin_tol) {
-            epoch += 1;
-            break;
-        }
-    }
+    const w = try gpa.alloc(f32, p);
+    errdefer gpa.free(w);
+    for (w, theta[0..p]) |*d, s| d.* = @floatCast(s);
 
     var model = Linear{
         .gpa = gpa,
         .design = design,
         .w = w,
-        .intercept = intercept,
+        .intercept = @floatCast(theta[p]),
         .objective = cfg.objective,
         .n_features = ds.n_features,
     };
@@ -427,5 +820,68 @@ pub fn train(
         valid_ns = prof.now() - wall0;
     }
 
-    return .{ .model = model, .epochs = epoch, .score = score, .valid_ns = valid_ns };
+    return .{ .model = model, .epochs = epochs, .score = score, .valid_ns = valid_ns };
+}
+
+// ------------------------------------------------------------------- tests
+
+const testing = std.testing;
+
+test "pseudoGrad picks the least-magnitude subgradient at a zero coefficient" {
+    var theta = [_]f64{ 2.0, -2.0, 0.0, 0.0, 0.0, 0.0 };
+    var pr = Problem{
+        .pool = undefined,
+        .design = undefined,
+        .ds = undefined,
+        .objective = .logistic,
+        .scale_pos_weight = 1,
+        .l2 = 0,
+        .l1 = 0.5,
+        .theta = &theta,
+        .wf = &.{},
+        .z = &.{},
+        .resid = &.{},
+        .loss_part = &.{},
+        .rsum_part = &.{},
+        .chunks = 1,
+        .size = 1,
+    };
+    //              w>0   w<0  w=0,g steep -  w=0,g steep +  w=0,g inside  intercept
+    const g = [_]f64{ 1.0, 1.0, -3.0, 3.0, 0.25, 7.0 };
+    var out: [6]f64 = undefined;
+    pseudoGrad(&pr, &g, &out);
+
+    try testing.expectEqual(@as(f64, 1.5), out[0]); // g + l1, sign of w
+    try testing.expectEqual(@as(f64, 0.5), out[1]); // g - l1, sign of w
+    try testing.expectEqual(@as(f64, -2.5), out[2]); // left derivative still negative
+    try testing.expectEqual(@as(f64, 2.5), out[3]); // right derivative still positive
+    // |g| < l1: zero is a minimum along this coordinate, so the subgradient
+    // containing zero is the least-magnitude one and the coefficient stays.
+    try testing.expectEqual(@as(f64, 0.0), out[4]);
+    try testing.expectEqual(@as(f64, 7.0), out[5]); // the intercept is unpenalised
+
+    // With no L1 term it must be the plain gradient, untouched.
+    pr.l1 = 0;
+    pseudoGrad(&pr, &g, &out);
+    try testing.expectEqualSlices(f64, &g, &out);
+}
+
+test "projectOrthant zeroes exactly the coefficients that crossed" {
+    //                   stays  crossed  stays  crossed  from zero, allowed
+    const from = [_]f64{ 2.0, 2.0, -2.0, -2.0, 0.0, 0.0, 99.0 };
+    const trial = [_]f64{ 1.0, -1.0, -1.0, 1.0, 0.5, -0.5, -99.0 };
+    // At a zero coefficient the orthant is the one the pseudo-gradient points
+    // into, i.e. -pg: negative pg admits a positive step and vice versa.
+    const pg = [_]f64{ 0, 0, 0, 0, -1.0, -1.0, 0 };
+    var t = trial;
+    projectOrthant(&t, &from, &pg);
+    try testing.expectEqualSlices(f64, &.{
+        1.0, // same sign as before: kept
+        0.0, // crossed from + to -: clipped
+        -1.0, // same sign: kept
+        0.0, // crossed from - to +: clipped
+        0.5, // left zero in the direction -pg allows
+        0.0, // left zero against -pg: clipped back
+        -99.0, // the intercept is not in the orthant logic at all
+    }, &t);
 }
