@@ -60,6 +60,10 @@ const Bin16 = extern struct { g: f64 = 0, h: f64 = 0 };
 /// Four f64 lanes: g, h, n, unused. 32 bytes, naturally aligned, so the whole
 /// update is one vector load, one add, one store -- counts included.
 const Vec4 = @Vector(4, f64);
+/// Two lanes: gradient and hessian only, 16 bytes. This is xgboost's shape —
+/// it constrains splits by hessian sum and never stores a row count. Here to
+/// price what the count lane costs in the layout the code actually uses.
+const Vec2 = @Vector(2, f64);
 
 // ---------------------------------------------------------------- kernels
 
@@ -269,6 +273,17 @@ fn vec4RowMajorRuntime4(hist: []Vec4, bins_rm: []const u8, rows: []const u32, gr
     }
 }
 
+/// Row-major, two-lane bins: no count.
+fn vec2RowMajor(hist: []Vec2, bins_rm: []const u8, rows: []const u32, grads: []const GradPair) void {
+    const off = comptime offsetsFor(Vec2);
+    for (rows, 0..) |row, i| {
+        const rb = bins_rm[row * N_FEAT ..][0..N_FEAT];
+        const g = grads[i];
+        const v = Vec2{ g.g, g.h };
+        inline for (0..N_FEAT) |f| hist[off[f] + rb[f]] += v;
+    }
+}
+
 /// Two independent vector accumulators per feature, combined at the end.
 /// Breaks the serial dependency when consecutive rows land in the same bin,
 /// which is common for the narrow categorical columns.
@@ -330,6 +345,8 @@ fn run(
             if (T == Vec4) {
                 checksum += b[0];
                 count += b[2];
+            } else if (T == Vec2) {
+                checksum += b[0];
             } else {
                 checksum += b.g;
                 if (@hasField(T, "n")) count += @floatFromInt(b.n);
@@ -424,6 +441,7 @@ pub fn main(init: std.process.Init) !void {
         try run("Bin24 row-major D=8", Bin24, out, &base, n, scalar24RowMajor, .{ bins_rm, rs, gs, 8 });
         try run("Vec4 row-major D=8", Vec4, out, &base, n, vec4RowMajor, .{ bins_rm, rs, gs, 8 });
         try run("Vec4 row-major, no prefetch", Vec4, out, &base, n, vec4RowMajorNoPf, .{ bins_rm, rs, gs });
+        try run("Vec2 row-major (no count)", Vec2, out, &base, n, vec2RowMajor, .{ bins_rm, rs, gs });
         try run("Vec4 rm, runtime feats", Vec4, out, &base, n, vec4RowMajorRuntime, .{ bins_rm, rs, gs, &off32rt, &feats, 8 });
         try run("Vec4 rm, runtime feats, 4 rows", Vec4, out, &base, n, vec4RowMajorRuntime4, .{ bins_rm, rs, gs, &off32rt, &feats, 8 });
     }

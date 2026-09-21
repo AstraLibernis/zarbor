@@ -19,6 +19,11 @@ pub const Phase = enum {
     goss_select,
     select_rows,
     hist_build,
+    /// Sub-phases of `hist_build`: clearing the private slots, accumulating,
+    /// and reducing them. Inside `hist_build`, not additional to it.
+    hist_clear,
+    hist_accum,
+    hist_reduce,
     hist_subtract,
     best_split,
     partition,
@@ -64,6 +69,7 @@ pub fn reset() void {
 fn nested(p: Phase) bool {
     return switch (p) {
         .part_count, .part_scatter, .part_copy => true,
+        .hist_clear, .hist_accum, .hist_reduce => true,
         else => false,
     };
 }
@@ -84,7 +90,7 @@ pub fn report(w: *std.Io.Writer) !void {
                 f.name,
                 t / 1_000_000,
                 100.0 * @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(sum)),
-                if (is_nested) "  (within partition)" else "",
+                if (is_nested) "  (nested)" else "",
             });
         }
     }

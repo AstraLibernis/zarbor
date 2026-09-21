@@ -18,6 +18,7 @@
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
 const Dataset = @import("data.zig").Dataset;
+const prof = @import("prof.zig");
 
 /// First-order and second-order derivative of the loss at one row.
 pub const GradPair = extern struct {
@@ -87,6 +88,20 @@ pub const Bank = struct {
     offsets: []u32,
     /// `n_workers * slotLen()`
     private: []Bin,
+    /// Build sequence number each worker last cleared its slot for, one per
+    /// cache line so the stamps do not share a line.
+    ///
+    /// Clearing the private slots was 108 ms of a 773 ms fit — 15%, on the
+    /// main thread, and entirely overhead: 147 KB memset per node build,
+    /// 6400 of them. A worker now clears its own slot on its first chunk, so
+    /// the clear is spread across the cores that are about to use it, and a
+    /// worker that never got a chunk is neither cleared nor reduced.
+    stamps: []u64,
+    /// Scratch for the workers that took part in the last build.
+    parts: []usize,
+    seq: u64 = 0,
+
+    const stamp_stride: usize = @max(1, std.atomic.cache_line / @sizeOf(u64));
 
     /// Bins per alignment step, chosen so `step * @sizeOf(Bin)` is a whole
     /// number of cache lines.
@@ -126,19 +141,32 @@ pub const Bank = struct {
         offsets[n_features] = @intCast(acc);
 
         const private = try gpa.alloc(Bin, n_workers * acc);
+        errdefer gpa.free(private);
+        const stamps = try gpa.alloc(u64, n_workers * stamp_stride);
+        errdefer gpa.free(stamps);
+        @memset(stamps, 0);
+        const parts = try gpa.alloc(usize, n_workers);
         return .{
             .gpa = gpa,
             .n_workers = n_workers,
             .n_features = n_features,
             .offsets = offsets,
             .private = private,
+            .stamps = stamps,
+            .parts = parts,
         };
     }
 
     pub fn deinit(b: *Bank) void {
         b.gpa.free(b.private);
+        b.gpa.free(b.stamps);
+        b.gpa.free(b.parts);
         b.gpa.free(b.offsets);
         b.* = undefined;
+    }
+
+    inline fn stamp(b: *const Bank, worker: usize) *u64 {
+        return &b.stamps[worker * stamp_stride];
     }
 
     /// Bins in one node's histogram slot.
@@ -187,12 +215,21 @@ const BuildCtx = struct {
     /// a 200-tree fit.
     grads: []const GradPair,
     features: []const u32,
+    seq: u64,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         const self: *BuildCtx = @ptrCast(@alignCast(ctx));
         const bank = self.bank;
         const span = bank.slotLen();
         const mine = bank.private[worker * span ..][0..span];
+        // First chunk of this build for this worker: clear, and leave the
+        // stamp behind so the reduce knows this slot holds data. Only the
+        // worker itself writes its stamp, and the pool's barrier publishes it.
+        const st = bank.stamp(worker);
+        if (st.* != self.seq) {
+            @memset(mine, .{});
+            st.* = self.seq;
+        }
         const nf = self.ds.n_features;
         const rm = self.ds.bins_rm;
         const offs = bank.offsets;
@@ -220,18 +257,19 @@ const BuildCtx = struct {
 /// which the caller already must not read.
 const ReduceCtx = struct {
     bank: *Bank,
-    active: usize,
+    /// Workers that actually took a chunk, ascending.
+    parts: []const usize,
     out: []Bin,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ReduceCtx = @ptrCast(@alignCast(ctx));
         const span = self.bank.slotLen();
+        const parts = self.parts;
         var i = begin;
         while (i < end) : (i += 1) {
-            var acc = self.bank.private[i];
-            var w: usize = 1;
-            while (w < self.active) : (w += 1) acc = acc.add(self.bank.private[w * span + i]);
+            var acc = self.bank.private[parts[0] * span + i];
+            for (parts[1..]) |w| acc = acc.add(self.bank.private[w * span + i]);
             self.out[i] = acc;
         }
     }
@@ -269,30 +307,48 @@ pub fn build(
     const parallel = bank.n_workers > 1 and rows.len > parallel_threshold;
     const active: usize = if (parallel) bank.n_workers else 1;
 
-    // One flat clear per worker. With a packed slot this is ~16 KB, which is
-    // cheaper than the old per-feature clear of only the selected features
-    // was over a uniform stride.
-    @memset(bank.private[0 .. active * span], .{});
-
+    // The clear happens inside the accumulate, on whichever workers take a
+    // chunk; see `Bank.stamps`.
+    bank.seq += 1;
     var bctx = BuildCtx{
         .bank = bank,
         .ds = ds,
         .rows = rows,
         .grads = grads,
         .features = features,
+        .seq = bank.seq,
     };
+    const t_a = prof.start();
     if (parallel) {
         pool.parallelFor(rows.len, &bctx, BuildCtx.run, parallel_threshold);
     } else {
         BuildCtx.run(&bctx, 0, 0, rows.len);
     }
+    prof.stop(.hist_accum, t_a);
 
-    if (active == 1) {
-        @memcpy(out[0..span], bank.private[0..span]);
+    const t_r = prof.start();
+    defer prof.stop(.hist_reduce, t_r);
+
+    // Ascending worker order, and slots nobody touched are skipped rather
+    // than added as zeros — which is why this stays bit-identical to reducing
+    // all of them.
+    var n_parts: usize = 0;
+    for (0..active) |w| {
+        if (bank.stamp(w).* == bank.seq) {
+            bank.parts[n_parts] = w;
+            n_parts += 1;
+        }
+    }
+    if (n_parts == 0) {
+        @memset(out[0..span], .{});
+        return;
+    }
+    if (n_parts == 1) {
+        @memcpy(out[0..span], bank.private[bank.parts[0] * span ..][0..span]);
         return;
     }
 
-    var rctx = ReduceCtx{ .bank = bank, .active = active, .out = out };
+    var rctx = ReduceCtx{ .bank = bank, .parts = bank.parts[0..n_parts], .out = out };
     pool.parallelFor(span, &rctx, ReduceCtx.run, 512);
 }
 

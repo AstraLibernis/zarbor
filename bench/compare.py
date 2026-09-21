@@ -152,7 +152,11 @@ def run_zgbdt_once(binary, csv, label, extra):
     # and quietly flattered zgbdt. The fair unit is "in-memory numeric data ->
     # trained model", which for zgbdt is bin + train and excludes CSV parsing,
     # since pandas has already paid that on the Python side.
-    ms = re.search(r"^train\s+(\d+) ms", r.stdout, re.M)
+    # Prefer the `fit` line, which excludes predicting and scoring the
+    # validation set. The reference libraries are called without an eval set,
+    # so charging zgbdt for work they never did is not a comparison.
+    fit = re.search(r"^fit\s+(\d+) ms", r.stdout, re.M)
+    ms = fit or re.search(r"^train\s+(\d+) ms", r.stdout, re.M)
     bin_ms = re.search(r"^bin\s+(\d+) ms", r.stdout, re.M)
     if not ms:
         return None, None, None, "no train time in output"
@@ -238,6 +242,9 @@ def main():
         auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
             f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", f"--max_depth={MAX_DEPTH}",
             f"--lambda={L2}", f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}",
+            # xgboost has no min_child_samples at all, so turn ours off rather
+            # than leave it at 20 against xgboost's hessian-only constraint.
+            "--min_child_samples=1", "--min_child_weight=1",
             "--grow_policy=depthwise"], a.repeat)
         add("GBDT (level-wise)", "zmodels", auc, fit_s, err or binnote(bin_s))
 

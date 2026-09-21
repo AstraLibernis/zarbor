@@ -20,6 +20,7 @@ const Pool = @import("pool.zig").Pool;
 const data = @import("data.zig");
 const Dataset = data.Dataset;
 const config = @import("config.zig");
+const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 
 /// Ceiling on one-hot expansion. A categorical with thousands of levels would
@@ -282,6 +283,9 @@ pub const TrainResult = struct {
     model: Linear,
     epochs: u32,
     score: f64,
+    /// Nanoseconds spent scoring the validation set; not part of fitting.
+    /// See `booster.TrainResult.valid_ns`.
+    valid_ns: u64,
 };
 
 inline fn softThreshold(v: f32, t: f32) f32 {
@@ -410,7 +414,9 @@ pub fn train(
     errdefer model.deinit();
 
     var score: f64 = std.math.nan(f64);
+    var valid_ns: u64 = 0;
     if (valid) |v| {
+        const wall0 = prof.now();
         const pred = try gpa.alloc(f32, v.n_rows);
         defer gpa.free(pred);
         model.predict(pool, v, pred);
@@ -418,7 +424,8 @@ pub fn train(
             .logistic => try metric.auc(gpa, pred, v.labels),
             .squared_error => metric.rmse(pred, v.labels),
         };
+        valid_ns = prof.now() - wall0;
     }
 
-    return .{ .model = model, .epochs = epoch, .score = score };
+    return .{ .model = model, .epochs = epoch, .score = score, .valid_ns = valid_ns };
 }

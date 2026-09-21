@@ -100,6 +100,8 @@ pub const Builder = struct {
     g: []const hist.GradPair,
     /// Destination for the parallel partition, which cannot be done in place.
     rows_out: []u32,
+    /// Per-chunk partial sums for `totalOf`.
+    total_partial: []hist.Bin,
     /// Per-chunk left-hand counts, plus one for the total.
     part_counts: []usize,
     part_left: []usize,
@@ -148,6 +150,8 @@ pub const Builder = struct {
         errdefer gpa.free(rows);
         const rows_out = try gpa.alloc(u32, ds.n_rows);
         errdefer gpa.free(rows_out);
+        const total_partial = try gpa.alloc(hist.Bin, total_chunks);
+        errdefer gpa.free(total_partial);
 
         const n_chunks = pool.workerCount() * 4 + 2;
         const part_counts = try gpa.alloc(usize, n_chunks);
@@ -177,6 +181,7 @@ pub const Builder = struct {
             .rows = rows,
             .g = &.{},
             .rows_out = rows_out,
+            .total_partial = total_partial,
             .part_counts = part_counts,
             .part_left = part_left,
             .part_right = part_right,
@@ -202,6 +207,7 @@ pub const Builder = struct {
         b.free_slots.deinit(gpa);
         gpa.free(b.rows);
         gpa.free(b.rows_out);
+        gpa.free(b.total_partial);
         gpa.free(b.part_counts);
         gpa.free(b.part_left);
         gpa.free(b.part_right);
@@ -288,6 +294,12 @@ pub const Builder = struct {
             .max_delta_step = b.cfg.max_delta_step,
         };
     }
+
+    /// Chunks the root sum is split into. Fixed, not derived from the thread
+    /// count, so the result does not depend on `--n_threads`.
+    const total_chunks: usize = 64;
+    /// Below this many rows the barrier costs more than the sum saves.
+    const total_parallel_min: usize = 1 << 15;
 
     /// Below this many rows the barriers cost more than the scan saves.
     ///
@@ -397,15 +409,50 @@ pub const Builder = struct {
         b.giveSlot(w.slot);
     }
 
-    fn totalOf(grads: []const hist.GradPair, rows: []const u32) hist.Bin {
+    /// Gradient and hessian sums over a node's rows.
+    ///
+    /// Only the root needs this — every other node inherits its total from
+    /// its parent's split — but the root is *every* row, so on 668k rows over
+    /// 200 trees the serial version was 46 ms, 7% of a fit and one of the
+    /// three things holding 8-thread scaling to 4.8x against xgboost's 5.3x.
+    ///
+    /// Summed in a fixed number of chunks, reduced in chunk order, regardless
+    /// of how many threads are running. A plain `parallelFor` over rows would
+    /// group the additions differently at one thread than at eight and make
+    /// the model depend on `--n_threads`, which is a property worth more than
+    /// the milliseconds.
+    fn totalOf(b: *Builder, rows: []const u32) hist.Bin {
+        const n = rows.len;
+        // Deliberately *not* also conditioned on the worker count: that would
+        // make one thread group the additions differently from eight, which
+        // is the thing this is arranged to avoid. `parallelFor` already runs
+        // the chunks inline when there is one worker.
+        if (n < total_parallel_min) {
+            var g: f64 = 0;
+            var h: f64 = 0;
+            for (rows) |r| {
+                const p = b.g[r];
+                g += p.g;
+                h += p.h;
+            }
+            return .{ .g = g, .h = h, .n = @floatFromInt(n) };
+        }
+
+        var ctx = TotalCtx{
+            .g = b.g,
+            .rows = rows,
+            .size = (n + total_chunks - 1) / total_chunks,
+            .partial = b.total_partial,
+        };
+        b.pool.parallelFor(total_chunks, &ctx, TotalCtx.run, 1);
+
         var g: f64 = 0;
         var h: f64 = 0;
-        for (rows) |r| {
-            const p = grads[r];
-            g += p.g;
-            h += p.h;
+        for (b.total_partial) |t| {
+            g += t.g;
+            h += t.h;
         }
-        return .{ .g = g, .h = h, .n = @floatFromInt(rows.len) };
+        return .{ .g = g, .h = h, .n = @floatFromInt(n) };
     }
 
     /// Fill `rows[0..n_active]` with the rows this tree will see.
@@ -486,7 +533,7 @@ pub const Builder = struct {
         // --- root ---
         try b.nodes.append(b.gpa, .{});
         const root_slot = b.takeSlot();
-        const root_total = totalOf(b.g, b.rows[0..b.n_active]);
+        const root_total = b.totalOf(b.rows[0..b.n_active]);
         const tree_feats = b.treeFeatures();
         const root_search = b.featuresFor(0);
         const t_rh = prof.start();
@@ -633,6 +680,34 @@ pub const Builder = struct {
 /// recovers which chunk a worker got — which is what lets the counting pass
 /// and the scatter pass agree on where each chunk's output belongs without any
 /// coordination between them.
+/// One chunk of the root's gradient sum.
+const TotalCtx = struct {
+    g: []const hist.GradPair,
+    rows: []const u32,
+    size: usize,
+    partial: []hist.Bin,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *TotalCtx = @ptrCast(@alignCast(ctx));
+        // `begin`/`end` index chunks, not rows, so a chunk always covers the
+        // same rows however the pool hands them out.
+        var c = begin;
+        while (c < end) : (c += 1) {
+            const lo = @min(c * self.size, self.rows.len);
+            const hi = @min(lo + self.size, self.rows.len);
+            var g: f64 = 0;
+            var h: f64 = 0;
+            for (self.rows[lo..hi]) |r| {
+                const p = self.g[r];
+                g += p.g;
+                h += p.h;
+            }
+            self.partial[c] = .{ .g = g, .h = h, .n = @floatFromInt(hi - lo) };
+        }
+    }
+};
+
 const PartCtx = struct {
     rows: []u32,
     rows_out: []u32,

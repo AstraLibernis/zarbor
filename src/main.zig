@@ -300,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
         .gbdt => {
             var res = try booster.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
             defer res.model.deinit();
-            try printTiming(out, io, t_train0, "tree", res.n_rounds);
+            try printTiming(out, io, t_train0, "tree", res.n_rounds, res.valid_ns);
             if (save_path) |sp| {
                 var b = try model_mod.fromBooster(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
                 defer b.deinit();
@@ -320,7 +320,7 @@ pub fn main(init: std.process.Init) !void {
         .random_forest => {
             var res = try forest.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
             defer res.model.deinit();
-            try printTiming(out, io, t_train0, "tree", res.n_trees);
+            try printTiming(out, io, t_train0, "tree", res.n_trees, res.valid_ns);
             if (save_path) |sp| {
                 var b = try model_mod.fromForest(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
                 defer b.deinit();
@@ -338,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
         .linear => {
             var res = try linear.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
             defer res.model.deinit();
-            try printTiming(out, io, t_train0, "epoch", res.epochs);
+            try printTiming(out, io, t_train0, "epoch", res.epochs, res.valid_ns);
             try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
             if (save_path) |sp| {
                 // The bundle borrows the fitted model's design and weights
@@ -372,14 +372,21 @@ pub fn main(init: std.process.Init) !void {
     try out.flush();
 }
 
+/// `valid_ns` is time spent predicting and scoring the validation set. It is
+/// reported separately rather than folded in, because it is not part of
+/// fitting: a benchmark against a library called with no eval set would
+/// otherwise charge us for work that library never did.
 fn printTiming(
     out: *std.Io.Writer,
     io: std.Io,
     t0: i128,
     comptime unit: []const u8,
     n: u32,
+    valid_ns: u64,
 ) !void {
     const ms = @divTrunc(std.Io.Timestamp.now(io, .awake).toNanoseconds() - t0, 1_000_000);
+    const vms = valid_ns / 1_000_000;
+    const fit: i128 = ms - @as(i128, @intCast(vms));
     try out.print(
         \\
         \\rounds  {d}
@@ -389,6 +396,7 @@ fn printTiming(
         ms,
         @as(f64, @floatFromInt(ms)) / @as(f64, @floatFromInt(@max(n, 1))),
     });
+    if (vms != 0) try out.print("fit     {d} ms  (+{d} ms validating)\n", .{ fit, vms });
 }
 
 /// Which scale the predictions are on. The booster reports raw log-odds; the

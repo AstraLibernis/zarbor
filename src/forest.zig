@@ -19,6 +19,7 @@ const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const tree = @import("tree.zig");
 const config = @import("config.zig");
+const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 
 pub const Forest = struct {
@@ -82,6 +83,9 @@ pub const TrainResult = struct {
     n_trees: u32,
     /// Validation score of the full ensemble, or NaN with no validation set.
     score: f64,
+    /// Nanoseconds spent predicting and scoring the validation set; not part
+    /// of fitting. See `booster.TrainResult.valid_ns`.
+    valid_ns: u64,
 };
 
 pub fn train(
@@ -126,6 +130,7 @@ pub fn train(
     defer builder.deinit();
 
     var score: f64 = std.math.nan(f64);
+    var valid_ns: u64 = 0;
     var round: u32 = 0;
     while (round < cfg.n_rounds) : (round += 1) {
         var t = try builder.grow(grads);
@@ -133,16 +138,34 @@ pub fn train(
         try model.trees.append(gpa, t);
 
         if (valid) |v| {
+            const wall0 = prof.now();
+            const t_vp = prof.start();
             var actx = AccumCtx{
                 .t = &model.trees.items[model.trees.items.len - 1],
                 .ds = v,
                 .sum = valid_sum,
             };
             pool.parallelFor(v.n_rows, &actx, AccumCtx.run, 4096);
+            prof.stop(.valid_predict, t_vp);
 
+            // Only score when something consumes it. A forest has no early
+            // stopping, so every round but the last (and any logged one) threw
+            // the number away — and the metric is a 133k-row sort on one
+            // thread. That was 1.18 s of a 2.35 s fit, the same mistake the
+            // booster made and had fixed.
+            const log_due = log != null and cfg.verbose_eval != 0 and
+                (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
+            if (!log_due and round + 1 != cfg.n_rounds) {
+                valid_ns += prof.now() - wall0;
+                continue;
+            }
+
+            const t_vm = prof.start();
             const inv: f32 = 1.0 / @as(f32, @floatFromInt(model.trees.items.len));
             for (valid_scratch, valid_sum) |*dst, s| dst.* = s * inv;
             score = try evaluate(gpa, cfg.objective, valid_scratch, v.labels);
+            prof.stop(.valid_metric, t_vm);
+            valid_ns += prof.now() - wall0;
 
             if (log) |w| {
                 if (cfg.verbose_eval != 0 and
@@ -164,6 +187,7 @@ pub fn train(
         .model = model,
         .n_trees = @intCast(model.trees.items.len),
         .score = score,
+        .valid_ns = valid_ns,
     };
 }
 
