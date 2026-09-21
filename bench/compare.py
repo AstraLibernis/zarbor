@@ -48,18 +48,19 @@ def load(csv, label, drop, valid_frac, seed):
     for c in drop:
         if c in df.columns:
             df = df.drop(columns=c)
-    # zmodels has no label encoder: a non-numeric column becomes categorical
-    # and its *dictionary id* is used as the target, where ids are assigned in
-    # order of first appearance. pd.factorize uses that same order, whereas
-    # pd.Categorical sorts — so factorize is what reproduces zmodels here. (A
-    # file whose first row is the positive class silently inverts the target;
-    # that is zmodels' footgun, reproduced rather than corrected, so the two
-    # sides are comparable.)
+    # zmodels encodes a string target by sorted class order, which is what
+    # sklearn's LabelEncoder does, so the two sides agree without a
+    # translation table. (It did once use the dictionary's first-appearance
+    # ids, which made the target depend on row order; both sides are on the
+    # sorted convention now.)
     ycol = df[label]
     if ycol.dtype == object or str(ycol.dtype) == "str":
-        codes, uniques = pd.factorize(ycol)
-        y = codes.astype(np.float32)
-        print(f"label {label!r} encoded by first appearance: "
+        uniques = np.sort(ycol.unique())
+        if len(uniques) != 2:
+            raise SystemExit(f"label {label!r} has {len(uniques)} classes; "
+                             "zmodels fits binary targets only")
+        y = (ycol.to_numpy() == uniques[1]).astype(np.float32)
+        print(f"label {label!r} encoded by sorted class order: "
               + ", ".join(f"{v!r}->{i}" for i, v in enumerate(uniques)))
     else:
         y = ycol.astype(np.float32).to_numpy()

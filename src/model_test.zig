@@ -495,3 +495,188 @@ test "a corrupt or truncated model file is rejected, not read past" {
     bad[4] = 99;
     try testing.expectError(error.UnsupportedModelVersion, model_mod.deserialise(gpa, bad));
 }
+
+// ---------------------------------------------------------- label encoding
+//
+// The trap here is the sibling of the one above, and it went unnoticed for
+// longer: a *target* column of strings also becomes a dictionary whose ids are
+// assigned by first appearance, and that id was used directly as the label. A
+// file whose first row holds the positive class trained the opposite model,
+// and a holdout whose first row disagreed with the training file's scored an
+// inverted AUC -- which still looks like a number.
+
+test "label encoding does not depend on row order" {
+    const gpa = testing.allocator;
+
+    var a = try frameWith(gpa, &.{ "No", "Yes", "No", "Yes" }, &.{ 1, 2, 3, 4 });
+    defer a.deinit();
+    var b = try frameWith(gpa, &.{ "Yes", "No", "Yes", "No" }, &.{ 1, 2, 3, 4 });
+    defer b.deinit();
+
+    // The two frames build opposite dictionaries...
+    try testing.expect(a.values[0][0] == b.values[0][0]);
+    try testing.expectEqualStrings("No", a.levels[0][@intFromFloat(a.values[0][0])]);
+    try testing.expectEqualStrings("Yes", b.levels[0][@intFromFloat(b.values[0][0])]);
+
+    // ...and the encoder makes them agree, because it orders by string.
+    var enc_a = try data.LabelEncoder.fromColumn(gpa, &a, 0, null);
+    defer enc_a.deinit();
+    var enc_b = try data.LabelEncoder.fromColumn(gpa, &b, 0, null);
+    defer enc_b.deinit();
+
+    const ya = try enc_a.encode(gpa, &a, 0);
+    defer gpa.free(ya);
+    const yb = try enc_b.encode(gpa, &b, 0);
+    defer gpa.free(yb);
+
+    try testing.expectEqualSlices(f32, &.{ 0, 1, 0, 1 }, ya);
+    try testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0 }, yb);
+    // Same row content, same number, whichever file it came from.
+    for (0..4) |i| {
+        const sa = a.levels[0][@as(usize, @intFromFloat(a.values[0][i]))];
+        const sb = b.levels[0][@as(usize, @intFromFloat(b.values[0][i]))];
+        if (std.mem.eql(u8, sa, sb)) try testing.expectEqual(ya[i], yb[i]);
+    }
+}
+
+test "--pos-label overrides the sorted order" {
+    const gpa = testing.allocator;
+    var f = try frameWith(gpa, &.{ "abnormal", "normal", "abnormal" }, &.{ 1, 2, 3 });
+    defer f.deinit();
+
+    // Sorted puts the clinically interesting class at 0, which is backwards.
+    var plain = try data.LabelEncoder.fromColumn(gpa, &f, 0, null);
+    defer plain.deinit();
+    try testing.expectEqual(@as(?usize, 1), plain.classIndex("normal"));
+
+    var forced = try data.LabelEncoder.fromColumn(gpa, &f, 0, "abnormal");
+    defer forced.deinit();
+    try testing.expectEqual(@as(?usize, 1), forced.classIndex("abnormal"));
+
+    const y = try forced.encode(gpa, &f, 0);
+    defer gpa.free(y);
+    try testing.expectEqualSlices(f32, &.{ 1, 0, 1 }, y);
+
+    try testing.expectError(
+        error.PosLabelNotFound,
+        data.LabelEncoder.fromColumn(gpa, &f, 0, "Abnormal"),
+    );
+    // A numeric target has no classes to name, so the flag is a mistake
+    // rather than a no-op.
+    try testing.expectError(
+        error.PosLabelOnNumericTarget,
+        data.LabelEncoder.fromColumn(gpa, &f, 1, "abnormal"),
+    );
+}
+
+test "targets the models cannot represent are rejected" {
+    const gpa = testing.allocator;
+
+    // Three classes would encode as 0,1,2 and be fitted as if those were
+    // magnitudes.
+    var three = try frameWith(gpa, &.{ "a", "b", "c", "a" }, &.{ 1, 2, 3, 4 });
+    defer three.deinit();
+    try testing.expectError(
+        error.MulticlassNotSupported,
+        data.LabelEncoder.fromColumn(gpa, &three, 0, null),
+    );
+
+    var one = try frameWith(gpa, &.{ "a", "a", "a" }, &.{ 1, 2, 3 });
+    defer one.deinit();
+    try testing.expectError(
+        error.SingleClassTarget,
+        data.LabelEncoder.fromColumn(gpa, &one, 0, null),
+    );
+}
+
+test "a missing or unknown label is an error, never a quiet zero" {
+    const gpa = testing.allocator;
+
+    var f = try frameWith(gpa, &.{ "No", "Yes", "No" }, &.{ 1, 2, 3 });
+    defer f.deinit();
+    var enc = try data.LabelEncoder.fromColumn(gpa, &f, 0, null);
+    defer enc.deinit();
+
+    // A hole in the target: class 0 is a legitimate value, so it cannot also
+    // mean "absent".
+    var holed = try frameWith(gpa, &.{ "No", "Yes", "No" }, &.{ 1, 2, 3 });
+    defer holed.deinit();
+    holed.values[0][1] = std.math.nan(f32);
+    try testing.expectError(error.MissingLabelValue, enc.encode(gpa, &holed, 0));
+    // Same rule on the numeric path, where NaN otherwise flows straight
+    // through into the gradient.
+    var num_enc = data.LabelEncoder{ .gpa = gpa };
+    holed.values[1][2] = std.math.nan(f32);
+    try testing.expectError(error.MissingLabelValue, num_enc.encode(gpa, &holed, 1));
+
+    // A class the model never saw cannot be scored against.
+    var typo = try frameWith(gpa, &.{ "No", "Yes", "Yse" }, &.{ 1, 2, 3 });
+    defer typo.deinit();
+    try testing.expectError(error.UnseenLabelClass, enc.encode(gpa, &typo, 0));
+
+    // Numbers where strings were expected, and the reverse.
+    try testing.expectError(error.LabelKindMismatch, enc.encode(gpa, &f, 1));
+    try testing.expectError(error.LabelKindMismatch, num_enc.encode(gpa, &f, 0));
+}
+
+test "logistic rejects a numeric target outside [0,1]" {
+    const gpa = testing.allocator;
+    var f = try frameWith(gpa, &.{ "No", "Yes", "No" }, &.{ 1, 2, 1 });
+    defer f.deinit();
+
+    var enc = try data.LabelEncoder.fromColumn(gpa, &f, 1, null);
+    defer enc.deinit();
+    const y = try enc.encode(gpa, &f, 1);
+    defer gpa.free(y);
+
+    // A {1,2}-coded target is the classic mistake; squared error is happy
+    // with it, logistic is not.
+    try testing.expectError(error.LabelOutOfRange, enc.validate(y, .logistic));
+    try enc.validate(y, .squared_error);
+    try enc.validate(&.{ 0, 1, 0.5 }, .logistic);
+    try testing.expectError(error.LabelOutOfRange, enc.validate(&.{std.math.nan(f32)}, .logistic));
+}
+
+test "a saved model decodes a holdout with its own class order" {
+    // The end-to-end version: train-time classes travel in the .zm file and
+    // are applied to a holdout that orders its target the other way round.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var train = try frameWith(gpa, &.{ "No", "Yes", "No", "Yes" }, &.{ 1, 2, 3, 4 });
+    defer train.deinit();
+    var enc = try data.LabelEncoder.fromColumn(gpa, &train, 0, null);
+    defer enc.deinit();
+
+    var train_ds = try data.quantise(gpa, pool, &train, .{}, .{ .col = 0, .enc = &enc }, &.{});
+    defer train_ds.deinit();
+    try testing.expectEqualSlices(f32, &.{ 0, 1, 0, 1 }, train_ds.labels);
+
+    var bundle = model_mod.Bundle{
+        .gpa = gpa,
+        .kind = .gbdt,
+        .schema = try data.Schema.fromDataset(gpa, &train_ds),
+        .objective = .logistic,
+    };
+    defer bundle.deinit();
+    try bundle.setLabel("colour", &enc);
+
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+    var back = try model_mod.deserialise(gpa, bytes);
+    defer back.deinit();
+    try testing.expectEqualStrings("colour", back.label);
+    try testing.expectEqual(@as(usize, 2), back.classes.len);
+    try testing.expectEqualStrings("No", back.classes[0]);
+    try testing.expectEqualStrings("Yes", back.classes[1]);
+
+    // Holdout with the opposite first appearance. Read as raw ids this would
+    // give {0,1,0,1} -- the exact inversion of the truth.
+    var holdout = try frameWith(gpa, &.{ "Yes", "No", "Yes", "No" }, &.{ 4, 3, 2, 1 });
+    defer holdout.deinit();
+    const view = back.encoder();
+    var ds = try data.applySchema(gpa, pool, &holdout, &back.schema, .{ .col = 0, .enc = &view });
+    defer ds.deinit();
+    try testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0 }, ds.labels);
+}

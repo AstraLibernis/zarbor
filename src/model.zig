@@ -20,7 +20,9 @@ const linear = @import("linear.zig");
 const Pool = @import("pool.zig").Pool;
 
 pub const magic = "ZMDL";
-pub const format_version: u32 = 1;
+/// 2 added the label encoding. A version-1 file still loads; it simply has
+/// no class order, which the scoring path rejects rather than guessing at.
+pub const format_version: u32 = 2;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -38,13 +40,46 @@ pub const Bundle = struct {
     base_score: f32 = 0,
     trees: []tree.Tree = &.{},
     lin: ?linear.Linear = null,
+    /// Target column the model was trained on. Empty when unknown.
+    label: []u8 = &.{},
+    /// Class order for a string target, `classes[0]` meaning label 0. Empty
+    /// for a numeric target, and for models written before format 2.
+    classes: [][]u8 = &.{},
 
     pub fn deinit(b: *Bundle) void {
         for (b.trees) |*t| t.deinit(b.gpa);
         if (b.trees.len != 0) b.gpa.free(b.trees);
         if (b.lin) |*l| l.deinit();
         b.schema.deinit();
+        if (b.label.len != 0) b.gpa.free(b.label);
+        for (b.classes) |c| b.gpa.free(c);
+        if (b.classes.len != 0) b.gpa.free(b.classes);
         b.* = undefined;
+    }
+
+    /// Record the target column and its encoding, copying both.
+    pub fn setLabel(b: *Bundle, name: []const u8, enc: *const data.LabelEncoder) !void {
+        const label = try b.gpa.dupe(u8, name);
+        errdefer b.gpa.free(label);
+        const classes = try b.gpa.alloc([]u8, enc.classes.len);
+        var made: usize = 0;
+        errdefer {
+            for (classes[0..made]) |c| b.gpa.free(c);
+            b.gpa.free(classes);
+        }
+        while (made < enc.classes.len) : (made += 1) classes[made] = try b.gpa.dupe(u8, enc.classes[made]);
+
+        if (b.label.len != 0) b.gpa.free(b.label);
+        for (b.classes) |c| b.gpa.free(c);
+        if (b.classes.len != 0) b.gpa.free(b.classes);
+        b.label = label;
+        b.classes = classes;
+    }
+
+    /// A borrowing encoder over `classes`. Valid only while the bundle is,
+    /// and must never be deinitialised.
+    pub fn encoder(b: *const Bundle) data.LabelEncoder {
+        return data.LabelEncoder.view(b.gpa, b.classes);
     }
 
     pub fn nTrees(b: *const Bundle) usize {
@@ -246,6 +281,9 @@ pub fn serialise(gpa: std.mem.Allocator, b: *const Bundle) ![]u8 {
     try putU8(gpa, &buf, @intFromEnum(b.kind));
     try putU8(gpa, &buf, @intFromEnum(b.objective));
     try putF32(gpa, &buf, b.base_score);
+    try putBytes(gpa, &buf, b.label);
+    try putU32(gpa, &buf, @intCast(b.classes.len));
+    for (b.classes) |c| try putBytes(gpa, &buf, c);
     try writeSchema(gpa, &buf, &b.schema);
 
     switch (b.kind) {
@@ -276,11 +314,27 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     var r = Reader{ .buf = bytes };
     if (!std.mem.eql(u8, try r.take(4), magic)) return error.NotAModelFile;
     const ver = try r.u32v();
-    if (ver != format_version) return error.UnsupportedModelVersion;
+    if (ver == 0 or ver > format_version) return error.UnsupportedModelVersion;
 
     const kind = std.enums.fromInt(Kind, try r.u8v()) orelse return error.BadModelFile;
     const obj = std.enums.fromInt(config.Objective, try r.u8v()) orelse return error.BadModelFile;
     const base = try r.f32v();
+
+    var label: []u8 = &.{};
+    errdefer if (label.len != 0) gpa.free(label);
+    var classes: [][]u8 = &.{};
+    var n_classes: usize = 0;
+    errdefer {
+        for (classes[0..n_classes]) |c| gpa.free(c);
+        if (classes.len != 0) gpa.free(classes);
+    }
+    if (ver >= 2) {
+        label = try gpa.dupe(u8, try r.bytes());
+        const nc = try r.u32v();
+        if (nc > 2) return error.BadModelFile;
+        classes = try gpa.alloc([]u8, nc);
+        while (n_classes < nc) : (n_classes += 1) classes[n_classes] = try gpa.dupe(u8, try r.bytes());
+    }
 
     var schema = try readSchema(gpa, &r);
     errdefer schema.deinit();
@@ -291,6 +345,8 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
         .schema = schema,
         .objective = obj,
         .base_score = base,
+        .label = label,
+        .classes = classes,
     };
 
     switch (kind) {

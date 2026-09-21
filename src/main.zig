@@ -19,6 +19,8 @@ const usage =
     \\
     \\  --algo=NAME         gbdt | random_forest | linear   (default gbdt)
     \\  --label=NAME        target column (required)
+    \\  --pos-label=NAME    class of a string target to encode as 1
+    \\                      (default: classes sorted, so "No"<"Yes" -> Yes=1)
     \\  --drop=NAME         exclude a column; repeatable
     \\  --valid-frac=F      fraction held out for validation (default 0.2)
     \\  --split-seed=N      seed for the validation split (default 1)
@@ -34,7 +36,8 @@ const usage =
     \\
     \\predict and blend bin the new data with the schema stored in the model,
     \\so categorical levels map to the same bins they did in training. Pass
-    \\--label=NAME as well to score against a labelled holdout.
+    \\--label=NAME as well to score against a labelled holdout; it is decoded
+    \\with the model's own class order, not the holdout file's.
     \\
     \\Any Config field is also a flag, e.g.:
     \\  --n_rounds=800 --learning_rate=0.05 --max_depth=7 --lambda=2.0
@@ -89,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
     var max_bytes: usize = 1 << 31;
     var split_col: ?[]const u8 = null;
     var save_path: ?[]const u8 = null;
+    var pos_label: ?[]const u8 = null;
 
     var drops: std.ArrayList([]const u8) = .empty;
     defer drops.deinit(gpa);
@@ -128,6 +132,8 @@ pub fn main(init: std.process.Init) !void {
 
         if (std.mem.eql(u8, key, "label")) {
             label = val;
+        } else if (std.mem.eql(u8, key, "pos-label")) {
+            pos_label = val;
         } else if (std.mem.eql(u8, key, "drop")) {
             try drops.append(gpa, val);
         } else if (std.mem.eql(u8, key, "valid-frac")) {
@@ -187,8 +193,25 @@ pub fn main(init: std.process.Init) !void {
         try drops.append(gpa, name);
     }
 
-    var full = try data.quantise(gpa, pool, &frame, cfg, label_col, drops.items);
+    // Fix the class order before anything reads the target. Left to the
+    // dictionary, "1" would mean whichever class the first row happened to
+    // hold, so the same data in a different row order would train the
+    // opposite model.
+    var enc = data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label) catch |err| {
+        try explainLabel(out, err, target);
+        return err;
+    };
+    defer enc.deinit();
+
+    var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+        try explainLabel(out, err, target);
+        return err;
+    };
     defer full.deinit();
+    enc.validate(full.labels, cfg.objective) catch |err| {
+        try explainLabel(out, err, target);
+        return err;
+    };
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
 
@@ -209,6 +232,10 @@ pub fn main(init: std.process.Init) !void {
         @divTrunc(t_read - t0, 1_000_000),
         @divTrunc(t_bin - t_read, 1_000_000),
     });
+    // Print the encoding rather than leaving it implicit: which class is 1
+    // decides the sign of every prediction, and it is the one thing a reader
+    // cannot check from the numbers alone.
+    try printEncoding(out, &enc);
     try out.flush();
 
     // --- train / validation split ---
@@ -271,6 +298,7 @@ pub fn main(init: std.process.Init) !void {
             if (save_path) |sp| {
                 var b = try model_mod.fromBooster(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
                 defer b.deinit();
+                try b.setLabel(target, &enc);
                 try model_mod.save(gpa, io, sp, &b);
                 try out.print("saved   {s}\n", .{sp});
             }
@@ -290,6 +318,7 @@ pub fn main(init: std.process.Init) !void {
             if (save_path) |sp| {
                 var b = try model_mod.fromForest(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
                 defer b.deinit();
+                try b.setLabel(target, &enc);
                 try model_mod.save(gpa, io, sp, &b);
                 try out.print("saved   {s}\n", .{sp});
             }
@@ -315,7 +344,13 @@ pub fn main(init: std.process.Init) !void {
                     .objective = cfg.objective,
                     .lin = res.model,
                 };
-                defer b.schema.deinit();
+                // Dropping the borrowed model first lets the normal deinit
+                // clean up everything the bundle does own.
+                defer {
+                    b.lin = null;
+                    b.deinit();
+                }
+                try b.setLabel(target, &enc);
                 try model_mod.save(gpa, io, sp, &b);
                 try out.print("saved   {s}\n", .{sp});
             }
@@ -470,7 +505,32 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     defer frame.deinit();
 
-    var ds = try data.applySchema(gpa, pool, &frame, &bundles.items[0].schema, label);
+    // Decode the holdout's target with the *model's* class order. This file
+    // built its own dictionary by first appearance, so reading its raw ids
+    // would silently invert the target whenever the two files disagree on
+    // which class appears first -- and an inverted AUC of 0.06 still looks
+    // like a number, not a bug.
+    var enc = bundles.items[0].encoder();
+    var label_spec: ?data.LabelSpec = null;
+    if (label) |name| {
+        const lc = frame.columnIndex(name) orelse return error.LabelColumnNotFound;
+        if (frame.kinds[lc] == .categorical and enc.classes.len == 0) {
+            try out.writeAll(
+                \\this model stores no label encoding, so a string target cannot
+                \\be decoded safely. Retrain to write one, or score without
+                \\--label.
+                \\
+            );
+            try out.flush();
+            std.process.exit(1);
+        }
+        label_spec = .{ .col = lc, .enc = &enc };
+    }
+
+    var ds = data.applySchema(gpa, pool, &frame, &bundles.items[0].schema, label_spec) catch |err| {
+        if (label) |name| try explainLabel(out, err, name);
+        return err;
+    };
     defer ds.deinit();
 
     // Blending models trained on different schemas would silently score the
@@ -563,6 +623,66 @@ fn writePredictions(
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
+/// Show which class became which number, or that the target was already
+/// numeric and untouched.
+fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
+    if (enc.classes.len == 0) {
+        try out.writeAll("encode  numeric target, used as-is\n");
+        return;
+    }
+    try out.writeAll("encode  ");
+    for (enc.classes, 0..) |c, i| {
+        if (i != 0) try out.writeAll("  ");
+        try out.print("\"{s}\"={d}", .{ c, i });
+    }
+    try out.writeAll("\n");
+}
+
+/// Turn a label-encoding error into a line that says what to do about it,
+/// then exit. These are the errors a user hits with a well-formed CSV and a
+/// wrong flag, so the bare error name is not enough -- and a stack trace
+/// through the binner is worse than nothing. Unrecognised errors are left to
+/// propagate, trace and all.
+fn explainLabel(out: *std.Io.Writer, err: anyerror, target: []const u8) !void {
+    const hint: []const u8 = switch (err) {
+        error.MulticlassNotSupported =>
+            \\has more than two distinct values. zmodels fits binary and
+            \\regression targets only; a multiclass column would otherwise be
+            \\encoded 0,1,2,... and fitted as if those were magnitudes.
+        ,
+        error.SingleClassTarget =>
+            \\has only one distinct value, so there is nothing to learn.
+        ,
+        error.EmptyTarget => "is empty.",
+        error.PosLabelNotFound =>
+            \\does not contain the class named by --pos-label. Run without it
+            \\to see the classes as parsed.
+        ,
+        error.PosLabelOnNumericTarget =>
+            \\is numeric, so --pos-label has nothing to name. Its values are
+            \\used as-is.
+        ,
+        error.MissingLabelValue =>
+            \\has missing values. A missing target cannot be guessed, and
+            \\treating it as the negative class would bias the fit.
+        ,
+        error.LabelOutOfRange =>
+            \\has values outside [0,1], which the logistic objective cannot
+            \\represent. Use --objective=squared_error, or recode the target.
+        ,
+        error.UnseenLabelClass =>
+            \\contains a class the model was not trained on.
+        ,
+        error.LabelKindMismatch =>
+            \\is numeric here but was a string in training, or the reverse.
+        ,
+        else => return,
+    };
+    try out.print("\nlabel column \"{s}\" {s}\n", .{ target, hint });
+    try out.flush();
+    std.process.exit(1);
+}
+
 fn info(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !void {
     var path: ?[]const u8 = null;
     var it = std.process.Args.Iterator.init(init.minimal.args);
@@ -583,6 +703,13 @@ fn info(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !vo
         \\features  {d}
         \\
     , .{ p, @tagName(b.kind), @tagName(b.objective), b.schema.n_features });
+
+    if (b.label.len != 0) {
+        try out.print("label     {s}", .{b.label});
+        for (b.classes, 0..) |c, i| try out.print("{s}\"{s}\"={d}", .{ if (i == 0) "  " else ", ", c, i });
+        if (b.classes.len == 0) try out.writeAll("  (numeric)");
+        try out.writeAll("\n");
+    }
 
     switch (b.kind) {
         .gbdt, .forest => {
