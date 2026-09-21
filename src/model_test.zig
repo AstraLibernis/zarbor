@@ -688,3 +688,41 @@ test "a saved model decodes a holdout with its own class order" {
     defer ds.deinit();
     try testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0 }, ds.labels);
 }
+
+test "a categorical column cannot overflow the bin byte" {
+    // Bins are u8 and bin 0 is reserved for missing, so 255 levels is the
+    // most a column can carry. The dictionary guard used to admit 256, and
+    // `binOne` then cast 255 + 1 into a u8: a panic in Debug, and in
+    // ReleaseFast a silent truncation to 0 that folded the last level into
+    // the missing bin and trained on it without a word. Checked from both
+    // sides of the boundary because an off-by-one is exactly what went wrong.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var names: [260][8]u8 = undefined;
+    var levels: [260][]const u8 = undefined;
+    for (&names, &levels, 0..) |*buf, *lvl, i| {
+        lvl.* = try std.fmt.bufPrint(buf, "c{d}", .{i});
+    }
+
+    {
+        var f = try frameWith(gpa, levels[0..255], &[_]f32{0} ** 255);
+        defer f.deinit();
+        var ds = try data.quantise(gpa, pool, &f, .{}, null, &.{});
+        defer ds.deinit();
+        // 255 levels -> bins 1..255, plus the missing bin.
+        try testing.expectEqual(@as(u16, 256), ds.n_bins[0]);
+        var max_bin: u8 = 0;
+        for (ds.column(0)) |b| max_bin = @max(max_bin, b);
+        try testing.expectEqual(@as(u8, 255), max_bin);
+    }
+
+    {
+        var f = try frameWith(gpa, levels[0..256], &[_]f32{0} ** 256);
+        defer f.deinit();
+        // `quantise` collapses a worker's error into BinningFailed; the CSV
+        // path reports CategoricalTooWide directly, before any binning.
+        try testing.expectError(error.BinningFailed, data.quantise(gpa, pool, &f, .{}, null, &.{}));
+    }
+}

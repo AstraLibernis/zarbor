@@ -247,7 +247,15 @@ pub fn readCsv(
                 if (dict_storage[c] == null) dict_storage[c] = .empty;
                 const m = &dict_storage[c].?;
                 if (m.contains(t)) continue;
-                if (lists[c].items.len >= max_bins) return error.CategoricalTooWide;
+                // `max_bins - 1`, not `max_bins`: bin 0 is reserved for
+                // missing, so level `j` becomes bin `j + 1` and the highest
+                // level a `u8` bin can address is 254. Admitting a 256th
+                // level made `binOne` compute 256 — a panic in Debug, and in
+                // ReleaseFast a silent truncation to 0, which folded that
+                // level into the missing bin and trained on it without a
+                // word. The numeric path has always reserved the bin
+                // (`max_bin - 1` below); this one did not.
+                if (lists[c].items.len >= max_bins - 1) return error.CategoricalTooWide;
                 const owned = try gpa.dupe(u8, t);
                 errdefer gpa.free(owned);
                 try m.put(gpa, owned, @intCast(lists[c].items.len));
@@ -415,6 +423,10 @@ const BinCtx = struct {
         if (self.src.kinds[col] == .categorical) {
             // Ids are already dense and small; bin j+1 is level j.
             const card = self.src.levels[col].len;
+            // Checked here as well as at dictionary build time, because this
+            // is where the `u8` cast is: a frame assembled by any other route
+            // must not be able to reach it with an id that does not fit.
+            if (card >= max_bins) return error.CategoricalTooWide;
             for (vals, out) |v, *b| {
                 b.* = if (std.math.isNan(v)) 0 else @intCast(@as(usize, @intFromFloat(v)) + 1);
             }
@@ -694,6 +706,10 @@ pub fn quantise(
     const edges = try gpa.alloc([]f32, n_features);
     errdefer gpa.free(edges);
     @memset(edges, &.{});
+    // The workers below fill these, and if one of them fails the others have
+    // already allocated. Freeing only the outer array leaked every numeric
+    // feature's cut points on the `BinningFailed` path.
+    errdefer for (edges) |e| if (e.len != 0) gpa.free(e);
     const kinds = try gpa.alloc(ColumnKind, n_features);
     errdefer gpa.free(kinds);
     const names = try gpa.alloc([]u8, n_features);
@@ -725,13 +741,21 @@ pub fn quantise(
     const levels = try gpa.alloc([][]u8, n_features);
     errdefer gpa.free(levels);
     @memset(levels, &.{});
+    errdefer for (levels) |ls| {
+        for (ls) |l| if (l.len != 0) gpa.free(l);
+        if (ls.len != 0) gpa.free(ls);
+    };
     for (0..n_features) |f| {
         const col = feats.items[f];
         if (kinds[f] != .categorical) continue;
         const src_levels = src.levels[col];
         const copy = try gpa.alloc([]u8, src_levels.len);
-        for (src_levels, copy) |from, *to| to.* = try gpa.dupe(u8, from);
+        // Published empty *before* the fallible dupes, so a failure partway
+        // leaves the errdefer above a well-formed array to walk rather than
+        // uninitialised pointers.
+        @memset(copy, &.{});
         levels[f] = copy;
+        for (src_levels, copy) |from, *to| to.* = try gpa.dupe(u8, from);
     }
 
     const bins_rm = try buildRowMajor(gpa, pool, bins, src.n_rows, n_features);

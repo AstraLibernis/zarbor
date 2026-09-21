@@ -595,13 +595,35 @@ pub const Builder = struct {
                 .right = ri,
             };
 
+            // Will these children only ever become leaves?
+            //
+            // `makeLeaf` reads a node's total, its row span and its slot --
+            // never its histogram or its split. So for a child that is
+            // certain to be a leaf, building the histogram and searching it
+            // is pure waste, and it is not a small amount: half of a
+            // depthwise tree's nodes are its last level, so half of all
+            // histogram builds and split searches were thrown away.
+            //
+            // Two cases are decidable here. The depth cap is static. The leaf
+            // cap is too, because `leaf_count` at pop time never decreases --
+            // a pop either makes a leaf (queue -1, leaves +1) or splits
+            // (queue -1 +2, leaves +0) -- so once the budget is reached every
+            // remaining pop is a leaf. `b.queue` is post-removal here, and
+            // the next pop will see `leaves + queue + 2`.
+            const at_depth_cap = b.cfg.max_depth != 0 and w.depth + 1 >= b.cfg.max_depth;
+            const at_leaf_cap = b.leaves.items.len + b.queue.items.len + 2 >= leaf_cap;
+            const children_are_leaves = at_depth_cap or at_leaf_cap;
+
             const slot_l = b.takeSlot();
             const slot_r = b.takeSlot();
 
             // Accumulate the smaller side; derive the larger by subtraction.
             const n_left = mid - w.start;
             const n_right = w.end - mid;
-            if (n_left <= n_right) {
+            if (children_are_leaves) {
+                // Nothing to build. The slots are still taken and released
+                // through the normal path so the free list behaves the same.
+            } else if (n_left <= n_right) {
                 const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.g, tree_feats, b.slot(slot_l));
                 prof.stop(.hist_build, t_hb);
@@ -619,11 +641,25 @@ pub const Builder = struct {
             b.giveSlot(w.slot);
 
             // Each child draws its own candidate features, as XGBoost does.
+            // The draws happen even when the search is skipped: they consume
+            // the builder's RNG, and skipping them would shift every later
+            // sample and change the trees under `colsample_bylevel/bynode`.
             const t_bs = prof.start();
+            var left_split: hist.Split = .{};
+            var right_split: hist.Split = .{};
+            // Draw, use, draw, use. `featuresFor` hands back a slice of one
+            // shared buffer, so hoisting both draws above both searches makes
+            // them alias and the left child gets searched with the right
+            // child's sample -- silently, and only when a colsample is below
+            // 1.0. The draws happen even when the search is skipped: they
+            // consume the builder's RNG, and dropping them would shift every
+            // later sample.
             const left_search = b.featuresFor(w.depth + 1);
-            const left_split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
+            if (!children_are_leaves)
+                left_split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
             const right_search = b.featuresFor(w.depth + 1);
-            const right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
+            if (!children_are_leaves)
+                right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
             prof.stop(.best_split, t_bs);
 
             try b.queue.append(b.gpa, .{
