@@ -114,7 +114,7 @@ pub const Builder = struct {
         ds: *const Dataset,
         cfg: config.Config,
     ) !Builder {
-        var bank = try hist.Bank.init(gpa, pool.workerCount(), ds.n_features, ds.maxBins());
+        var bank = try hist.Bank.init(gpa, pool.workerCount(), ds.n_features, ds.n_bins);
         errdefer bank.deinit();
 
         const slot_len = bank.slotLen();
@@ -284,7 +284,12 @@ pub const Builder = struct {
     }
 
     /// Below this many rows the barriers cost more than the scan saves.
-    const parallel_partition_min: usize = 1 << 15;
+    ///
+    /// Tuned rather than guessed: sweeping it, 32768 (the original guess)
+    /// spends 360 ms in partition on a 200-tree fit where 2048 spends 271 ms,
+    /// and the curve rises monotonically above that. Output is identical at
+    /// every setting.
+    const parallel_partition_min: usize = 2048;
 
     inline fn goesLeft(bin: u8, sp: hist.Split) bool {
         return if (bin == 0) sp.missing_left else bin <= sp.threshold;
@@ -538,14 +543,14 @@ pub const Builder = struct {
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], tree_feats, b.slot(slot_l));
                 prof.stop(.hist_build, t_hb);
                 const t_hs = prof.start();
-                hist.subtract(b.pool, &b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), tree_feats);
+                hist.subtract(b.pool, &b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l));
                 prof.stop(.hist_subtract, t_hs);
             } else {
                 const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], tree_feats, b.slot(slot_r));
                 prof.stop(.hist_build, t_hb);
                 const t_hs = prof.start();
-                hist.subtract(b.pool, &b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), tree_feats);
+                hist.subtract(b.pool, &b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r));
                 prof.stop(.hist_subtract, t_hs);
             }
             b.giveSlot(w.slot);

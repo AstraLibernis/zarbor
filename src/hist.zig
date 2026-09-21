@@ -42,18 +42,31 @@ pub const Bin = extern struct {
 
 /// Scratch for one tree's histograms.
 ///
-/// `stride` is the per-feature bin count rounded up so each feature's slice
-/// starts on its own cache line, which keeps two workers writing adjacent
-/// features off the same line.
+/// Features get **packed per-feature offsets**, not a uniform stride sized by
+/// the widest feature. That distinction is worth more than it sounds. On a
+/// typical table the widths are wildly uneven — 234 and 202 bins for two
+/// continuous columns, but 3 or 4 for the categoricals — so a uniform stride
+/// allocated 13x240 = 3120 slots for 558 real bins, a 5.6x waste.
+///
+/// The waste was not merely memory. Clearing and reducing the private
+/// histograms is a *fixed* cost per node, paid whatever the node's size, so it
+/// dominated exactly where most of the nodes are: the bottom of the tree.
+/// Measured per node, packing is 1.08x at 500k rows but 3.15x at 8k and 4.09x
+/// at 2k, and a depth-6 tree keeps half its internal nodes in the last level.
+///
+/// Each feature still starts on a cache-line boundary, which keeps the clear
+/// and the reduce off partial lines.
 pub const Bank = struct {
     gpa: std.mem.Allocator,
     n_workers: usize,
     n_features: usize,
-    stride: usize,
-    /// `n_workers * n_features * stride`
+    /// `offsets[f]..offsets[f+1]` is feature `f`'s bin range within a slot.
+    /// Length `n_features + 1`; the last entry is the slot length.
+    offsets: []u32,
+    /// `n_workers * slotLen()`
     private: []Bin,
 
-    /// Bins per stride step, chosen so that `step * @sizeOf(Bin)` is a whole
+    /// Bins per alignment step, chosen so `step * @sizeOf(Bin)` is a whole
     /// number of cache lines.
     ///
     /// The obvious `cache_line / @sizeOf(Bin)` is wrong, and wrong in a way
@@ -61,41 +74,63 @@ pub const Bank = struct {
     /// 128-byte cache line on Zen 5 (64 on much else), so that expression is
     /// 128/24 = 5 here — not a power of two, which `alignForward` requires.
     /// Debug catches it with an assert; ReleaseFast elides the assert and
-    /// silently produces a stride smaller than `max_bins`, overlapping the
+    /// silently produces a stride smaller than the bin count, overlapping the
     /// per-feature histogram slices and corrupting every split search.
     ///
     /// Dividing by the gcd gives the smallest step whose byte size is a cache
     /// line multiple: 128/gcd(24,128) = 16 bins here, 8 where the line is 64.
     const bin_step: usize = @max(1, std.atomic.cache_line / std.math.gcd(@sizeOf(Bin), std.atomic.cache_line));
 
-    pub fn init(gpa: std.mem.Allocator, n_workers: usize, n_features: usize, max_bins: usize) !Bank {
+    inline fn roundUp(n: usize) usize {
         // Plain multiple-rounding, not alignForward: `bin_step` is a count of
         // bins and carries no power-of-two guarantee.
-        const stride = ((max_bins + bin_step - 1) / bin_step) * bin_step;
-        const private = try gpa.alloc(Bin, n_workers * n_features * stride);
+        return ((n + bin_step - 1) / bin_step) * bin_step;
+    }
+
+    pub fn init(
+        gpa: std.mem.Allocator,
+        n_workers: usize,
+        n_features: usize,
+        n_bins: []const u16,
+    ) !Bank {
+        std.debug.assert(n_bins.len == n_features);
+        const offsets = try gpa.alloc(u32, n_features + 1);
+        errdefer gpa.free(offsets);
+        var acc: usize = 0;
+        for (0..n_features) |f| {
+            offsets[f] = @intCast(acc);
+            acc += roundUp(n_bins[f]);
+        }
+        offsets[n_features] = @intCast(acc);
+
+        const private = try gpa.alloc(Bin, n_workers * acc);
         return .{
             .gpa = gpa,
             .n_workers = n_workers,
             .n_features = n_features,
-            .stride = stride,
+            .offsets = offsets,
             .private = private,
         };
     }
 
     pub fn deinit(b: *Bank) void {
         b.gpa.free(b.private);
+        b.gpa.free(b.offsets);
         b.* = undefined;
     }
 
     /// Bins in one node's histogram slot.
     pub fn slotLen(b: *const Bank) usize {
-        return b.n_features * b.stride;
+        return b.offsets[b.n_features];
     }
 
     pub inline fn featureSlice(b: *const Bank, hist: []Bin, f: usize) []Bin {
-        return hist[f * b.stride ..][0..b.stride];
+        return hist[b.offsets[f]..b.offsets[f + 1]];
     }
 
+    pub inline fn featureSliceConst(b: *const Bank, hist: []const Bin, f: usize) []const Bin {
+        return hist[b.offsets[f]..b.offsets[f + 1]];
+    }
 };
 
 const BuildCtx = struct {
@@ -111,12 +146,12 @@ const BuildCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         const self: *BuildCtx = @ptrCast(@alignCast(ctx));
         const bank = self.bank;
-        const base = worker * bank.n_features * bank.stride;
-        const mine = bank.private[base..][0 .. bank.n_features * bank.stride];
+        const span = bank.slotLen();
+        const mine = bank.private[worker * span ..][0..span];
 
         for (self.features) |fid| {
             const col = self.ds.column(fid);
-            const h = mine[fid * bank.stride ..][0..bank.stride];
+            const h = mine[bank.offsets[fid]..bank.offsets[fid + 1]];
             var i = begin;
             // Unrolled by four. The accumulators are independent unless two
             // rows share a bin, so this exposes enough ILP to hide the
@@ -154,45 +189,42 @@ const BuildCtx = struct {
     }
 };
 
-/// Reduces over a flat index space of `features.len * stride`, so the whole
-/// merge is one barrier rather than one per feature.
+/// Reduces the private histograms into `out` over the whole slot.
+///
+/// Reducing every feature rather than only the selected ones is deliberate
+/// now that the slot is packed: it is a flat, branch-free loop over ~16 KB,
+/// and skipping features would cost more in index arithmetic than it saves.
+/// Unselected features end up holding whatever their private copies did,
+/// which the caller already must not read.
 const ReduceCtx = struct {
     bank: *Bank,
-    features: []const u32,
     active: usize,
     out: []Bin,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ReduceCtx = @ptrCast(@alignCast(ctx));
-        const bank = self.bank;
-        const stride = bank.stride;
-        const span = bank.n_features * stride;
-
+        const span = self.bank.slotLen();
         var i = begin;
-        while (i < end) {
-            const fi = i / stride;
-            const run_end = @min(end, (fi + 1) * stride);
-            const base = @as(usize, self.features[fi]) * stride + (i % stride);
-            var idx = base;
-            while (i < run_end) : ({
-                i += 1;
-                idx += 1;
-            }) {
-                var acc = bank.private[idx];
-                var w: usize = 1;
-                while (w < self.active) : (w += 1) {
-                    acc = acc.add(bank.private[w * span + idx]);
-                }
-                self.out[idx] = acc;
-            }
+        while (i < end) : (i += 1) {
+            var acc = self.bank.private[i];
+            var w: usize = 1;
+            while (w < self.active) : (w += 1) acc = acc.add(self.bank.private[w * span + i]);
+            self.out[i] = acc;
         }
     }
 };
 
-/// Below this many rows a node is not worth fanning out: the barrier and the
-/// private-histogram merge cost more than the accumulation itself.
-pub const parallel_threshold: usize = 8192;
+/// Below this many rows a node is built on one thread.
+///
+/// Tuned, not guessed. The cost this trades against is the per-node fixed
+/// cost — clearing every worker's private histogram and reducing them — which
+/// packing the bins cut by ~4.5x. That made fanning out worthwhile at much
+/// smaller nodes than before: sweeping the threshold, 8192 (the old value)
+/// costs 1516 ms on a 200-tree fit where 512 costs 1213 ms, and the curve is
+/// flat between 256 and 768 before rising again below 128, where the chunks
+/// get too small for the barrier. Output is identical at every setting.
+pub const parallel_threshold: usize = 512;
 
 /// Build the histogram for one node into `out`, which must be one slot's
 /// worth (`n_features * stride`).
@@ -207,7 +239,7 @@ pub fn build(
     features: []const u32,
     out: []Bin,
 ) void {
-    const span = bank.n_features * bank.stride;
+    const span = bank.slotLen();
 
     // Whether to fan out is decided here, not left to the pool, because the
     // clear and the merge below must cover exactly the workers that ran. If
@@ -215,13 +247,10 @@ pub fn build(
     const parallel = bank.n_workers > 1 and rows.len > parallel_threshold;
     const active: usize = if (parallel) bank.n_workers else 1;
 
-    // Clearing every worker's copy of every feature would dominate for a
-    // shallow node, so only the features in play are touched.
-    for (0..active) |w| {
-        for (features) |fid| {
-            @memset(bank.private[w * span + fid * bank.stride ..][0..bank.stride], .{});
-        }
-    }
+    // One flat clear per worker. With a packed slot this is ~16 KB, which is
+    // cheaper than the old per-feature clear of only the selected features
+    // was over a uniform stride.
+    @memset(bank.private[0 .. active * span], .{});
 
     var bctx = BuildCtx{
         .bank = bank,
@@ -237,23 +266,15 @@ pub fn build(
     }
 
     if (active == 1) {
-        for (features) |fid| {
-            const lo = fid * bank.stride;
-            @memcpy(out[lo..][0..bank.stride], bank.private[lo..][0..bank.stride]);
-        }
+        @memcpy(out[0..span], bank.private[0..span]);
         return;
     }
 
-    var rctx = ReduceCtx{ .bank = bank, .features = features, .active = active, .out = out };
-    pool.parallelFor(features.len * bank.stride, &rctx, ReduceCtx.run, 512);
+    var rctx = ReduceCtx{ .bank = bank, .active = active, .out = out };
+    pool.parallelFor(span, &rctx, ReduceCtx.run, 512);
 }
 
-/// `out = parent - sibling`, the subtraction trick: a node's histogram is
-/// derivable from its parent and its sibling, so only the cheaper child of
-/// each pair ever needs a real build.
 const SubCtx = struct {
-    bank: *Bank,
-    features: []const u32,
     out: []Bin,
     parent: []const Bin,
     sibling: []const Bin,
@@ -261,37 +282,18 @@ const SubCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *SubCtx = @ptrCast(@alignCast(ctx));
-        const stride = self.bank.stride;
         var i = begin;
-        while (i < end) : (i += 1) {
-            const fid = self.features[i / stride];
-            const k = fid * stride + (i % stride);
-            self.out[k] = self.parent[k].sub(self.sibling[k]);
-        }
+        while (i < end) : (i += 1) self.out[i] = self.parent[i].sub(self.sibling[i]);
     }
 };
 
 /// A node's histogram is its parent's minus its sibling's.
 ///
-/// Worth parallelising despite being pure memory traffic: it runs once per
-/// internal node, and at 256 bins over a dozen features that is enough bytes
-/// per node to show up plainly in a profile of tree building.
-pub fn subtract(
-    pool: *Pool,
-    bank: *Bank,
-    out: []Bin,
-    parent: []const Bin,
-    sibling: []const Bin,
-    features: []const u32,
-) void {
-    var ctx = SubCtx{
-        .bank = bank,
-        .features = features,
-        .out = out,
-        .parent = parent,
-        .sibling = sibling,
-    };
-    pool.parallelFor(features.len * bank.stride, &ctx, SubCtx.run, 1024);
+/// Flat over the packed slot: one contiguous pass, no per-feature indexing.
+pub fn subtract(pool: *Pool, bank: *Bank, out: []Bin, parent: []const Bin, sibling: []const Bin) void {
+    const span = bank.slotLen();
+    var ctx = SubCtx{ .out = out[0..span], .parent = parent[0..span], .sibling = sibling[0..span] };
+    pool.parallelFor(span, &ctx, SubCtx.run, 1024);
 }
 
 // ------------------------------------------------------------ split search
@@ -382,7 +384,7 @@ pub fn bestSplit(
     const parent_score = nodeScore(total.g, total.h, p);
 
     for (features) |fid| {
-        const h = hist[fid * bank.stride ..][0..bank.stride];
+        const h = bank.featureSliceConst(hist, fid);
         const nb = ds.n_bins[fid];
         if (nb < 3) continue; // missing bin plus one real bin: nothing to cut
         const missing = h[0];

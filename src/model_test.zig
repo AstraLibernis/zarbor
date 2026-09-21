@@ -83,18 +83,51 @@ fn aucOf(gpa: std.mem.Allocator, pred: []const f32, labels: []const f32) !f64 {
     return metric.auc(gpa, pred, labels);
 }
 
-test "histogram stride is a whole number of cache lines and never truncates" {
-    // The original code used `alignForward(max_bins, cache_line / @sizeOf(Bin))`,
-    // which requires a power-of-two alignment it does not have on every CPU.
-    // On a 128-byte line with a 24-byte Bin that argument is 5, and the stride
-    // came out *below* max_bins, overlapping adjacent features' histograms.
+test "packed offsets never truncate a feature and stay cache-line aligned" {
+    // The original code sized every feature by `alignForward(max_bins,
+    // cache_line / @sizeOf(Bin))`, which requires a power-of-two alignment it
+    // does not have on every CPU. On a 128-byte line with a 24-byte Bin that
+    // argument is 5, and the stride came out *below* max_bins, overlapping
+    // adjacent features' histograms.
+    //
+    // It also sized *every* feature by the widest one. Real tables are uneven
+    // — 234 bins for a continuous column next to 3 for a boolean — so that
+    // wasted 5.6x the slots on the dataset this was measured against, and the
+    // per-node clear and reduce paid for all of it.
     const gpa = testing.allocator;
-    for ([_]usize{ 2, 3, 17, 33, 64, 255, 256 }) |max_bins| {
-        var bank = try hist.Bank.init(gpa, 2, 3, max_bins);
-        defer bank.deinit();
-        try testing.expect(bank.stride >= max_bins);
-        try testing.expectEqual(@as(usize, 0), (bank.stride * @sizeOf(hist.Bin)) % std.atomic.cache_line);
+    const widths = [_]u16{ 2, 3, 17, 47, 202, 234, 256, 257 };
+
+    var bank = try hist.Bank.init(gpa, 2, widths.len, &widths);
+    defer bank.deinit();
+
+    var prev: u32 = 0;
+    for (widths, 0..) |w, f| {
+        const lo = bank.offsets[f];
+        const hi = bank.offsets[f + 1];
+        try testing.expectEqual(prev, lo); // packed: no gaps between features
+        try testing.expect(hi - lo >= w); // never truncates
+        // Each feature starts on a cache line, so the clear and the reduce
+        // never straddle one.
+        try testing.expectEqual(@as(usize, 0), (@as(usize, lo) * @sizeOf(hist.Bin)) % std.atomic.cache_line);
+        prev = hi;
     }
+    try testing.expectEqual(prev, bank.offsets[widths.len]);
+    try testing.expectEqual(@as(usize, prev), bank.slotLen());
+
+    // And the whole point, on the shape real tables actually have: a few wide
+    // continuous columns beside several tiny categorical ones. These are the
+    // measured bin counts of the dataset this was tuned against.
+    const real = [_]u16{ 47, 234, 202, 6, 17, 22, 7, 4, 4, 5, 3, 3, 4 };
+    var rb = try hist.Bank.init(gpa, 1, real.len, &real);
+    defer rb.deinit();
+
+    var maxw: usize = 0;
+    for (real) |w| maxw = @max(maxw, w);
+    const step = std.atomic.cache_line / std.math.gcd(@sizeOf(hist.Bin), std.atomic.cache_line);
+    const uniform = real.len * ((maxw + step - 1) / step * step);
+    // 688 against 3120 when this was written; assert a clear majority saved
+    // rather than the exact figure, which depends on the cache line size.
+    try testing.expect(rb.slotLen() * 3 < uniform);
 }
 
 test "gbdt learns the signal" {
