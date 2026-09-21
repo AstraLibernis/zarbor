@@ -13,6 +13,7 @@ pub const linear = @import("linear.zig");
 pub const model = @import("model.zig");
 
 test {
+    _ = @import("cv.zig");
     _ = @import("model_test.zig");
     _ = @import("sweep_test.zig");
     @import("std").testing.refAllDecls(@This());

@@ -14,6 +14,7 @@ const linear = @import("linear.zig");
 const metric = @import("metric.zig");
 const prof = @import("prof.zig");
 const model_mod = @import("model.zig");
+const cv_mod = @import("cv.zig");
 
 const usage =
     \\usage: zgbdt <train.csv> --label=<column> [options]
@@ -34,6 +35,7 @@ const usage =
     \\  zgbdt predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
     \\  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
     \\  zgbdt info    --model=M.zm
+    \\  zgbdt cv      <train.csv> --label=<column> [--folds=5]
     \\
     \\predict and blend bin the new data with the schema stored in the model,
     \\so categorical levels map to the same bins they did in training. Pass
@@ -112,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, first, "predict")) return score(init, gpa, out, .predict);
             if (std.mem.eql(u8, first, "blend")) return score(init, gpa, out, .blend);
             if (std.mem.eql(u8, first, "info")) return info(init, gpa, out);
+            if (std.mem.eql(u8, first, "cv")) return cv_mod.run(init, gpa, out);
         }
     }
 
