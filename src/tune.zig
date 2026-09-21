@@ -107,9 +107,23 @@ const Param = struct {
         };
     }
 
-    fn clamp(p: Param, x: f64) f64 {
+    /// Fold an out-of-range value back inside instead of clamping it.
+    ///
+    /// Clamping sends every overshoot to the same endpoint, so a kernel
+    /// centred near a bound stacks a point mass exactly on it -- proposals
+    /// pile up on `lambda=50.000000` and the axis stops being searched.
+    /// Reflection puts that probability back into the interior, where it
+    /// belongs.
+    fn reflect(p: Param, x: f64) f64 {
         const b = p.bounds();
-        return std.math.clamp(x, b.lo, b.hi);
+        if (!(b.hi > b.lo)) return b.lo;
+        var v = x;
+        var guard: usize = 0;
+        while ((v < b.lo or v > b.hi) and guard < 16) : (guard += 1) {
+            if (v < b.lo) v = b.lo + (b.lo - v);
+            if (v > b.hi) v = b.hi - (v - b.hi);
+        }
+        return std.math.clamp(v, b.lo, b.hi);
     }
 
     fn render(p: Param, x: f64, buf: []u8) ![]const u8 {
@@ -307,9 +321,22 @@ const Tpe = struct {
         // Silverman's rule, floored so a handful of observations cannot
         // collapse the kernel onto its own points and stop exploring.
         const h = 1.06 * span * std.math.pow(f64, @floatFromInt(@max(n, 1)), -0.2);
-        return @max(h, span * 0.05);
+        // Floored so a handful of observations cannot collapse the kernel onto
+        // its own points, and capped because Silverman's rule over-smooths
+        // badly at small n -- at n=5 it asks for a kernel three quarters as
+        // wide as the entire axis.
+        return std.math.clamp(h, span * 0.05, span * 0.35);
     }
 
+    /// Density of `at` under the observations `xs`, plus one pseudo-observation
+    /// covering the whole axis.
+    ///
+    /// That prior term is not decoration. Without it the estimate is a sum of
+    /// kernels sitting only where the search has already been, so as the good
+    /// set concentrates the density outside it goes to zero, the ratio stops
+    /// distinguishing anything, and the proposal locks onto a single point --
+    /// which is exactly what this did before the prior was added: seven
+    /// identical trials in a row with two parameters pinned to their bounds.
     fn logDensity(p: Param, xs: []const f64, at: f64, h: f64) f64 {
         if (p.isCategorical()) {
             const k: f64 = @floatFromInt(p.choices.len);
@@ -317,17 +344,25 @@ const Tpe = struct {
             for (xs) |v| if (@round(v) == @round(at)) {
                 hits += 1;
             };
-            // Laplace smoothing: an unobserved level keeps a real probability,
-            // so the ratio cannot be infinite on a level nobody tried yet.
+            // Laplace smoothing is the categorical form of the same prior: an
+            // unobserved level keeps a real probability, so the ratio cannot
+            // be infinite on a level nobody has tried yet.
             return @log((hits + 1) / (@as(f64, @floatFromInt(xs.len)) + k));
         }
+        const b = p.bounds();
         var acc: f64 = 0;
         for (xs) |v| {
             const z = (at - v) / h;
-            acc += @exp(-0.5 * z * z);
+            acc += @exp(-0.5 * z * z) / h;
         }
-        const norm = @as(f64, @floatFromInt(@max(xs.len, 1))) * h * @sqrt(2.0 * std.math.pi);
-        return @log(@max(acc, 1e-300) / norm);
+        // The prior: one kernel at mid-range, as wide as the range itself.
+        const mid = 0.5 * (b.lo + b.hi);
+        const hp = @max(0.5 * (b.hi - b.lo), 1e-12);
+        const zp = (at - mid) / hp;
+        acc += @exp(-0.5 * zp * zp) / hp;
+
+        const n_eff = @as(f64, @floatFromInt(xs.len)) + 1;
+        return @log(@max(acc, 1e-300) / (n_eff * @sqrt(2.0 * std.math.pi)));
     }
 
     fn propose(
@@ -369,14 +404,23 @@ const Tpe = struct {
 
             var best_x: f64 = good[0];
             var best_ratio: f64 = -std.math.inf(f64);
+            const b = p.bounds();
             for (0..t.candidates) |_| {
-                // Draw from the good density itself: pick one of its points
-                // and jitter by the kernel width.
+                // Draw from the good density -- which includes its prior
+                // component, so one candidate in (n_good + 1) comes from the
+                // whole axis rather than from somewhere already visited. That
+                // is what keeps the proposal able to leave a basin.
+                const from_prior = r.uintLessThan(usize, good.len + 1) == 0;
                 const pick = good[r.uintLessThan(usize, good.len)];
                 const cand = if (p.isCategorical())
-                    pick
+                    if (from_prior)
+                        @as(f64, @floatFromInt(r.uintLessThan(usize, p.choices.len)))
+                    else
+                        pick
+                else if (from_prior)
+                    b.lo + r.float(f64) * (b.hi - b.lo)
                 else
-                    p.clamp(pick + r.floatNorm(f64) * hg);
+                    p.reflect(pick + r.floatNorm(f64) * hg);
                 const ratio = logDensity(p, good, cand, hg) - logDensity(p, bad, cand, hb);
                 if (ratio > best_ratio) {
                     best_ratio = ratio;
@@ -933,4 +977,81 @@ test "the default space covers every model" {
         // only once someone ran it without --param.
         for (s) |p| try testing.expect(config.hasField(p.name));
     }
+}
+
+test "TPE keeps exploring when the good set collapses onto one point" {
+    const gpa = testing.allocator;
+    const p = try parseParam(gpa, "lambda=0.1..50:log");
+    const space = [_]Param{p};
+
+    // Every observation identical, and at the top of the range: the pathology
+    // that produced seven repeated trials with lambda pinned to 50. A Parzen
+    // estimate with no prior has zero density everywhere else, so the ratio
+    // cannot prefer anywhere else and the proposal freezes.
+    var trials: std.ArrayList(Trial) = .empty;
+    defer trials.deinit(gpa);
+    var xs: [24][1]f64 = undefined;
+    for (&xs, 0..) |*slot, i| {
+        slot[0] = p.bounds().hi;
+        try trials.append(gpa, .{
+            .x = slot,
+            .score = if (i < 6) 0.99 else 0.10,
+            .folds = 5,
+            .ms = 1,
+            .text = "",
+        });
+    }
+
+    var prng: std.Random.DefaultPrng = .init(21);
+    const tpe = Tpe{ .gamma = 0.25, .candidates = 32 };
+    var seen: std.ArrayList(f64) = .empty;
+    defer seen.deinit(gpa);
+    var outv: [1]f64 = undefined;
+    for (0..60) |_| {
+        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
+        try seen.append(gpa, outv[0]);
+    }
+
+    var distinct: usize = 0;
+    for (seen.items, 0..) |v, i| {
+        var dup = false;
+        for (seen.items[0..i]) |w| if (@abs(v - w) < 1e-9) {
+            dup = true;
+        };
+        if (!dup) distinct += 1;
+    }
+    // Before the prior was added this was exactly 1.
+    try testing.expect(distinct > 5);
+}
+
+test "TPE does not pile proposals onto a boundary" {
+    const gpa = testing.allocator;
+    const p = try parseParam(gpa, "subsample=0.5..1.0");
+    const space = [_]Param{p};
+
+    // Good points sit near the top edge, so jitter pushes past it and gets
+    // clamped. Clamping alone would stack proposals exactly on the bound.
+    var trials: std.ArrayList(Trial) = .empty;
+    defer trials.deinit(gpa);
+    var xs: [20][1]f64 = undefined;
+    for (&xs, 0..) |*slot, i| {
+        slot[0] = if (i < 5) 0.99 else 0.55;
+        try trials.append(gpa, .{
+            .x = slot,
+            .score = if (i < 5) 0.9 else 0.1,
+            .folds = 5,
+            .ms = 1,
+            .text = "",
+        });
+    }
+
+    var prng: std.Random.DefaultPrng = .init(5);
+    const tpe = Tpe{ .gamma = 0.25, .candidates = 32 };
+    var on_bound: usize = 0;
+    var outv: [1]f64 = undefined;
+    for (0..60) |_| {
+        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
+        if (@abs(outv[0] - 1.0) < 1e-12) on_bound += 1;
+    }
+    try testing.expect(on_bound < 30);
 }
