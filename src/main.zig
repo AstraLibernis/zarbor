@@ -324,6 +324,31 @@ pub fn main(init: std.process.Init) !void {
             defer res.model.deinit();
             try printTiming(out, io, t_train0, "epoch", res.epochs, res.valid_ns);
             try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
+            if (cfg.lin_solver == .lbfgs) {
+                if (res.fit.stalled()) {
+                    // Silence here used to mean "fitted". It did not: with
+                    // `--lin_standardize=false` on a column reaching 188,000,
+                    // the coefficient steps fall under `lin_tol` after four
+                    // iterations while the gradient is still enormous, and the
+                    // result ranks by that one column and nothing else.
+                    try out.print(
+                        \\STALLED the solver stopped moving while the gradient was still
+                        \\        large ({e:.2}, from {e:.2} at the start). These
+                        \\        coefficients are not a fitted model.
+                        \\
+                    , .{ res.fit.g_last, res.fit.g_first });
+                    if (!cfg.lin_standardize)
+                        try out.writeAll(
+                            \\        The usual cause is unscaled columns. Try
+                            \\        --lin_standardize=true.
+                            \\
+                        );
+                } else {
+                    try out.print("fit     converged, |g|max {e:.2} from {e:.2}\n", .{
+                        res.fit.g_last, res.fit.g_first,
+                    });
+                }
+            }
             if (save_path) |sp| {
                 // The bundle borrows the fitted model's design and weights
                 // rather than copying, so it must not free them.

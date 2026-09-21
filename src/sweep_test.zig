@@ -681,3 +681,32 @@ test "applyAlgoDefaults respects explicit choices and fills the rest" {
     g.applyForestFeatureDefault(16, &.{"colsample_bynode"});
     try testing.expectEqual(@as(f32, 1.0), g.colsample_bynode); // explicit, kept
 }
+
+test "a solver stalled by bad scaling is not reported as converged" {
+    // One design column scaled far above the others is enough. The
+    // coefficient it needs is proportionally tiny, so every step falls under
+    // `lin_tol` long before the gradient is anywhere near zero -- and
+    // stopping on coefficient movement alone called that converged, returning
+    // a model equivalent to ranking by that one column.
+    const gpa = testing.allocator;
+    var f = try Fix.init(gpa, 3000, 31);
+    defer f.deinit();
+    for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
+
+    var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
+        .algo = .linear, .lin_standardize = false, .lin_epochs = 300, .verbose_eval = 0,
+    }, null);
+    defer bad.model.deinit();
+    try testing.expect(bad.fit.stalled());
+    // The tell is a large gradient at the stop, not simply a short run.
+    try testing.expect(bad.fit.g_last > 1e-3 * bad.fit.g_first);
+
+    // Standardising the same design removes the conditioning problem, so the
+    // identical data must now arrive. Without this half the test would pass
+    // against a `stalled()` that always returns true.
+    var good = try linear.train(gpa, f.pool, &f.ds, null, .{
+        .algo = .linear, .lin_standardize = true, .lin_epochs = 300, .verbose_eval = 0,
+    }, null);
+    defer good.model.deinit();
+    try testing.expect(!good.fit.stalled());
+}

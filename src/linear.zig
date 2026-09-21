@@ -485,12 +485,34 @@ fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
 /// problem's curvature and no learning rate has to be guessed. `alpha` > 0
 /// switches on OWL-QN, which is the same recursion with the subgradient and
 /// orthant projection above.
+/// How a fit ended. `converged` means the coefficients stopped moving *and*
+/// the gradient actually came down; a fit that stops moving with a large
+/// gradient has stalled, which is a different thing and used to be reported
+/// as success.
+pub const Fit = struct {
+    iters: u32,
+    /// Pseudo-gradient infinity-norm at the first iteration and the last.
+    g_first: f64 = 0,
+    g_last: f64 = 0,
+    converged: bool = true,
+
+    /// The gradient vanishes at an optimum whatever the variables are scaled
+    /// by, so its fall from where it started is the scale-free way to ask
+    /// whether a fit arrived. Measured here: a healthy run ends four to five
+    /// orders down (1.4e-5 of its starting value); a run stalled by bad
+    /// conditioning ends three (3e-3). 1e-3 sits between them.
+    pub fn stalled(f: Fit) bool {
+        return !f.converged or f.g_last > 1e-3 * f.g_first;
+    }
+};
+
 fn fitLbfgs(
     gpa: std.mem.Allocator,
     pr: *Problem,
     cfg: config.Config,
     log: ?*std.Io.Writer,
-) !u32 {
+) !Fit {
+    var fit: Fit = .{ .iters = 0 };
     const n = pr.theta.len;
     const m = @min(lbfgs_history, cfg.lin_epochs);
 
@@ -521,6 +543,8 @@ fn fitLbfgs(
         pseudoGrad(pr, g, pg);
         var gmax: f64 = 0;
         for (pg) |v| gmax = @max(gmax, @abs(v));
+        if (iter == 0) fit.g_first = gmax;
+        fit.g_last = gmax;
         if (gmax <= grad_floor) break;
 
         // Two-loop recursion: dir ← H·pg, newest pair first on the way down
@@ -595,9 +619,14 @@ fn fitLbfgs(
             }
             step *= 0.5;
         }
-        // No improvement anywhere along the ray: f32 scoring noise now
-        // dominates the objective, which is as converged as this gets.
-        if (!accepted) break;
+        // No improvement anywhere along the ray. On a well-scaled problem
+        // that means f32 scoring noise now dominates the objective; on a
+        // badly-scaled one it means the line search cannot move at all.
+        // `stalled` tells those apart by looking at the gradient.
+        if (!accepted) {
+            fit.converged = false;
+            break;
+        }
 
         var dmax: f64 = 0;
         const s_slot = hs[head * n ..][0..n];
@@ -634,7 +663,8 @@ fn fitLbfgs(
             break;
         }
     }
-    return iter;
+    fit.iters = iter;
+    return fit;
 }
 
 // ----------------------------------------------------------------- Adam
@@ -716,6 +746,10 @@ fn fitAdam(
 pub const TrainResult = struct {
     model: Linear,
     epochs: u32,
+    /// How the fit ended. A caller that prints nothing else should still
+    /// check `fit.stalled()`: a stalled solve returns coefficients that look
+    /// ordinary and are not a solution to anything.
+    fit: Fit = .{ .iters = 0 },
     score: f64,
     /// Nanoseconds spent scoring the validation set; not part of fitting.
     /// See `booster.TrainResult.valid_ns`.
@@ -787,10 +821,13 @@ pub fn train(
         .size = (ds.n_rows + chunks - 1) / chunks,
     };
 
-    const epochs = switch (cfg.lin_solver) {
+    const fit: Fit = switch (cfg.lin_solver) {
         .lbfgs => try fitLbfgs(gpa, &pr, cfg, log),
-        .adam => try fitAdam(gpa, &pr, cfg, log),
+        // Adam runs a fixed schedule with no line search, so it has no
+        // comparable notion of arriving; report the epochs and nothing more.
+        .adam => .{ .iters = try fitAdam(gpa, &pr, cfg, log) },
     };
+    const epochs = fit.iters;
 
     const w = try gpa.alloc(f32, p);
     errdefer gpa.free(w);
@@ -820,7 +857,13 @@ pub fn train(
         valid_ns = prof.now() - wall0;
     }
 
-    return .{ .model = model, .epochs = epochs, .score = score, .valid_ns = valid_ns };
+    return .{
+        .model = model,
+        .epochs = epochs,
+        .fit = fit,
+        .score = score,
+        .valid_ns = valid_ns,
+    };
 }
 
 // ------------------------------------------------------------------- tests
