@@ -14,6 +14,7 @@ pub const model = @import("model.zig");
 
 test {
     _ = @import("cv.zig");
+    _ = @import("tune.zig");
     _ = @import("model_test.zig");
     _ = @import("sweep_test.zig");
     @import("std").testing.refAllDecls(@This());

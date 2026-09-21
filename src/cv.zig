@@ -51,7 +51,7 @@ pub const usage =
 /// two classes are shuffled and dealt out separately, so a fold cannot draw
 /// an unrepresentative share of a rare positive class. Dealing round-robin
 /// from a shuffled list also keeps the folds within one row of equal size.
-fn assignFolds(
+pub fn assignFolds(
     gpa: std.mem.Allocator,
     labels: []const f32,
     n_folds: u32,
@@ -106,6 +106,158 @@ fn shuffle(r: std.Random, xs: []u32) void {
     }
 }
 
+
+/// What one cross-validation produced. `pooled` is the out-of-fold score over
+/// every evaluated row at once; `mean`/`sd` describe the spread between folds.
+/// They are different numbers and answer different questions: tune against
+/// `pooled`, judge whether a difference is real against `sd`.
+pub const Outcome = struct {
+    pooled: f64,
+    mean: f64,
+    sd: f64,
+    fit_ms: i64,
+    folds_run: u32,
+};
+
+pub const Opts = struct {
+    /// Evaluate only the first N folds. A search uses this as a cheap
+    /// approximation: a hopeless configuration reveals itself on two folds
+    /// and need not be charged for five. 0 means all of them.
+    use_folds: u32 = 0,
+    /// Filled with the out-of-fold prediction for every evaluated row.
+    oof: ?[]f32 = null,
+    /// One line per fold while it runs.
+    progress: ?*std.Io.Writer = null,
+};
+
+/// Higher is better for AUC, lower is better for RMSE. Everything that ranks
+/// configurations goes through here so the comparison cannot drift from the
+/// objective.
+pub fn better(obj: config.Objective, a: f64, b: f64) bool {
+    return switch (obj) {
+        .logistic => a > b,
+        .squared_error => a < b,
+    };
+}
+
+/// Cross-validate one configuration over an already-binned dataset.
+///
+/// The dataset and the fold assignment are inputs rather than things this
+/// computes, which is the whole point: a search binds them once and then pays
+/// only for fitting, instead of re-reading a CSV per configuration.
+pub fn crossValidate(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    pool: *pool_mod.Pool,
+    full: *const data.Dataset,
+    cfg: config.Config,
+    fold_of: []const u32,
+    n_folds: u32,
+    opts: Opts,
+) !Outcome {
+    const run_folds = if (opts.use_folds == 0) n_folds else @min(opts.use_folds, n_folds);
+
+    const perm = try gpa.alloc(u32, full.n_rows);
+    defer gpa.free(perm);
+    const per_fold = try gpa.alloc(f64, run_folds);
+    defer gpa.free(per_fold);
+
+    // Only the rows belonging to a fold that actually ran are scored, so a
+    // partial-fidelity result is an honest score on a subset rather than a
+    // full-length vector padded with zeros.
+    var scored: std.ArrayList(u32) = .empty;
+    defer scored.deinit(gpa);
+
+    const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    for (0..run_folds) |k| {
+        var head: usize = 0;
+        var tail: usize = full.n_rows;
+        for (fold_of, 0..) |f, i| {
+            if (f == k) {
+                tail -= 1;
+                perm[tail] = @intCast(i);
+            } else {
+                perm[head] = @intCast(i);
+                head += 1;
+            }
+        }
+        std.mem.reverse(u32, perm[head..]);
+        if (head == 0) return error.FoldLeftNoTrainingRows;
+
+        var train_ds = try data.subset(gpa, full, perm[0..head]);
+        defer train_ds.deinit();
+        var valid_ds = try data.subset(gpa, full, perm[head..]);
+        defer valid_ds.deinit();
+
+        const scores = try gpa.alloc(f32, valid_ds.n_rows);
+        defer gpa.free(scores);
+
+        switch (cfg.algo) {
+            .gbdt => {
+                var res = try booster.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                defer res.model.deinit();
+                res.model.predict(pool, &valid_ds, scores);
+            },
+            .random_forest => {
+                var res = try forest.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                defer res.model.deinit();
+                res.model.predict(pool, &valid_ds, scores);
+            },
+            .linear => {
+                var res = try linear.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                defer res.model.deinit();
+                res.model.predict(pool, &valid_ds, scores);
+            },
+        }
+
+        if (opts.oof) |o| for (perm[head..], scores) |row, s| {
+            o[row] = s;
+        };
+        try scored.appendSlice(gpa, perm[head..]);
+
+        per_fold[k] = switch (cfg.objective) {
+            .logistic => try metric.auc(gpa, scores, valid_ds.labels),
+            .squared_error => metric.rmse(scores, valid_ds.labels),
+        };
+        if (opts.progress) |w| {
+            try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}\n", .{
+                k,                 head,
+                valid_ds.n_rows,   if (cfg.objective == .logistic) "auc" else "rmse",
+                per_fold[k],
+            });
+            try w.flush();
+        }
+    }
+    const fit_ms: i64 = @intCast(@divTrunc(
+        std.Io.Timestamp.now(io, .awake).toNanoseconds() - t0,
+        1_000_000,
+    ));
+
+    var mean: f64 = 0;
+    for (per_fold) |v| mean += v;
+    mean /= @floatFromInt(run_folds);
+    var sd: f64 = 0;
+    for (per_fold) |v| sd += (v - mean) * (v - mean);
+    sd = @sqrt(sd / @as(f64, @floatFromInt(run_folds)));
+
+    // Pool over exactly the rows that were predicted.
+    const ps = try gpa.alloc(f32, scored.items.len);
+    defer gpa.free(ps);
+    const ys = try gpa.alloc(f32, scored.items.len);
+    defer gpa.free(ys);
+    const src = opts.oof orelse return error.PooledScoreNeedsOofBuffer;
+    for (scored.items, 0..) |row, i| {
+        ps[i] = src[row];
+        ys[i] = full.labels[row];
+    }
+    const pooled = switch (cfg.objective) {
+        .logistic => try metric.auc(gpa, ps, ys),
+        .squared_error => metric.rmse(ps, ys),
+    };
+
+    return .{ .pooled = pooled, .mean = mean, .sd = sd, .fit_ms = fit_ms, .folds_run = run_folds };
+}
+
 pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !void {
     const io = init.io;
 
@@ -152,7 +304,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             max_bytes = try std.fmt.parseInt(usize, val, 10);
         } else if (std.mem.eql(u8, key, "quiet")) {
             quiet = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
-        } else if (try applyConfigFlag(&cfg, key, val)) {
+        } else if (try config.applyFlag(&cfg, key, val)) {
             try explicit.append(gpa, key);
         } else {
             try out.print("unknown flag: --{s}\n\n", .{key});
@@ -226,95 +378,15 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
-    const perm = try gpa.alloc(u32, full.n_rows);
-    defer gpa.free(perm);
-    const per_fold = try gpa.alloc(f64, n_folds);
-    defer gpa.free(per_fold);
 
-    const t_fit0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    for (0..n_folds) |k| {
-        // Training rows first, validation rows after, matching what `subset`
-        // and the trainers expect.
-        var head: usize = 0;
-        var tail: usize = full.n_rows;
-        for (fold_of, 0..) |f, i| {
-            if (f == k) {
-                tail -= 1;
-                perm[tail] = @intCast(i);
-            } else {
-                perm[head] = @intCast(i);
-                head += 1;
-            }
-        }
-        // `perm[head..]` was filled back-to-front, so reverse it to keep the
-        // validation rows in ascending order. Fold assignment is already
-        // random; leaving them reversed would only make the OOF write pattern
-        // harder to follow.
-        std.mem.reverse(u32, perm[head..]);
-        if (head == 0) return error.FoldLeftNoTrainingRows;
-
-        var train_ds = try data.subset(gpa, &full, perm[0..head]);
-        defer train_ds.deinit();
-        var valid_ds = try data.subset(gpa, &full, perm[head..]);
-        defer valid_ds.deinit();
-
-        const scores = try gpa.alloc(f32, valid_ds.n_rows);
-        defer gpa.free(scores);
-
-        switch (cfg.algo) {
-            .gbdt => {
-                var res = try booster.train(gpa, pool, &train_ds, null, cfg, out);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-            .random_forest => {
-                var res = try forest.train(gpa, pool, &train_ds, null, cfg, out);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-            .linear => {
-                var res = try linear.train(gpa, pool, &train_ds, null, cfg, out);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-        }
-
-        for (perm[head..], scores) |row, s| oof[row] = s;
-        per_fold[k] = switch (cfg.objective) {
-            .logistic => try metric.auc(gpa, scores, valid_ds.labels),
-            .squared_error => metric.rmse(scores, valid_ds.labels),
-        };
-        if (!quiet) {
-            try out.print("fold {d}  {d} train / {d} valid   {s}={d:.6}\n", .{
-                k,
-                head,
-                valid_ds.n_rows,
-                if (cfg.objective == .logistic) "auc" else "rmse",
-                per_fold[k],
-            });
-            try out.flush();
-        }
-    }
-    const fit_ms = @divTrunc(
-        std.Io.Timestamp.now(io, .awake).toNanoseconds() - t_fit0,
-        1_000_000,
-    );
-
-    var mean: f64 = 0;
-    for (per_fold) |v| mean += v;
-    mean /= @floatFromInt(n_folds);
-    var sd: f64 = 0;
-    for (per_fold) |v| sd += (v - mean) * (v - mean);
-    sd = @sqrt(sd / @as(f64, @floatFromInt(n_folds)));
-
-    const pooled = switch (cfg.objective) {
-        .logistic => try metric.auc(gpa, oof, full.labels),
-        .squared_error => metric.rmse(oof, full.labels),
-    };
+    const r = try crossValidate(gpa, io, pool, &full, cfg, fold_of, n_folds, .{
+        .oof = oof,
+        .progress = if (quiet) null else out,
+    });
 
     if (!quiet) try out.writeAll("\n");
     try out.print("oof     {d:.6}   mean {d:.6}   sd {d:.6}   {d} ms\n", .{
-        pooled, mean, sd, fit_ms,
+        r.pooled, r.mean, r.sd, r.fit_ms,
     });
 
     if (oof_path) |op| {
@@ -334,26 +406,6 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     try out.flush();
 }
 
-fn parseInto(comptime T: type, val: []const u8) !T {
-    return switch (@typeInfo(T)) {
-        .int => try std.fmt.parseInt(T, val, 10),
-        .float => try std.fmt.parseFloat(T, val),
-        .bool => std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1"),
-        .@"enum" => std.meta.stringToEnum(T, val) orelse error.UnknownEnumValue,
-        .optional => |o| try parseInto(o.child, val),
-        else => @compileError("config field type not parseable: " ++ @typeName(T)),
-    };
-}
-
-fn applyConfigFlag(cfg: *config.Config, key: []const u8, val: []const u8) !bool {
-    inline for (@typeInfo(config.Config).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, key)) {
-            @field(cfg, f.name) = try parseInto(f.type, val);
-            return true;
-        }
-    }
-    return false;
-}
 
 // ----- tests
 

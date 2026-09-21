@@ -15,6 +15,7 @@ const metric = @import("metric.zig");
 const prof = @import("prof.zig");
 const model_mod = @import("model.zig");
 const cv_mod = @import("cv.zig");
+const tune_mod = @import("tune.zig");
 
 const usage =
     \\usage: zgbdt <train.csv> --label=<column> [options]
@@ -36,6 +37,7 @@ const usage =
     \\  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
     \\  zgbdt info    --model=M.zm
     \\  zgbdt cv      <train.csv> --label=<column> [--folds=5]
+    \\  zgbdt tune    <train.csv> --label=<column> [--search=random]
     \\
     \\predict and blend bin the new data with the schema stored in the model,
     \\so categorical levels map to the same bins they did in training. Pass
@@ -56,28 +58,6 @@ const usage =
     \\
 ;
 
-fn parseInto(comptime T: type, val: []const u8) !T {
-    return switch (@typeInfo(T)) {
-        .int => try std.fmt.parseInt(T, val, 10),
-        .float => try std.fmt.parseFloat(T, val),
-        .bool => std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1"),
-        .@"enum" => std.meta.stringToEnum(T, val) orelse error.UnknownEnumValue,
-        .optional => |o| try parseInto(o.child, val),
-        else => @compileError("config field type not parseable: " ++ @typeName(T)),
-    };
-}
-
-/// Returns false when `key` names no config field, letting the caller fall
-/// through to its own flags.
-fn applyConfigFlag(cfg: *config.Config, key: []const u8, val: []const u8) !bool {
-    inline for (@typeInfo(config.Config).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, key)) {
-            @field(cfg, f.name) = try parseInto(f.type, val);
-            return true;
-        }
-    }
-    return false;
-}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -115,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, first, "blend")) return score(init, gpa, out, .blend);
             if (std.mem.eql(u8, first, "info")) return info(init, gpa, out);
             if (std.mem.eql(u8, first, "cv")) return cv_mod.run(init, gpa, out);
+            if (std.mem.eql(u8, first, "tune")) return tune_mod.run(init, gpa, out);
         }
     }
 
@@ -152,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
             split_col = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
-        } else if (try applyConfigFlag(&cfg, key, val)) {
+        } else if (try config.applyFlag(&cfg, key, val)) {
             try explicit.append(gpa, key);
         } else {
             try out.print("unknown flag: --{s}\n\n", .{key});

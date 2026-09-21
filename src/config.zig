@@ -69,6 +69,41 @@ pub const LinSolver = enum {
     adam,
 };
 
+fn parseInto(comptime T: type, val: []const u8) !T {
+    return switch (@typeInfo(T)) {
+        .int => try std.fmt.parseInt(T, val, 10),
+        .float => try std.fmt.parseFloat(T, val),
+        .bool => std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "1"),
+        .@"enum" => std.meta.stringToEnum(T, val) orelse error.UnknownEnumValue,
+        .optional => |o| try parseInto(o.child, val),
+        else => @compileError("config field type not parseable: " ++ @typeName(T)),
+    };
+}
+
+/// Set a field by name from its string form. Returns false when `key` names
+/// no field, which lets a caller fall through to its own flags.
+///
+/// Every command that accepts hyperparameters goes through this, so the flag
+/// surface cannot drift from the struct -- and a tuner can set a field it has
+/// never heard of by rendering a value and passing the name straight through.
+pub fn applyFlag(cfg: *Config, key: []const u8, val: []const u8) !bool {
+    inline for (@typeInfo(Config).@"struct".fields) |f| {
+        if (std.mem.eql(u8, f.name, key)) {
+            @field(cfg, f.name) = try parseInto(f.type, val);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether `key` names a Config field at all, without setting it.
+pub fn hasField(key: []const u8) bool {
+    inline for (@typeInfo(Config).@"struct".fields) |f| {
+        if (std.mem.eql(u8, f.name, key)) return true;
+    }
+    return false;
+}
+
 pub const Config = struct {
     // ---- which model -------------------------------------------------
     algo: Algo = .gbdt,
