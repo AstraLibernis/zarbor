@@ -12,6 +12,27 @@
 //! thread descheduled by the host cannot stall the barrier behind it.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const linux = std.os.linux;
+
+/// Parking needs a futex. Zig 0.16 has no portable one — `std.Thread.Mutex`,
+/// `Condition` and the futex layer are all gone — but the raw Linux syscall is
+/// right there, and this only ever runs on Linux. Anywhere else falls back to
+/// the yield loop, which is correct, merely wasteful.
+const can_park = builtin.os.tag == .linux;
+
+const wait_op: linux.FUTEX_OP = .{ .cmd = .WAIT, .private = true };
+const wake_op: linux.FUTEX_OP = .{ .cmd = .WAKE, .private = true };
+
+/// Sleeps until `v` differs from `expect`. Returns immediately if it already
+/// does, which is what closes the race against a concurrent publisher.
+fn park(v: *std.atomic.Value(u32), expect: u32) void {
+    _ = linux.futex_4arg(&v.raw, wait_op, expect, null);
+}
+
+fn unparkAll(v: *std.atomic.Value(u32)) void {
+    _ = linux.futex_3arg(&v.raw, wake_op, std.math.maxInt(i32));
+}
 
 pub const cache_line = std.atomic.cache_line;
 
@@ -38,6 +59,10 @@ pub const Pool = struct {
     done: std.atomic.Value(usize) align(cache_line) = .init(0),
     epoch: std.atomic.Value(u32) align(cache_line) = .init(0),
     quit: std.atomic.Value(bool) align(cache_line) = .init(false),
+    /// Workers currently asleep on `epoch`. Lets the publisher skip the wake
+    /// syscall entirely in the common case, where a burst of back-to-back
+    /// `parallelFor` calls keeps every worker spinning and nobody parks.
+    parked: std.atomic.Value(u32) align(cache_line) = .init(0),
 
     /// `n_threads` of 0 means one worker per logical core.
     ///
@@ -60,6 +85,7 @@ pub const Pool = struct {
         errdefer {
             p.quit.store(true, .release);
             _ = p.epoch.fetchAdd(1, .release);
+            if (can_park) unparkAll(&p.epoch);
             for (p.threads[0..spawned]) |t| t.join();
         }
         while (spawned < helpers) : (spawned += 1) {
@@ -74,6 +100,7 @@ pub const Pool = struct {
         p.quit.store(true, .release);
         // Bump the epoch so workers parked on it re-check `quit`.
         _ = p.epoch.fetchAdd(1, .release);
+        if (can_park) unparkAll(&p.epoch);
         for (threads) |t| t.join();
         gpa.free(threads);
         gpa.destroy(p);
@@ -117,6 +144,7 @@ pub const Pool = struct {
         // Release: everything above is visible to any worker that sees the
         // new epoch with an acquire load.
         _ = p.epoch.fetchAdd(1, .release);
+        if (can_park and p.parked.load(.acquire) != 0) unparkAll(&p.epoch);
 
         drain(p, 0);
 
@@ -154,7 +182,28 @@ fn workerMain(p: *Pool, id: usize) void {
                 break;
             }
             spins +%= 1;
-            if (spins < spin_budget) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
+            if (spins < spin_budget) {
+                std.atomic.spinLoopHint();
+                continue;
+            }
+            if (!can_park) {
+                std.Thread.yield() catch {};
+                continue;
+            }
+
+            // Past the spin budget this thread is waiting on something real —
+            // usually a serial stretch of tree building — so give the core
+            // back instead of burning it.
+            //
+            // Announce the park *before* re-reading the epoch. A publisher
+            // that bumps the epoch after our re-check will see `parked` and
+            // wake us; one that bumps before it makes the futex compare fail,
+            // so the sleep returns immediately. Either order is safe, which is
+            // the whole point of doing it in this sequence.
+            _ = p.parked.fetchAdd(1, .acq_rel);
+            if (p.epoch.load(.acquire) == e and !p.quit.load(.acquire)) park(&p.epoch, e);
+            _ = p.parked.fetchSub(1, .acq_rel);
+            spins = 0;
         }
         if (p.quit.load(.acquire)) return;
         drain(p, id);
@@ -188,6 +237,42 @@ test "parallelFor covers every index exactly once" {
     pool.parallelFor(n, &ctx, Ctx.run, 1);
 
     for (marks) |m| try testing.expectEqual(@as(u8, 1), m);
+}
+
+test "workers park and wake correctly across an idle gap" {
+    // The fast tests never leave a gap long enough for a worker to exceed the
+    // spin budget, so they exercise the spin path only. This one stalls the
+    // main thread past that budget, forcing every helper onto the futex, and
+    // then checks a subsequent round still completes — which is where a lost
+    // wakeup would hang forever.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 4);
+    defer pool.deinit();
+
+    const n = 10_000;
+    const vals = try gpa.alloc(u32, n);
+    defer gpa.free(vals);
+    @memset(vals, 0);
+
+    const Ctx = struct {
+        vals: []u32,
+        fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+            _ = worker;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            for (self.vals[begin..end]) |*v| v.* += 1;
+        }
+    };
+    var ctx = Ctx{ .vals = vals };
+
+    for (0..3) |_| {
+        pool.parallelFor(n, &ctx, Ctx.run, 1);
+        // Stall well past `spin_budget` so the helpers actually sleep.
+        var sink: u64 = 0;
+        for (0..spin_budget * 64) |i| sink +%= i;
+        std.mem.doNotOptimizeAway(sink);
+    }
+
+    for (vals) |v| try testing.expectEqual(@as(u32, 3), v);
 }
 
 test "parallelFor is reusable across rounds" {
