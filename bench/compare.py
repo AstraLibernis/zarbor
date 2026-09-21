@@ -9,8 +9,10 @@ Fairness rests on three things:
     implementation would put ~0.001 of AUC noise on every comparison.
   * Matched hyperparameters, named explicitly below rather than left at each
     library's defaults, which differ from each other.
-  * Training time only. Both sides exclude CSV parsing, which is a separate
-    concern from the learning algorithm.
+  * The same unit of work on both sides: in-memory numeric data to trained
+    model. That means zgbdt is charged for binning as well as training, since
+    the reference libraries bin inside fit(). CSV parsing is excluded from
+    both, pandas having already paid it for the Python side.
 
 What it cannot control for: binning is not identical (zmodels uses quantile
 edges over u8 bins; XGBoost and LightGBM have their own sketching), and
@@ -110,10 +112,20 @@ def run_zgbdt(binary, csv, label, extra):
     if r.returncode != 0:
         return None, None, None, r.stderr.strip()[:200] or r.stdout.strip()[:200]
     auc = re.search(r"auc=([0-9.]+)", r.stdout)
-    ms = re.search(r"train\s+(\d+) ms", r.stdout)
     if not auc:
         return None, None, None, "no auc in output"
-    return float(auc.group(1)), (int(ms.group(1)) / 1000 if ms else None), wall, None
+    # Charge zgbdt for binning as well as training. The reference libraries bin
+    # inside fit() (xgboost ~87 ms, lightgbm ~46 ms on this data), so timing
+    # only zgbdt's `train` line compared a kernel against a kernel-plus-prep
+    # and quietly flattered zgbdt. The fair unit is "in-memory numeric data ->
+    # trained model", which for zgbdt is bin + train and excludes CSV parsing,
+    # since pandas has already paid that on the Python side.
+    ms = re.search(r"^train\s+(\d+) ms", r.stdout, re.M)
+    bin_ms = re.search(r"^bin\s+(\d+) ms", r.stdout, re.M)
+    if not ms:
+        return None, None, None, "no train time in output"
+    total = int(ms.group(1)) + (int(bin_ms.group(1)) if bin_ms else 0)
+    return float(auc.group(1)), total / 1000, wall, None
 
 
 def timed_fit(fit):
