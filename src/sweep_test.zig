@@ -46,6 +46,10 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     const kinds = try gpa.alloc(data.ColumnKind, n_features);
     errdefer gpa.free(kinds);
     @memset(kinds, .numeric);
+    const levels = try gpa.alloc([][]u8, n_features);
+    errdefer gpa.free(levels);
+    @memset(levels, &.{});
+
     const edges = try gpa.alloc([]f32, n_features);
     errdefer gpa.free(edges);
     const names = try gpa.alloc([]u8, n_features);
@@ -65,6 +69,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         .edges = edges,
         .kinds = kinds,
         .names = names,
+        .levels = levels,
         .labels = labels,
     };
 }

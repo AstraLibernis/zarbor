@@ -10,6 +10,7 @@ pub const tree = @import("tree.zig");
 pub const booster = @import("booster.zig");
 pub const forest = @import("forest.zig");
 pub const linear = @import("linear.zig");
+pub const model = @import("model.zig");
 
 test {
     _ = @import("model_test.zig");

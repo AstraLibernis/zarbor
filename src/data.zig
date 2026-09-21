@@ -316,6 +316,14 @@ pub const Dataset = struct {
     edges: [][]f32,
     kinds: []ColumnKind,
     names: [][]u8,
+    /// Level strings for each categorical feature, indexed by dictionary id;
+    /// empty for numeric features.
+    ///
+    /// Retained because a categorical bin *is* its dictionary id, and those
+    /// ids are assigned in order of first appearance. Without the strings, a
+    /// second file cannot be binned the same way as the first, and a saved
+    /// model could not score anything it had not been trained on.
+    levels: [][][]u8,
     /// Empty when the frame carried no target column.
     labels: []f32,
 
@@ -328,6 +336,11 @@ pub const Dataset = struct {
         gpa.free(d.kinds);
         for (d.names) |n| gpa.free(n);
         gpa.free(d.names);
+        for (d.levels) |ls| {
+            for (ls) |l| gpa.free(l);
+            gpa.free(ls);
+        }
+        gpa.free(d.levels);
         if (d.labels.len != 0) gpa.free(d.labels);
         d.* = undefined;
     }
@@ -511,6 +524,18 @@ pub fn quantise(
     pool.parallelFor(n_features, &ctx, BinCtx.run, 1);
     if (ctx.failed.load(.monotonic)) return error.BinningFailed;
 
+    const levels = try gpa.alloc([][]u8, n_features);
+    errdefer gpa.free(levels);
+    @memset(levels, &.{});
+    for (0..n_features) |f| {
+        const col = feats.items[f];
+        if (kinds[f] != .categorical) continue;
+        const src_levels = src.levels[col];
+        const copy = try gpa.alloc([]u8, src_levels.len);
+        for (src_levels, copy) |from, *to| to.* = try gpa.dupe(u8, from);
+        levels[f] = copy;
+    }
+
     var labels: []f32 = &.{};
     if (label_col) |lc| {
         labels = try gpa.dupe(f32, src.values[lc]);
@@ -525,6 +550,7 @@ pub fn quantise(
         .edges = edges,
         .kinds = kinds,
         .names = names,
+        .levels = levels,
         .labels = labels,
     };
 }
@@ -562,6 +588,21 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
     errdefer for (names[0..nm]) |x| gpa.free(x);
     while (nm < ds.names.len) : (nm += 1) names[nm] = try gpa.dupe(u8, ds.names[nm]);
 
+    const levels = try gpa.alloc([][]u8, ds.levels.len);
+    errdefer gpa.free(levels);
+    @memset(levels, &.{});
+    var lv: usize = 0;
+    errdefer for (levels[0..lv]) |ls| {
+        for (ls) |l| gpa.free(l);
+        gpa.free(ls);
+    };
+    while (lv < ds.levels.len) : (lv += 1) {
+        if (ds.levels[lv].len == 0) continue;
+        const copy = try gpa.alloc([]u8, ds.levels[lv].len);
+        for (ds.levels[lv], copy) |from, *to| to.* = try gpa.dupe(u8, from);
+        levels[lv] = copy;
+    }
+
     var labels: []f32 = &.{};
     if (ds.labels.len != 0) {
         labels = try gpa.alloc(f32, n);
@@ -577,6 +618,185 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .edges = edges,
         .kinds = kinds,
         .names = names,
+        .levels = levels,
         .labels = labels,
     };
+}
+
+// ------------------------------------------------------------------ schema
+
+/// Everything needed to bin a new table exactly as a training table was.
+///
+/// This is what makes a saved model usable: bin edges alone are not enough,
+/// because a categorical bin *is* its dictionary id and those ids are assigned
+/// in order of first appearance. Scoring a second file without the original
+/// level strings would map "Male" to whichever id that file happened to give
+/// it, silently producing a different model input.
+pub const Schema = struct {
+    gpa: std.mem.Allocator,
+    n_features: usize,
+    names: [][]u8,
+    kinds: []ColumnKind,
+    n_bins: []u16,
+    edges: [][]f32,
+    levels: [][][]u8,
+
+    pub fn deinit(s: *Schema) void {
+        const gpa = s.gpa;
+        for (s.names) |n| gpa.free(n);
+        gpa.free(s.names);
+        gpa.free(s.kinds);
+        gpa.free(s.n_bins);
+        for (s.edges) |e| gpa.free(e);
+        gpa.free(s.edges);
+        for (s.levels) |ls| {
+            for (ls) |l| gpa.free(l);
+            gpa.free(ls);
+        }
+        gpa.free(s.levels);
+        s.* = undefined;
+    }
+
+    pub fn fromDataset(gpa: std.mem.Allocator, ds: *const Dataset) !Schema {
+        var s = Schema{
+            .gpa = gpa,
+            .n_features = ds.n_features,
+            .names = try gpa.alloc([]u8, ds.n_features),
+            .kinds = try gpa.dupe(ColumnKind, ds.kinds),
+            .n_bins = try gpa.dupe(u16, ds.n_bins),
+            .edges = try gpa.alloc([]f32, ds.n_features),
+            .levels = try gpa.alloc([][]u8, ds.n_features),
+        };
+        @memset(s.names, &.{});
+        @memset(s.edges, &.{});
+        @memset(s.levels, &.{});
+        errdefer s.deinit();
+        for (0..ds.n_features) |f| {
+            s.names[f] = try gpa.dupe(u8, ds.names[f]);
+            s.edges[f] = try gpa.dupe(f32, ds.edges[f]);
+            if (ds.levels[f].len != 0) {
+                const copy = try gpa.alloc([]u8, ds.levels[f].len);
+                for (ds.levels[f], copy) |from, *to| to.* = try gpa.dupe(u8, from);
+                s.levels[f] = copy;
+            }
+        }
+        return s;
+    }
+
+    pub fn columnIndex(s: *const Schema, name: []const u8) ?usize {
+        for (s.names, 0..) |n, i| if (std.mem.eql(u8, n, name)) return i;
+        return null;
+    }
+};
+
+const ApplyCtx = struct {
+    src: *const Frame,
+    schema: *const Schema,
+    /// Column of `src` supplying each schema feature.
+    src_col: []const usize,
+    bins: []u8,
+    n_rows: usize,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *ApplyCtx = @ptrCast(@alignCast(ctx));
+        var f = begin;
+        while (f < end) : (f += 1) {
+            const vals = self.src.values[self.src_col[f]];
+            const out = self.bins[f * self.n_rows ..][0..self.n_rows];
+            switch (self.schema.kinds[f]) {
+                .numeric => {
+                    const edges = self.schema.edges[f];
+                    for (vals, out) |v, *b| {
+                        b.* = if (std.math.isNan(v)) 0 else @intCast(lowerBound(edges, v) + 1);
+                    }
+                },
+                .categorical => {
+                    // The new frame built its own dictionary, so translate
+                    // through the strings. A level the model never saw becomes
+                    // the missing bin, which every split already handles.
+                    const src_levels = self.src.levels[self.src_col[f]];
+                    for (vals, out) |v, *b| {
+                        if (std.math.isNan(v)) {
+                            b.* = 0;
+                            continue;
+                        }
+                        const id: usize = @intFromFloat(v);
+                        b.* = 0;
+                        if (id >= src_levels.len) continue;
+                        for (self.schema.levels[f], 0..) |lvl, j| {
+                            if (std.mem.eql(u8, lvl, src_levels[id])) {
+                                b.* = @intCast(j + 1);
+                                break;
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+};
+
+/// Bin `src` under an existing `schema`, matching columns by name.
+///
+/// `label` names an optional target column to carry through, so a saved model
+/// can be scored against a labelled holdout as well as used for prediction.
+pub fn applySchema(
+    gpa: std.mem.Allocator,
+    pool: *Pool,
+    src: *const Frame,
+    schema: *const Schema,
+    label: ?[]const u8,
+) !Dataset {
+    const n = schema.n_features;
+    const src_col = try gpa.alloc(usize, n);
+    defer gpa.free(src_col);
+    for (0..n) |f| {
+        src_col[f] = src.columnIndex(schema.names[f]) orelse return error.MissingFeatureColumn;
+        // A column that was categorical in training but parses as numeric here
+        // (or the reverse) would bin into a different space entirely.
+        if (src.kinds[src_col[f]] != schema.kinds[f]) return error.FeatureKindMismatch;
+    }
+
+    const bins = try gpa.alloc(u8, n * src.n_rows);
+    errdefer gpa.free(bins);
+
+    var ctx = ApplyCtx{
+        .src = src,
+        .schema = schema,
+        .src_col = src_col,
+        .bins = bins,
+        .n_rows = src.n_rows,
+    };
+    pool.parallelFor(n, &ctx, ApplyCtx.run, 1);
+
+    var out = Dataset{
+        .gpa = gpa,
+        .n_rows = src.n_rows,
+        .n_features = n,
+        .bins = bins,
+        .n_bins = try gpa.dupe(u16, schema.n_bins),
+        .edges = try gpa.alloc([]f32, n),
+        .kinds = try gpa.dupe(ColumnKind, schema.kinds),
+        .names = try gpa.alloc([]u8, n),
+        .levels = try gpa.alloc([][]u8, n),
+        .labels = &.{},
+    };
+    @memset(out.edges, &.{});
+    @memset(out.names, &.{});
+    @memset(out.levels, &.{});
+    errdefer out.deinit();
+    for (0..n) |f| {
+        out.edges[f] = try gpa.dupe(f32, schema.edges[f]);
+        out.names[f] = try gpa.dupe(u8, schema.names[f]);
+        if (schema.levels[f].len != 0) {
+            const copy = try gpa.alloc([]u8, schema.levels[f].len);
+            for (schema.levels[f], copy) |from, *to| to.* = try gpa.dupe(u8, from);
+            out.levels[f] = copy;
+        }
+    }
+    if (label) |name| {
+        if (src.columnIndex(name)) |lc| out.labels = try gpa.dupe(f32, src.values[lc]);
+    }
+    return out;
 }

@@ -55,6 +55,10 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     errdefer gpa.free(kinds);
     @memset(kinds, .numeric);
 
+    const levels = try gpa.alloc([][]u8, n_features);
+    errdefer gpa.free(levels);
+    @memset(levels, &.{});
+
     const edges = try gpa.alloc([]f32, n_features);
     errdefer gpa.free(edges);
     const names = try gpa.alloc([]u8, n_features);
@@ -75,6 +79,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         .edges = edges,
         .kinds = kinds,
         .names = names,
+        .levels = levels,
         .labels = labels,
     };
 }
@@ -257,4 +262,236 @@ test "linear model learns the signal and L1 drives coefficients to zero" {
     }, null);
     defer sparse.model.deinit();
     try testing.expect(sparse.model.nZero() > 0);
+}
+
+// --------------------------------------------------------- save / load / blend
+
+const model_mod = @import("model.zig");
+
+/// Builds a Frame by hand so a test can control the dictionary order, which is
+/// the whole point of the schema.
+fn frameWith(gpa: std.mem.Allocator, colours: []const []const u8, nums: []const f32) !data.Frame {
+    const n = colours.len;
+    var levels_list: std.ArrayList([]u8) = .empty;
+    errdefer levels_list.deinit(gpa);
+    const cat_vals = try gpa.alloc(f32, n);
+    for (colours, cat_vals) |c, *v| {
+        var id: ?usize = null;
+        for (levels_list.items, 0..) |l, i| if (std.mem.eql(u8, l, c)) {
+            id = i;
+        };
+        if (id == null) {
+            try levels_list.append(gpa, try gpa.dupe(u8, c));
+            id = levels_list.items.len - 1;
+        }
+        v.* = @floatFromInt(id.?);
+    }
+
+    const names = try gpa.alloc([]u8, 2);
+    names[0] = try gpa.dupe(u8, "colour");
+    names[1] = try gpa.dupe(u8, "num");
+    const kinds = try gpa.alloc(data.ColumnKind, 2);
+    kinds[0] = .categorical;
+    kinds[1] = .numeric;
+    const values = try gpa.alloc([]f32, 2);
+    values[0] = cat_vals;
+    values[1] = try gpa.dupe(f32, nums);
+    const levels = try gpa.alloc([][]u8, 2);
+    levels[0] = try levels_list.toOwnedSlice(gpa);
+    levels[1] = &.{};
+
+    return .{
+        .gpa = gpa,
+        .n_rows = n,
+        .names = names,
+        .kinds = kinds,
+        .values = values,
+        .levels = levels,
+    };
+}
+
+test "applySchema maps categories by string, not by the new file's own ids" {
+    // The trap this exists to catch: a categorical bin *is* its dictionary id,
+    // and ids are assigned in order of first appearance. Here the second file
+    // introduces the same two levels in the opposite order, so binning it on
+    // its own would map "red" and "blue" to each other's bins and silently
+    // score a different model input.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var train = try frameWith(gpa, &.{ "red", "blue", "red", "green" }, &.{ 1, 2, 3, 4 });
+    defer train.deinit();
+    var train_ds = try data.quantise(gpa, pool, &train, .{}, null, &.{});
+    defer train_ds.deinit();
+
+    var schema = try data.Schema.fromDataset(gpa, &train_ds);
+    defer schema.deinit();
+
+    // Opposite order of first appearance.
+    var test_f = try frameWith(gpa, &.{ "green", "blue", "red", "mauve" }, &.{ 4, 3, 2, 1 });
+    defer test_f.deinit();
+    var test_ds = try data.applySchema(gpa, pool, &test_f, &schema, null);
+    defer test_ds.deinit();
+
+    const cat = test_ds.column(0);
+    const train_cat = train_ds.column(0);
+    // red is bin 1 and blue bin 2 in training; the test file must agree.
+    try testing.expectEqual(train_cat[0], cat[2]); // red
+    try testing.expectEqual(train_cat[1], cat[1]); // blue
+    try testing.expectEqual(train_cat[3], cat[0]); // green
+    // A level never seen in training falls into the missing bin.
+    try testing.expectEqual(@as(u8, 0), cat[3]); // mauve
+}
+
+fn roundTrip(kind: config.Algo) !void {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var ds = try synth(gpa, 3000, 31);
+    defer ds.deinit();
+    var schema = try data.Schema.fromDataset(gpa, &ds);
+    errdefer schema.deinit();
+
+    var bundle: model_mod.Bundle = undefined;
+    var keep_linear: ?linear.Linear = null;
+    switch (kind) {
+        .gbdt => {
+            var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 25, .max_depth = 4, .verbose_eval = 0 }, null);
+            defer res.model.deinit();
+            bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        },
+        .random_forest => {
+            var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
+            cfg.applyAlgoDefaults(&.{});
+            var res = try forest.train(gpa, pool, &ds, null, cfg, null);
+            defer res.model.deinit();
+            bundle = try model_mod.fromForest(gpa, &res.model, schema);
+        },
+        .linear => {
+            const res = try linear.train(gpa, pool, &ds, null, .{ .algo = .linear, .lin_epochs = 60, .verbose_eval = 0 }, null);
+            keep_linear = res.model;
+            bundle = .{ .gpa = gpa, .kind = .linear, .schema = schema, .objective = .logistic, .lin = res.model };
+        },
+    }
+    defer {
+        if (keep_linear) |*l| {
+            l.deinit();
+            bundle.schema.deinit();
+        } else bundle.deinit();
+    }
+
+    const before = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(before);
+    bundle.predict(pool, &ds, before);
+
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+    var loaded = try model_mod.deserialise(gpa, bytes);
+    defer loaded.deinit();
+
+    const after = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(after);
+    loaded.predict(pool, &ds, after);
+
+    // Bit-identical, not approximately equal: a saved model that drifts is a
+    // model whose submitted predictions do not match the ones you validated.
+    for (before, after) |x, y| try testing.expectEqual(x, y);
+    try testing.expectEqual(bundle.schema.n_features, loaded.schema.n_features);
+}
+
+test "gbdt survives a save/load round trip exactly" {
+    try roundTrip(.gbdt);
+}
+test "random forest survives a save/load round trip exactly" {
+    try roundTrip(.random_forest);
+}
+test "linear survives a save/load round trip exactly" {
+    try roundTrip(.linear);
+}
+
+test "blend weights behave, and mixing model kinds works" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var ds = try synth(gpa, 2500, 37);
+    defer ds.deinit();
+
+    var gb = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }, null);
+    defer gb.model.deinit();
+    var a = try model_mod.fromBooster(gpa, &gb.model, try data.Schema.fromDataset(gpa, &ds));
+    defer a.deinit();
+
+    var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
+    cfg.applyAlgoDefaults(&.{});
+    var rf = try forest.train(gpa, pool, &ds, null, cfg, null);
+    defer rf.model.deinit();
+    var b = try model_mod.fromForest(gpa, &rf.model, try data.Schema.fromDataset(gpa, &ds));
+    defer b.deinit();
+
+    const pa = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(pa);
+    const pb = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(pb);
+    const mix = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(mix);
+    a.predict(pool, &ds, pa);
+    b.predict(pool, &ds, pb);
+
+    const refs = [_]*const model_mod.Bundle{ &a, &b };
+
+    // All the weight on one model reproduces that model.
+    try model_mod.blend(gpa, pool, &refs, &.{ 1, 0 }, &ds, mix);
+    for (pa, mix) |x, y| try testing.expectApproxEqAbs(x, y, 1e-6);
+
+    // Equal weights give the mean of a booster's probabilities and a forest's
+    // — different kinds, one scale, which is the point of the interface.
+    try model_mod.blend(gpa, pool, &refs, &.{ 1, 1 }, &ds, mix);
+    for (pa, pb, mix) |x, y, m| try testing.expectApproxEqAbs((x + y) / 2.0, m, 1e-6);
+
+    // Weights are normalised, so 3:1 and 30:10 agree.
+    const m2 = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(m2);
+    try model_mod.blend(gpa, pool, &refs, &.{ 3, 1 }, &ds, mix);
+    try model_mod.blend(gpa, pool, &refs, &.{ 30, 10 }, &ds, m2);
+    for (mix, m2) |x, y| try testing.expectApproxEqAbs(x, y, 1e-6);
+
+    try testing.expectError(error.WeightCountMismatch, model_mod.blend(gpa, pool, &refs, &.{1}, &ds, mix));
+    try testing.expectError(error.WeightsSumToZero, model_mod.blend(gpa, pool, &refs, &.{ 0, 0 }, &ds, mix));
+}
+
+test "a corrupt or truncated model file is rejected, not read past" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    var ds = try synth(gpa, 800, 41);
+    defer ds.deinit();
+    var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 5, .max_depth = 3, .verbose_eval = 0 }, null);
+    defer res.model.deinit();
+    var bundle = try model_mod.fromBooster(gpa, &res.model, try data.Schema.fromDataset(gpa, &ds));
+    defer bundle.deinit();
+
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.NotAModelFile, model_mod.deserialise(gpa, "nope"));
+    try testing.expectError(error.NotAModelFile, model_mod.deserialise(gpa, bytes[4..]));
+
+    // Every truncation must fail cleanly rather than read out of bounds.
+    var cut: usize = 4;
+    while (cut < bytes.len) : (cut += @max(1, bytes.len / 37)) {
+        if (model_mod.deserialise(gpa, bytes[0..cut])) |*m| {
+            var mm = m.*;
+            mm.deinit();
+            return error.TruncationAccepted;
+        } else |_| {}
+    }
+
+    // A wrong version is refused rather than misparsed.
+    const bad = try gpa.dupe(u8, bytes);
+    defer gpa.free(bad);
+    bad[4] = 99;
+    try testing.expectError(error.UnsupportedModelVersion, model_mod.deserialise(gpa, bad));
 }

@@ -28,8 +28,9 @@ pub const max_design_cols: usize = 1 << 16;
 
 const numeric_col: u16 = std.math.maxInt(u16);
 
-/// One column of the design matrix.
-const Col = struct {
+/// One column of the design matrix. Public because saving a linear model
+/// means writing these out.
+pub const Col = struct {
     feature: u32,
     /// `numeric_col`, or the bin this one-hot column indicates.
     bin: u16,
