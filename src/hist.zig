@@ -251,14 +251,47 @@ pub fn build(
 /// `out = parent - sibling`, the subtraction trick: a node's histogram is
 /// derivable from its parent and its sibling, so only the cheaper child of
 /// each pair ever needs a real build.
-pub fn subtract(bank: *Bank, out: []Bin, parent: []const Bin, sibling: []const Bin, features: []const u32) void {
-    for (features) |fid| {
-        const lo = fid * bank.stride;
-        const o = out[lo..][0..bank.stride];
-        const p = parent[lo..][0..bank.stride];
-        const s = sibling[lo..][0..bank.stride];
-        for (o, p, s) |*d, pv, sv| d.* = pv.sub(sv);
+const SubCtx = struct {
+    bank: *Bank,
+    features: []const u32,
+    out: []Bin,
+    parent: []const Bin,
+    sibling: []const Bin,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SubCtx = @ptrCast(@alignCast(ctx));
+        const stride = self.bank.stride;
+        var i = begin;
+        while (i < end) : (i += 1) {
+            const fid = self.features[i / stride];
+            const k = fid * stride + (i % stride);
+            self.out[k] = self.parent[k].sub(self.sibling[k]);
+        }
     }
+};
+
+/// A node's histogram is its parent's minus its sibling's.
+///
+/// Worth parallelising despite being pure memory traffic: it runs once per
+/// internal node, and at 256 bins over a dozen features that is enough bytes
+/// per node to show up plainly in a profile of tree building.
+pub fn subtract(
+    pool: *Pool,
+    bank: *Bank,
+    out: []Bin,
+    parent: []const Bin,
+    sibling: []const Bin,
+    features: []const u32,
+) void {
+    var ctx = SubCtx{
+        .bank = bank,
+        .features = features,
+        .out = out,
+        .parent = parent,
+        .sibling = sibling,
+    };
+    pool.parallelFor(features.len * bank.stride, &ctx, SubCtx.run, 1024);
 }
 
 // ------------------------------------------------------------ split search

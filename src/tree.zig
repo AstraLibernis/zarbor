@@ -83,6 +83,13 @@ pub const Builder = struct {
 
     rows: []u32,
     grads: []hist.GradPair,
+    /// Destination for the parallel partition, which cannot be done in place.
+    rows_out: []u32,
+    grads_out: []hist.GradPair,
+    /// Per-chunk left-hand counts, plus one for the total.
+    part_counts: []usize,
+    part_left: []usize,
+    part_right: []usize,
     /// Rows active for the current tree: `rows[0..n_active]`.
     n_active: usize,
 
@@ -127,6 +134,18 @@ pub const Builder = struct {
         errdefer gpa.free(rows);
         const grads = try gpa.alloc(hist.GradPair, ds.n_rows);
         errdefer gpa.free(grads);
+        const rows_out = try gpa.alloc(u32, ds.n_rows);
+        errdefer gpa.free(rows_out);
+        const grads_out = try gpa.alloc(hist.GradPair, ds.n_rows);
+        errdefer gpa.free(grads_out);
+
+        const n_chunks = pool.workerCount() * 4 + 2;
+        const part_counts = try gpa.alloc(usize, n_chunks);
+        errdefer gpa.free(part_counts);
+        const part_left = try gpa.alloc(usize, n_chunks);
+        errdefer gpa.free(part_left);
+        const part_right = try gpa.alloc(usize, n_chunks);
+        errdefer gpa.free(part_right);
 
         const all_features = try gpa.alloc(u32, ds.n_features);
         errdefer gpa.free(all_features);
@@ -147,6 +166,11 @@ pub const Builder = struct {
             .free_slots = free_slots,
             .rows = rows,
             .grads = grads,
+            .rows_out = rows_out,
+            .grads_out = grads_out,
+            .part_counts = part_counts,
+            .part_left = part_left,
+            .part_right = part_right,
             .n_active = 0,
             .nodes = .empty,
             .queue = .empty,
@@ -169,6 +193,11 @@ pub const Builder = struct {
         b.free_slots.deinit(gpa);
         gpa.free(b.rows);
         gpa.free(b.grads);
+        gpa.free(b.rows_out);
+        gpa.free(b.grads_out);
+        gpa.free(b.part_counts);
+        gpa.free(b.part_left);
+        gpa.free(b.part_right);
         gpa.free(b.all_features);
         gpa.free(b.tree_features);
         gpa.free(b.level_features);
@@ -253,16 +282,74 @@ pub const Builder = struct {
         };
     }
 
+    /// Below this many rows the barriers cost more than the scan saves.
+    const parallel_partition_min: usize = 1 << 15;
+
+    inline fn goesLeft(bin: u8, sp: hist.Split) bool {
+        return if (bin == 0) sp.missing_left else bin <= sp.threshold;
+    }
+
     /// Reorder `rows[start..end]` so the left child's rows come first.
     /// Gradients move with them, keeping `grads[i]` the gradient of `rows[i]`.
+    ///
+    /// This is per-level O(rows) work and used to be the serial half of tree
+    /// building: with it single-threaded, 16 threads bought only 1.66x over 1,
+    /// and time scaled with tree *depth* rather than node count. It is now a
+    /// count / prefix-sum / scatter, which is three parallel passes instead of
+    /// one serial one.
     fn partition(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
+        const n = end - start;
+        if (n < parallel_partition_min or b.pool.workerCount() == 1)
+            return b.partitionSerial(start, end, sp);
+
+        const col = b.ds.column(sp.feature);
+        const n_chunks = b.pool.workerCount() * 4;
+        const csize = (n + n_chunks - 1) / n_chunks;
+        const used = (n + csize - 1) / csize;
+        std.debug.assert(used <= b.part_counts.len);
+
+        var ctx = PartCtx{
+            .rows = b.rows,
+            .grads = b.grads,
+            .rows_out = b.rows_out,
+            .grads_out = b.grads_out,
+            .col = col,
+            .sp = sp,
+            .start = start,
+            .chunk = csize,
+            .counts = b.part_counts[0..used],
+            .left = b.part_left[0..used],
+            .right = b.part_right[0..used],
+        };
+
+        // 1. How many of each chunk's rows go left.
+        b.pool.parallelFor(n, &ctx, PartCtx.count, csize);
+
+        // 2. Prefix sums. `used` is a few dozen at most, so serial is right.
+        var total_left: usize = 0;
+        for (ctx.counts) |c| total_left += c;
+        var l: usize = start;
+        var r: usize = start + total_left;
+        for (ctx.counts, 0..) |c, i| {
+            ctx.left[i] = l;
+            ctx.right[i] = r;
+            l += c;
+            r += (@min((i + 1) * csize, n) - i * csize) - c;
+        }
+
+        // 3. Scatter to the scratch buffers, then copy the touched range back.
+        b.pool.parallelFor(n, &ctx, PartCtx.scatter, csize);
+        b.pool.parallelFor(n, &ctx, PartCtx.copyBack, 8192);
+
+        return start + total_left;
+    }
+
+    fn partitionSerial(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
         const col = b.ds.column(sp.feature);
         var i = start;
         var j = end;
         while (i < j) {
-            const bin = col[b.rows[i]];
-            const go_left = if (bin == 0) sp.missing_left else bin <= sp.threshold;
-            if (go_left) {
+            if (goesLeft(col[b.rows[i]], sp)) {
                 i += 1;
             } else {
                 j -= 1;
@@ -355,8 +442,10 @@ pub const Builder = struct {
 
         b.selectRows(subset);
 
-        // One gather for the whole tree.
-        for (0..b.n_active) |i| b.grads[i] = gradients[b.rows[i]];
+        // One gather for the whole tree. Random-access over every active row,
+        // so it is worth a barrier rather than leaving it on one core.
+        var gctx = GatherCtx{ .dst = b.grads, .src = gradients, .rows = b.rows };
+        b.pool.parallelFor(b.n_active, &gctx, GatherCtx.run, 16384);
 
         b.n_tree_features = b.sample(
             b.all_features,
@@ -435,10 +524,10 @@ pub const Builder = struct {
             const n_right = w.end - mid;
             if (n_left <= n_right) {
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], tree_feats, b.slot(slot_l));
-                hist.subtract(&b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), tree_feats);
+                hist.subtract(b.pool, &b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), tree_feats);
             } else {
                 hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], tree_feats, b.slot(slot_r));
-                hist.subtract(&b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), tree_feats);
+                hist.subtract(b.pool, &b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), tree_feats);
             }
             b.giveSlot(w.slot);
 
@@ -492,5 +581,81 @@ pub const Builder = struct {
 
     pub fn activeRows(b: *const Builder) []const u32 {
         return b.rows[0..b.n_active];
+    }
+};
+
+
+/// Shared state for the three passes of a parallel partition.
+///
+/// `parallelFor` hands out fixed-size chunks from a cursor, so `begin / chunk`
+/// recovers which chunk a worker got — which is what lets the counting pass
+/// and the scatter pass agree on where each chunk's output belongs without any
+/// coordination between them.
+const PartCtx = struct {
+    rows: []u32,
+    grads: []hist.GradPair,
+    rows_out: []u32,
+    grads_out: []hist.GradPair,
+    col: []const u8,
+    sp: hist.Split,
+    start: usize,
+    chunk: usize,
+    counts: []usize,
+    left: []usize,
+    right: []usize,
+
+    fn count(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        var n: usize = 0;
+        for (self.rows[self.start + begin .. self.start + end]) |row| {
+            if (Builder.goesLeft(self.col[row], self.sp)) n += 1;
+        }
+        self.counts[begin / self.chunk] = n;
+    }
+
+    fn scatter(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        const c = begin / self.chunk;
+        var li = self.left[c];
+        var ri = self.right[c];
+        var i = self.start + begin;
+        while (i < self.start + end) : (i += 1) {
+            const row = self.rows[i];
+            if (Builder.goesLeft(self.col[row], self.sp)) {
+                self.rows_out[li] = row;
+                self.grads_out[li] = self.grads[i];
+                li += 1;
+            } else {
+                self.rows_out[ri] = row;
+                self.grads_out[ri] = self.grads[i];
+                ri += 1;
+            }
+        }
+    }
+
+    fn copyBack(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        const a = self.start + begin;
+        const b_ = self.start + end;
+        @memcpy(self.rows[a..b_], self.rows_out[a..b_]);
+        @memcpy(self.grads[a..b_], self.grads_out[a..b_]);
+    }
+};
+
+
+/// Permutes gradients into the row order this tree will walk.
+const GatherCtx = struct {
+    dst: []hist.GradPair,
+    src: []const hist.GradPair,
+    rows: []const u32,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *GatherCtx = @ptrCast(@alignCast(ctx));
+        var i = begin;
+        while (i < end) : (i += 1) self.dst[i] = self.src[self.rows[i]];
     }
 };

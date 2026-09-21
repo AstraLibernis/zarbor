@@ -21,6 +21,8 @@ const usage =
     \\  --valid-frac=F      fraction held out for validation (default 0.2)
     \\  --split-seed=N      seed for the validation split (default 1)
     \\  --max-bytes=N       CSV size cap in bytes (default 1<<31)
+    \\  --split-col=NAME    column assigning rows to train(0)/valid(nonzero);
+    \\                      overrides --valid-frac, and is dropped as a feature
     \\
     \\Any Config field is also a flag, e.g.:
     \\  --n_rounds=800 --learning_rate=0.05 --max_depth=7 --lambda=2.0
@@ -73,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
     var valid_frac: f32 = 0.2;
     var split_seed: u64 = 1;
     var max_bytes: usize = 1 << 31;
+    var split_col: ?[]const u8 = null;
 
     var drops: std.ArrayList([]const u8) = .empty;
     defer drops.deinit(gpa);
@@ -106,6 +109,8 @@ pub fn main(init: std.process.Init) !void {
             valid_frac = try std.fmt.parseFloat(f32, val);
         } else if (std.mem.eql(u8, key, "split-seed")) {
             split_seed = try std.fmt.parseInt(u64, val, 10);
+        } else if (std.mem.eql(u8, key, "split-col")) {
+            split_col = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
         } else if (try applyConfigFlag(&cfg, key, val)) {
@@ -142,6 +147,17 @@ pub fn main(init: std.process.Init) !void {
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
 
+    // An explicit split column assigns rows to train/validation by value
+    // instead of by a random draw. It exists so an external tool can hand this
+    // program exactly the same partition it used itself, which is the only way
+    // to compare against another implementation without the split being a
+    // confound. It is a label, never a feature.
+    var split_idx: ?usize = null;
+    if (split_col) |name| {
+        split_idx = frame.columnIndex(name) orelse return error.SplitColumnNotFound;
+        try drops.append(gpa, name);
+    }
+
     var full = try data.quantise(gpa, pool, &frame, cfg, label_col, drops.items);
     defer full.deinit();
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
@@ -169,8 +185,30 @@ pub fn main(init: std.process.Init) !void {
     // --- train / validation split ---
     const perm = try gpa.alloc(u32, full.n_rows);
     defer gpa.free(perm);
-    for (perm, 0..) |*p, i| p.* = @intCast(i);
-    {
+
+    var n_train: usize = undefined;
+    var n_valid: usize = undefined;
+
+    if (split_idx) |sc| {
+        // Train rows first, validation rows after, so the same `subset` calls
+        // below work unchanged. A non-zero value means validation.
+        const col = frame.values[sc];
+        var head: usize = 0;
+        var tail: usize = full.n_rows;
+        for (col, 0..) |v, i| {
+            if (v >= 0.5) {
+                tail -= 1;
+                perm[tail] = @intCast(i);
+            } else {
+                perm[head] = @intCast(i);
+                head += 1;
+            }
+        }
+        n_train = head;
+        n_valid = full.n_rows - head;
+        if (n_train == 0) return error.SplitColumnLeftNoTrainingRows;
+    } else {
+        for (perm, 0..) |*p, i| p.* = @intCast(i);
         var prng: std.Random.DefaultPrng = .init(split_seed);
         const r = prng.random();
         var i: usize = full.n_rows;
@@ -179,9 +217,9 @@ pub fn main(init: std.process.Init) !void {
             const j = r.uintLessThan(usize, i + 1);
             std.mem.swap(u32, &perm[i], &perm[j]);
         }
+        n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(full.n_rows)) * valid_frac));
+        n_train = full.n_rows - n_valid;
     }
-    const n_valid: usize = @intFromFloat(@round(@as(f32, @floatFromInt(full.n_rows)) * valid_frac));
-    const n_train = full.n_rows - n_valid;
 
     var train_ds = try data.subset(gpa, &full, perm[0..n_train]);
     defer train_ds.deinit();
