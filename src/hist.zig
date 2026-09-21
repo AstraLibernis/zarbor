@@ -25,18 +25,40 @@ pub const GradPair = extern struct {
     h: f32,
 };
 
+/// One histogram cell: gradient sum, hessian sum, row count.
+///
+/// Four f64 lanes, 32-byte aligned, rather than two doubles and a `u32`
+/// count. The count in a lane makes the whole update a *single* aligned
+/// vector load-add-store instead of three separate scattered
+/// read-modify-writes, and the dead fourth lane pays for itself by making the
+/// element size a power of two, so indexing is a shift rather than a multiply.
+///
+/// Measured against the 24-byte shape on the real bin widths: 1.35x on its
+/// own, and it composes with the row-major layout rather than overlapping
+/// with it (1.74x layout alone, 2.34x together, every node size from 2k to
+/// 500k rows).
 pub const Bin = extern struct {
-    g: f64 = 0,
+    g: f64 align(32) = 0,
     h: f64 = 0,
-    n: u32 = 0,
-    _pad: u32 = 0,
+    n: f64 = 0,
+    _pad: f64 = 0,
+
+    pub const Vec = @Vector(4, f64);
+
+    pub inline fn vec(b: Bin) Vec {
+        return @bitCast(b);
+    }
+
+    pub inline fn fromVec(x: Vec) Bin {
+        return @bitCast(x);
+    }
 
     pub inline fn add(a: Bin, b: Bin) Bin {
-        return .{ .g = a.g + b.g, .h = a.h + b.h, .n = a.n + b.n };
+        return fromVec(a.vec() + b.vec());
     }
 
     pub inline fn sub(a: Bin, b: Bin) Bin {
-        return .{ .g = a.g - b.g, .h = a.h - b.h, .n = a.n - b.n };
+        return fromVec(a.vec() - b.vec());
     }
 };
 
@@ -133,13 +155,36 @@ pub const Bank = struct {
     }
 };
 
+/// Row-outer accumulation over the row-major bin matrix.
+///
+/// The obvious loop is feature-outer over the column-major bins, and it is
+/// what this was for a long time. Two things make row-outer 1.74x faster on
+/// real data:
+///
+///  * A row's bins are one contiguous run, so `rows[i]` and `grads[i]` are
+///    read once per row instead of once per row *per feature*.
+///  * The updates within a row hit thirteen different feature histograms, so
+///    they are independent. Feature-outer updates one histogram repeatedly,
+///    and on a 3-bin categorical consecutive rows collide constantly, which
+///    serialises the whole loop on store-to-load forwarding.
+///
+/// The second point is why this was measured at only 1.07x once before: that
+/// benchmark gave every feature 256 bins, where collisions are rare and the
+/// histogram spills to L2. Real tables are lopsided — here two columns hold
+/// 437 of the 559 bins and the other eleven have three to seven each.
+///
+/// No prefetching and no unrolling: both measured slower. The rows arrive
+/// ascending from the stable partition, so the hardware prefetcher already
+/// has the stream, and extra rows in flight only add register pressure.
 const BuildCtx = struct {
     bank: *Bank,
     ds: *const Dataset,
     /// Row ids belonging to this node, contiguous.
     rows: []const u32,
-    /// `grads[i]` is the gradient of `rows[i]` — pre-gathered, so this is read
-    /// sequentially.
+    /// Gradients indexed by original row id, so `grads[rows[i]]`. Not
+    /// permuted to match `rows`: keeping the permutation in step tripled what
+    /// the partition had to move, and the gather here measures at 4 ms across
+    /// a 200-tree fit.
     grads: []const GradPair,
     features: []const u32,
 
@@ -148,42 +193,19 @@ const BuildCtx = struct {
         const bank = self.bank;
         const span = bank.slotLen();
         const mine = bank.private[worker * span ..][0..span];
+        const nf = self.ds.n_features;
+        const rm = self.ds.bins_rm;
+        const offs = bank.offsets;
 
-        for (self.features) |fid| {
-            const col = self.ds.column(fid);
-            const h = mine[bank.offsets[fid]..bank.offsets[fid + 1]];
-            var i = begin;
-            // Unrolled by four. The accumulators are independent unless two
-            // rows share a bin, so this exposes enough ILP to hide the
-            // read-modify-write latency in the common case.
-            while (i + 4 <= end) : (i += 4) {
-                const b0 = col[self.rows[i + 0]];
-                const b1 = col[self.rows[i + 1]];
-                const b2 = col[self.rows[i + 2]];
-                const b3 = col[self.rows[i + 3]];
-                const g0 = self.grads[i + 0];
-                const g1 = self.grads[i + 1];
-                const g2 = self.grads[i + 2];
-                const g3 = self.grads[i + 3];
-                h[b0].g += g0.g;
-                h[b0].h += g0.h;
-                h[b0].n += 1;
-                h[b1].g += g1.g;
-                h[b1].h += g1.h;
-                h[b1].n += 1;
-                h[b2].g += g2.g;
-                h[b2].h += g2.h;
-                h[b2].n += 1;
-                h[b3].g += g3.g;
-                h[b3].h += g3.h;
-                h[b3].n += 1;
-            }
-            while (i < end) : (i += 1) {
-                const b = col[self.rows[i]];
-                const g = self.grads[i];
-                h[b].g += g.g;
-                h[b].h += g.h;
-                h[b].n += 1;
+        var i = begin;
+        while (i < end) : (i += 1) {
+            const row: usize = self.rows[i];
+            const rb = rm[row * nf ..][0..nf];
+            const g = self.grads[row];
+            const v = Bin.Vec{ g.g, g.h, 1, 0 };
+            for (self.features) |fid| {
+                const cell: *Bin.Vec = @ptrCast(&mine[offs[fid] + rb[fid]]);
+                cell.* += v;
             }
         }
     }
@@ -352,7 +374,8 @@ inline fn consider(
     parent_score: f64,
     p: SplitParams,
 ) void {
-    if (left.n < p.min_child_samples or right.n < p.min_child_samples) return;
+    const min_n: f64 = @floatFromInt(p.min_child_samples);
+    if (left.n < min_n or right.n < min_n) return;
     if (left.h < p.min_child_weight or right.h < p.min_child_weight) return;
     const gain = 0.5 * (nodeScore(left.g, left.h, p) + nodeScore(right.g, right.h, p) - parent_score) - p.min_split_gain;
     if (gain > best.gain) {

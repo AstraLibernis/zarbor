@@ -60,11 +60,19 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         edges[f] = e;
         names[f] = try std.fmt.allocPrint(gpa, "f{d}", .{f});
     }
+    // Mirror of `bins`, since the histogram kernel reads row-major.
+    const bins_rm = try gpa.alloc(u8, n_features * n_rows);
+    errdefer gpa.free(bins_rm);
+    for (0..n_rows) |ri| for (0..n_features) |f| {
+        bins_rm[ri * n_features + f] = bins[f * n_rows + ri];
+    };
+
     return .{
         .gpa = gpa,
         .n_rows = n_rows,
         .n_features = n_features,
         .bins = bins,
+        .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
         .kinds = kinds,

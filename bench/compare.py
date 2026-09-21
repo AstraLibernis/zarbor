@@ -13,6 +13,15 @@ Fairness rests on three things:
     model. That means zgbdt is charged for binning as well as training, since
     the reference libraries bin inside fit(). CSV parsing is excluded from
     both, pandas having already paid it for the Python side.
+  * Best-of-N, not one shot. A single fit on a loaded box scatters by 10-20%,
+    which is the same size as the differences worth chasing. `--repeat`
+    controls N; the minimum is reported, being the run least contaminated by
+    whatever else the machine was doing.
+  * A release build, checked rather than assumed. `zig build` with no flags
+    produces a *Debug* binary, which is ~8x slower here; benchmarking one
+    silently turned a 2x gap into an 8x gap and sent the conclusion badly
+    wrong. This script builds ReleaseFast itself and refuses to time anything
+    that does not report a release mode.
 
 What it cannot control for: binning is not identical (zmodels uses quantile
 edges over u8 bins; XGBoost and LightGBM have their own sketching), and
@@ -104,12 +113,34 @@ def encode(X):
     return ordinal, onehot
 
 
-def run_zgbdt(binary, csv, label, extra):
+def build_release(root):
+    """Build the binary the benchmark is about to time. Not optional: the
+    default `zig build` is Debug."""
+    r = subprocess.run(["zig", "build", "-Doptimize=ReleaseFast"],
+                       cwd=root, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("zig build -Doptimize=ReleaseFast failed:\n" + r.stderr)
+
+
+def check_release(binary, csv, label):
+    """Read the mode the binary reports and refuse a Debug one."""
+    r = subprocess.run([str(binary), str(csv), f"--label={label}",
+                        "--n_rounds=1", "--verbose_eval=0", "--n_threads=1"],
+                       capture_output=True, text=True)
+    m = re.search(r"^build\s+(\w+)", r.stdout, re.M)
+    if not m:
+        raise SystemExit(f"{binary} does not report a build mode; it predates "
+                         "this check. Rebuild with -Doptimize=ReleaseFast.")
+    if m.group(1) == "Debug":
+        raise SystemExit(f"{binary} is a Debug build (~8x slower). "
+                         "Rebuild with: zig build -Doptimize=ReleaseFast")
+    return m.group(1)
+
+
+def run_zgbdt_once(binary, csv, label, extra):
     cmd = [str(binary), str(csv), f"--label={label}", "--split-col=__split",
            "--verbose_eval=0"] + extra
-    t0 = time.perf_counter()
     r = subprocess.run(cmd, capture_output=True, text=True)
-    wall = time.perf_counter() - t0
     if r.returncode != 0:
         return None, None, None, r.stderr.strip()[:200] or r.stdout.strip()[:200]
     auc = re.search(r"auc=([0-9.]+)", r.stdout)
@@ -125,14 +156,32 @@ def run_zgbdt(binary, csv, label, extra):
     bin_ms = re.search(r"^bin\s+(\d+) ms", r.stdout, re.M)
     if not ms:
         return None, None, None, "no train time in output"
-    total = int(ms.group(1)) + (int(bin_ms.group(1)) if bin_ms else 0)
-    return float(auc.group(1)), total / 1000, wall, None
+    bin_s = (int(bin_ms.group(1)) if bin_ms else 0) / 1000
+    return float(auc.group(1)), int(ms.group(1)) / 1000, bin_s, None
 
 
-def timed_fit(fit):
-    t0 = time.perf_counter()
-    out = fit()
-    return out, time.perf_counter() - t0
+def run_zgbdt(binary, csv, label, extra, repeat):
+    best, auc, bin_s, err = None, None, None, None
+    for _ in range(repeat):
+        a, t, b, e = run_zgbdt_once(binary, csv, label, extra)
+        if e:
+            return None, None, None, e
+        auc, err = a, None
+        if best is None or t + b < best:
+            best, bin_s = t + b, b
+    return auc, best, bin_s, err
+
+
+def timed_fit(fit, repeat):
+    """Best of `repeat` fits. Returns the last model and the fastest time."""
+    best, out = None, None
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        out = fit()
+        el = time.perf_counter() - t0
+        if best is None or el < best:
+            best = el
+    return out, best
 
 
 def main():
@@ -144,71 +193,98 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--binary", default=str(Path(__file__).parent.parent / "zig-out/bin/zgbdt"))
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--repeat", type=int, default=3,
+                    help="fits per implementation; the fastest is reported")
+    ap.add_argument("--only", action="append", default=[],
+                    help="run a subset: xgb, lgb, rf, linear (repeatable)")
+    ap.add_argument("--no-build", action="store_true",
+                    help="time the existing binary instead of rebuilding it")
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
+    want = set(a.only) or {"xgb", "lgb", "rf", "linear"}
+    unknown = want - {"xgb", "lgb", "rf", "linear"}
+    if unknown:
+        raise SystemExit(f"unknown --only value(s): {', '.join(sorted(unknown))}")
+
+    if not a.no_build:
+        build_release(Path(__file__).parent.parent)
 
     df, X, y, is_valid, label = load(a.csv, a.label, a.drop, a.valid_frac, a.seed)
     split_csv = Path("/tmp/zbench_split.csv")
     write_split_csv(df, is_valid, split_csv)
+    mode = check_release(a.binary, split_csv, label)
 
     ordinal, onehot = encode(X)
     tr, va = is_valid == 0, is_valid == 1
     ytr, yva = y[tr], y[va]
     print(f"rows {len(df)}  feats {X.shape[1]}  train {tr.sum()}  valid {va.sum()}\n")
 
+    print(f"best of {a.repeat} fit(s) per implementation, {a.threads} threads, "
+          f"zgbdt built {mode}\n")
+
     rows = []
+
+    def binnote(bin_s):
+        """Show how much of zgbdt's time was binning, since the reference
+        libraries hide that cost inside fit() and it is the part that does not
+        shrink with better tree code."""
+        return f"incl {bin_s:.2f}s bin" if bin_s else ""
 
     def add(name, impl, auc, fit_s, note=""):
         rows.append(dict(model=name, impl=impl, auc=auc, fit_s=fit_s, note=note))
 
-    # ---- XGBoost-style boosting -----------------------------------------
-    auc, fit_s, _, err = run_zgbdt(a.binary, split_csv, label, [
-        f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", f"--max_depth={MAX_DEPTH}",
-        f"--lambda={L2}", f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}",
-        "--grow_policy=depthwise"])
-    add("GBDT (level-wise)", "zmodels", auc, fit_s, err or "")
+    if "xgb" in want:
+        # ---- XGBoost-style boosting -----------------------------------------
+        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+            f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", f"--max_depth={MAX_DEPTH}",
+            f"--lambda={L2}", f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}",
+            "--grow_policy=depthwise"], a.repeat)
+        add("GBDT (level-wise)", "zmodels", auc, fit_s, err or binnote(bin_s))
 
-    m = xgb.XGBClassifier(n_estimators=N_ROUNDS, learning_rate=LR, max_depth=MAX_DEPTH,
-                          reg_lambda=L2, max_bin=MAX_BIN, tree_method="hist",
-                          grow_policy="depthwise", n_jobs=a.threads,
-                          eval_metric="auc", min_child_weight=1)
-    _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr))
-    add("GBDT (level-wise)", "xgboost", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
+        m = xgb.XGBClassifier(n_estimators=N_ROUNDS, learning_rate=LR, max_depth=MAX_DEPTH,
+                              reg_lambda=L2, max_bin=MAX_BIN, tree_method="hist",
+                              grow_policy="depthwise", n_jobs=a.threads,
+                              eval_metric="auc", min_child_weight=1)
+        _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr), a.repeat)
+        add("GBDT (level-wise)", "xgboost", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
 
-    # ---- LightGBM-style boosting ----------------------------------------
-    auc, fit_s, _, err = run_zgbdt(a.binary, split_csv, label, [
-        f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", "--max_depth=0",
-        f"--max_leaves={MAX_LEAVES}", f"--lambda={L2}", f"--max_bin={MAX_BIN}",
-        f"--n_threads={a.threads}", "--grow_policy=lossguide", "--sampling=goss"])
-    add("GBDT (leaf-wise + GOSS)", "zmodels", auc, fit_s, err or "")
+    if "lgb" in want:
+        # ---- LightGBM-style boosting ----------------------------------------
+        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+            f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", "--max_depth=0",
+            f"--max_leaves={MAX_LEAVES}", f"--lambda={L2}", f"--max_bin={MAX_BIN}",
+            f"--n_threads={a.threads}", "--grow_policy=lossguide", "--sampling=goss"], a.repeat)
+        add("GBDT (leaf-wise + GOSS)", "zmodels", auc, fit_s, err or binnote(bin_s))
 
-    m = lgb.LGBMClassifier(n_estimators=N_ROUNDS, learning_rate=LR, num_leaves=MAX_LEAVES,
-                           max_depth=-1, reg_lambda=L2, max_bin=MAX_BIN,
-                           data_sample_strategy="goss", top_rate=0.2, other_rate=0.1,
-                           n_jobs=a.threads, verbose=-1, min_child_samples=20)
-    _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr))
-    add("GBDT (leaf-wise + GOSS)", "lightgbm", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
+        m = lgb.LGBMClassifier(n_estimators=N_ROUNDS, learning_rate=LR, num_leaves=MAX_LEAVES,
+                               max_depth=-1, reg_lambda=L2, max_bin=MAX_BIN,
+                               data_sample_strategy="goss", top_rate=0.2, other_rate=0.1,
+                               n_jobs=a.threads, verbose=-1, min_child_samples=20)
+        _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr), a.repeat)
+        add("GBDT (leaf-wise + GOSS)", "lightgbm", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
 
-    # ---- Random forest ---------------------------------------------------
-    auc, fit_s, _, err = run_zgbdt(a.binary, split_csv, label, [
-        "--algo=random_forest", f"--n_rounds={RF_TREES}", f"--max_leaves={RF_LEAVES}",
-        f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}"])
-    add("RandomForest", "zmodels", auc, fit_s, err or "")
+    if "rf" in want:
+        # ---- Random forest ---------------------------------------------------
+        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+            "--algo=random_forest", f"--n_rounds={RF_TREES}", f"--max_leaves={RF_LEAVES}",
+            f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}"], a.repeat)
+        add("RandomForest", "zmodels", auc, fit_s, err or binnote(bin_s))
 
-    m = RandomForestClassifier(n_estimators=RF_TREES, max_leaf_nodes=RF_LEAVES,
-                               max_features="sqrt", bootstrap=True, n_jobs=a.threads,
-                               random_state=a.seed)
-    _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr))
-    add("RandomForest", "sklearn", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
+        m = RandomForestClassifier(n_estimators=RF_TREES, max_leaf_nodes=RF_LEAVES,
+                                   max_features="sqrt", bootstrap=True, n_jobs=a.threads,
+                                   random_state=a.seed)
+        _, s = timed_fit(lambda: m.fit(ordinal[tr], ytr), a.repeat)
+        add("RandomForest", "sklearn", roc_auc_score(yva, m.predict_proba(ordinal[va])[:, 1]), s)
 
-    # ---- Linear ----------------------------------------------------------
-    auc, fit_s, _, err = run_zgbdt(a.binary, split_csv, label, [
-        "--algo=linear", "--lin_epochs=300", f"--lambda={L2}", f"--n_threads={a.threads}"])
-    add("Linear (logistic)", "zmodels", auc, fit_s, err or "")
+    if "linear" in want:
+        # ---- Linear ----------------------------------------------------------
+        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+            "--algo=linear", "--lin_epochs=300", f"--lambda={L2}", f"--n_threads={a.threads}"], a.repeat)
+        add("Linear (logistic)", "zmodels", auc, fit_s, err or binnote(bin_s))
 
-    m = LogisticRegression(max_iter=1000, C=1.0, n_jobs=a.threads)
-    _, s = timed_fit(lambda: m.fit(onehot[tr], ytr))
-    add("Linear (logistic)", "sklearn", roc_auc_score(yva, m.predict_proba(onehot[va])[:, 1]), s)
+        m = LogisticRegression(max_iter=1000, C=1.0)  # n_jobs is a no-op since 1.8
+        _, s = timed_fit(lambda: m.fit(onehot[tr], ytr), a.repeat)
+        add("Linear (logistic)", "sklearn", roc_auc_score(yva, m.predict_proba(onehot[va])[:, 1]), s)
 
     # ---- report ----------------------------------------------------------
     w = max(len(r["model"]) for r in rows) + 2

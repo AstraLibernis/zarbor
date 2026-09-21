@@ -306,9 +306,18 @@ pub const Dataset = struct {
     gpa: std.mem.Allocator,
     n_rows: usize,
     n_features: usize,
-    /// Column-major: `bins[f * n_rows + r]`. One feature's rows are contiguous,
-    /// so histogram building walks memory linearly and the prefetcher wins.
+    /// Column-major: `bins[f * n_rows + r]`. Partitioning a node reads one
+    /// feature for every row, so that pass wants the column contiguous.
     bins: []u8,
+    /// The same bins row-major: `bins_rm[r * n_features + f]`.
+    ///
+    /// Both layouts are kept because the two hot passes want opposite things.
+    /// Histogram building reads every selected feature of a row and gains
+    /// 1.74x from having them contiguous; partitioning reads a single feature
+    /// down the rows and would touch thirteen times the cache lines in that
+    /// layout. The copy costs 13 bytes a row -- 8.7 MB on 668k rows, against
+    /// a 93 MB peak -- and one transpose pass at load time.
+    bins_rm: []u8,
     /// Bins actually in use per feature, including the missing bin.
     n_bins: []u16,
     /// Cut points per feature; `edges[f][i]` is the inclusive upper bound of
@@ -330,6 +339,7 @@ pub const Dataset = struct {
     pub fn deinit(d: *Dataset) void {
         const gpa = d.gpa;
         gpa.free(d.bins);
+        gpa.free(d.bins_rm);
         gpa.free(d.n_bins);
         for (d.edges) |e| gpa.free(e);
         gpa.free(d.edges);
@@ -347,6 +357,11 @@ pub const Dataset = struct {
 
     pub inline fn column(d: *const Dataset, f: usize) []const u8 {
         return d.bins[f * d.n_rows ..][0..d.n_rows];
+    }
+
+    /// Every feature's bin for one row, contiguous.
+    pub inline fn row(d: *const Dataset, r: usize) []const u8 {
+        return d.bins_rm[r * d.n_features ..][0..d.n_features];
     }
 
     /// Largest bin count across features; sizes the histogram allocation.
@@ -614,6 +629,43 @@ pub const LabelSpec = struct {
     enc: *const LabelEncoder,
 };
 
+/// Fills the row-major mirror of a column-major bin matrix.
+///
+/// Parallel over row blocks: each worker reads `n_features` column streams
+/// sequentially and writes one contiguous run, which the prefetcher handles
+/// on both sides. Transposing by feature instead would scatter every write.
+const TransposeCtx = struct {
+    bins: []const u8,
+    out: []u8,
+    n_rows: usize,
+    n_features: usize,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *TransposeCtx = @ptrCast(@alignCast(ctx));
+        const nf = self.n_features;
+        for (0..nf) |f| {
+            const col = self.bins[f * self.n_rows ..][0..self.n_rows];
+            var r = begin;
+            while (r < end) : (r += 1) self.out[r * nf + f] = col[r];
+        }
+    }
+};
+
+fn buildRowMajor(
+    gpa: std.mem.Allocator,
+    pool: *Pool,
+    bins: []const u8,
+    n_rows: usize,
+    n_features: usize,
+) ![]u8 {
+    const out = try gpa.alloc(u8, n_rows * n_features);
+    errdefer gpa.free(out);
+    var ctx = TransposeCtx{ .bins = bins, .out = out, .n_rows = n_rows, .n_features = n_features };
+    pool.parallelFor(n_rows, &ctx, TransposeCtx.run, 4096);
+    return out;
+}
+
 /// Quantise `src` into a `Dataset`. `label`, when given, names the target
 /// column and how to encode it; that column is excluded from the feature set.
 /// `skip` names columns to drop (an id column, typically).
@@ -682,6 +734,9 @@ pub fn quantise(
         levels[f] = copy;
     }
 
+    const bins_rm = try buildRowMajor(gpa, pool, bins, src.n_rows, n_features);
+    errdefer gpa.free(bins_rm);
+
     var labels: []f32 = &.{};
     errdefer if (labels.len != 0) gpa.free(labels);
     if (label) |ls| labels = try ls.enc.encode(gpa, src, ls.col);
@@ -691,6 +746,7 @@ pub fn quantise(
         .n_rows = src.n_rows,
         .n_features = n_features,
         .bins = bins,
+        .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
         .kinds = kinds,
@@ -714,6 +770,13 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         const dst = bins[f * n ..][0..n];
         for (rows, dst) |r, *d| d.* = src[r];
     }
+
+    // The row-major mirror needs no transpose here: one selected row is
+    // already contiguous in the source, so this is a run of short memcpys.
+    const nf = ds.n_features;
+    const bins_rm = try gpa.alloc(u8, nf * n);
+    errdefer gpa.free(bins_rm);
+    for (rows, 0..) |r, i| @memcpy(bins_rm[i * nf ..][0..nf], ds.bins_rm[@as(usize, r) * nf ..][0..nf]);
 
     const n_bins = try gpa.dupe(u16, ds.n_bins);
     errdefer gpa.free(n_bins);
@@ -759,6 +822,7 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .n_rows = n,
         .n_features = ds.n_features,
         .bins = bins,
+        .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
         .kinds = kinds,
@@ -919,11 +983,15 @@ pub fn applySchema(
     };
     pool.parallelFor(n, &ctx, ApplyCtx.run, 1);
 
+    const bins_rm = try buildRowMajor(gpa, pool, bins, src.n_rows, n);
+    errdefer gpa.free(bins_rm);
+
     var out = Dataset{
         .gpa = gpa,
         .n_rows = src.n_rows,
         .n_features = n,
         .bins = bins,
+        .bins_rm = bins_rm,
         .n_bins = try gpa.dupe(u16, schema.n_bins),
         .edges = try gpa.alloc([]f32, n),
         .kinds = try gpa.dupe(ColumnKind, schema.kinds),

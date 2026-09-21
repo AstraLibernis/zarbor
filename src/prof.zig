@@ -14,12 +14,19 @@ const std = @import("std");
 const linux = std.os.linux;
 
 pub const Phase = enum {
+    /// GOSS row selection, which happens in the boosting loop rather than in
+    /// the tree builder.
+    goss_select,
     select_rows,
-    gather,
     hist_build,
     hist_subtract,
     best_split,
     partition,
+    /// Sub-phases of the parallel partition, so the three passes can be sized
+    /// against each other. They are inside `partition`, not additional to it.
+    part_count,
+    part_scatter,
+    part_copy,
     grad,
     apply,
     valid_predict,
@@ -52,18 +59,32 @@ pub fn reset() void {
     totals = @splat(0);
 }
 
+/// `part_*` time is *inside* `partition`, so it must not be added to the
+/// total or counted as its own percentage.
+fn nested(p: Phase) bool {
+    return switch (p) {
+        .part_count, .part_scatter, .part_copy => true,
+        else => false,
+    };
+}
+
 pub fn report(w: *std.Io.Writer) !void {
     var sum: u64 = 0;
-    for (totals) |t| sum += t;
+    inline for (@typeInfo(Phase).@"enum".fields) |f| {
+        if (comptime !nested(@field(Phase, f.name))) sum += totals[f.value];
+    }
     if (sum == 0) return;
     try w.print("\nphase breakdown (wall, main thread)\n", .{});
     inline for (@typeInfo(Phase).@"enum".fields) |f| {
         const t = totals[f.value];
         if (t != 0) {
-            try w.print("  {s:<14} {d:>7} ms  {d:>5.1}%\n", .{
+            const is_nested = comptime nested(@field(Phase, f.name));
+            try w.print("  {s}{s:<14} {d:>7} ms  {d:>5.1}%{s}\n", .{
+                if (is_nested) "  " else "",
                 f.name,
                 t / 1_000_000,
                 100.0 * @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(sum)),
+                if (is_nested) "  (within partition)" else "",
             });
         }
     }

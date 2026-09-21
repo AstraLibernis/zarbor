@@ -1,7 +1,7 @@
 //! Regression-tree construction over binned features.
 //!
-//! Rows belonging to a node are kept contiguous in `rows`, and the node's
-//! gradients are permuted alongside them in `grads`. That pairing is the point:
+//! Rows belonging to a node are kept contiguous in `rows`. Gradients are
+//! *not* permuted alongside them: they stay indexed by original row id and
 //! the gradient gather happens once per tree, not once per node per feature,
 //! and every histogram pass then reads gradients sequentially.
 //!
@@ -37,11 +37,16 @@ pub const Tree = struct {
     }
 
     /// Raw score for one row of a dataset binned with the same edges.
+    ///
+    /// Reads the row-major matrix: a walk visits a different feature at every
+    /// level, so column-major touched one cache line per level of depth,
+    /// while a whole row is thirteen contiguous bytes.
     pub fn predictBinned(t: *const Tree, ds: *const Dataset, row: usize) f32 {
+        const rb = ds.bins_rm[row * ds.n_features ..][0..ds.n_features];
         var i: u32 = 0;
         while (!t.nodes[i].is_leaf) {
             const n = t.nodes[i];
-            const b = ds.bins[@as(usize, n.feature) * ds.n_rows + row];
+            const b = rb[n.feature];
             const go_left = if (b == 0) n.missing_left else b <= n.threshold;
             i = if (go_left) n.left else n.right;
         }
@@ -83,10 +88,18 @@ pub const Builder = struct {
     free_slots: std.ArrayList(u32),
 
     rows: []u32,
-    grads: []hist.GradPair,
+    /// Gradients indexed by original row id, borrowed for the current tree.
+    ///
+    /// These used to be permuted to match `rows`, so that a node's gradients
+    /// were contiguous. That paid for itself when the histogram loop was
+    /// feature-outer and read each gradient once *per feature*; row-outer
+    /// reads it once per row, and the permutation then costs far more than it
+    /// saves -- it tripled what the partition had to move (12 bytes a row
+    /// against 4). Measured: the row-id gather costs 4 ms across a 200-tree
+    /// fit, the moving cost over 100.
+    g: []const hist.GradPair,
     /// Destination for the parallel partition, which cannot be done in place.
     rows_out: []u32,
-    grads_out: []hist.GradPair,
     /// Per-chunk left-hand counts, plus one for the total.
     part_counts: []usize,
     part_left: []usize,
@@ -133,12 +146,8 @@ pub const Builder = struct {
 
         const rows = try gpa.alloc(u32, ds.n_rows);
         errdefer gpa.free(rows);
-        const grads = try gpa.alloc(hist.GradPair, ds.n_rows);
-        errdefer gpa.free(grads);
         const rows_out = try gpa.alloc(u32, ds.n_rows);
         errdefer gpa.free(rows_out);
-        const grads_out = try gpa.alloc(hist.GradPair, ds.n_rows);
-        errdefer gpa.free(grads_out);
 
         const n_chunks = pool.workerCount() * 4 + 2;
         const part_counts = try gpa.alloc(usize, n_chunks);
@@ -166,9 +175,8 @@ pub const Builder = struct {
             .slots = slots,
             .free_slots = free_slots,
             .rows = rows,
-            .grads = grads,
+            .g = &.{},
             .rows_out = rows_out,
-            .grads_out = grads_out,
             .part_counts = part_counts,
             .part_left = part_left,
             .part_right = part_right,
@@ -193,9 +201,7 @@ pub const Builder = struct {
         gpa.free(b.slots);
         b.free_slots.deinit(gpa);
         gpa.free(b.rows);
-        gpa.free(b.grads);
         gpa.free(b.rows_out);
-        gpa.free(b.grads_out);
         gpa.free(b.part_counts);
         gpa.free(b.part_left);
         gpa.free(b.part_right);
@@ -296,7 +302,7 @@ pub const Builder = struct {
     }
 
     /// Reorder `rows[start..end]` so the left child's rows come first.
-    /// Gradients move with them, keeping `grads[i]` the gradient of `rows[i]`.
+    /// Only row ids move; gradients are looked up by row id.
     ///
     /// This is per-level O(rows) work and used to be the serial half of tree
     /// building: with it single-threaded, 16 threads bought only 1.66x over 1,
@@ -316,9 +322,7 @@ pub const Builder = struct {
 
         var ctx = PartCtx{
             .rows = b.rows,
-            .grads = b.grads,
             .rows_out = b.rows_out,
-            .grads_out = b.grads_out,
             .col = col,
             .sp = sp,
             .start = start,
@@ -329,7 +333,9 @@ pub const Builder = struct {
         };
 
         // 1. How many of each chunk's rows go left.
+        const t_c = prof.start();
         b.pool.parallelFor(n, &ctx, PartCtx.count, csize);
+        prof.stop(.part_count, t_c);
 
         // 2. Prefix sums. `used` is a few dozen at most, so serial is right.
         var total_left: usize = 0;
@@ -344,26 +350,40 @@ pub const Builder = struct {
         }
 
         // 3. Scatter to the scratch buffers, then copy the touched range back.
+        const t_s = prof.start();
         b.pool.parallelFor(n, &ctx, PartCtx.scatter, csize);
+        prof.stop(.part_scatter, t_s);
+        const t_b = prof.start();
         b.pool.parallelFor(n, &ctx, PartCtx.copyBack, 8192);
+        prof.stop(.part_copy, t_b);
 
         return start + total_left;
     }
 
+    /// The one-thread path, and stable like the parallel one.
+    ///
+    /// It used to be an in-place Hoare swap, which is fewer passes but leaves
+    /// a node's rows in arbitrary order. That matters now: the histogram
+    /// kernel reads the row-major bin matrix, and an ascending row order is
+    /// what lets the hardware prefetcher follow it. Two branchless passes and
+    /// a memcpy beat one pass of mispredicted swaps anyway.
     fn partitionSerial(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
         const col = b.ds.column(sp.feature);
-        var i = start;
-        var j = end;
-        while (i < j) {
-            if (goesLeft(col[b.rows[i]], sp)) {
-                i += 1;
-            } else {
-                j -= 1;
-                std.mem.swap(u32, &b.rows[i], &b.rows[j]);
-                std.mem.swap(hist.GradPair, &b.grads[i], &b.grads[j]);
-            }
+        const rows = b.rows[start..end];
+        var n_left: usize = 0;
+        for (rows) |row| n_left += @intFromBool(goesLeft(col[row], sp));
+
+        var li = start;
+        var ri = start + n_left;
+        for (rows) |row| {
+            const left = goesLeft(col[row], sp);
+            const dst = if (left) li else ri;
+            b.rows_out[dst] = row;
+            li += @intFromBool(left);
+            ri += @intFromBool(!left);
         }
-        return i;
+        @memcpy(rows, b.rows_out[start..end]);
+        return start + n_left;
     }
 
     fn makeLeaf(b: *Builder, w: Work) !void {
@@ -377,14 +397,15 @@ pub const Builder = struct {
         b.giveSlot(w.slot);
     }
 
-    fn totalOf(grads: []const hist.GradPair) hist.Bin {
+    fn totalOf(grads: []const hist.GradPair, rows: []const u32) hist.Bin {
         var g: f64 = 0;
         var h: f64 = 0;
-        for (grads) |p| {
+        for (rows) |r| {
+            const p = grads[r];
             g += p.g;
             h += p.h;
         }
-        return .{ .g = g, .h = h, .n = @intCast(grads.len) };
+        return .{ .g = g, .h = h, .n = @floatFromInt(rows.len) };
     }
 
     /// Fill `rows[0..n_active]` with the rows this tree will see.
@@ -450,12 +471,7 @@ pub const Builder = struct {
         b.selectRows(subset);
         prof.stop(.select_rows, t_sel);
 
-        // One gather for the whole tree. Random-access over every active row,
-        // so it is worth a barrier rather than leaving it on one core.
-        const t_gath = prof.start();
-        var gctx = GatherCtx{ .dst = b.grads, .src = gradients, .rows = b.rows };
-        b.pool.parallelFor(b.n_active, &gctx, GatherCtx.run, 16384);
-        prof.stop(.gather, t_gath);
+        b.g = gradients;
 
         b.n_tree_features = b.sample(
             b.all_features,
@@ -470,7 +486,7 @@ pub const Builder = struct {
         // --- root ---
         try b.nodes.append(b.gpa, .{});
         const root_slot = b.takeSlot();
-        const root_total = totalOf(b.grads[0..b.n_active]);
+        const root_total = totalOf(b.g, b.rows[0..b.n_active]);
         const tree_feats = b.treeFeatures();
         const root_search = b.featuresFor(0);
         const t_rh = prof.start();
@@ -479,7 +495,7 @@ pub const Builder = struct {
             &b.bank,
             b.ds,
             b.rows[0..b.n_active],
-            b.grads[0..b.n_active],
+            b.g,
             tree_feats,
             b.slot(root_slot),
         );
@@ -540,14 +556,14 @@ pub const Builder = struct {
             const n_right = w.end - mid;
             if (n_left <= n_right) {
                 const t_hb = prof.start();
-                hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], tree_feats, b.slot(slot_l));
+                hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.g, tree_feats, b.slot(slot_l));
                 prof.stop(.hist_build, t_hb);
                 const t_hs = prof.start();
                 hist.subtract(b.pool, &b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l));
                 prof.stop(.hist_subtract, t_hs);
             } else {
                 const t_hb = prof.start();
-                hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], tree_feats, b.slot(slot_r));
+                hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.g, tree_feats, b.slot(slot_r));
                 prof.stop(.hist_build, t_hb);
                 const t_hs = prof.start();
                 hist.subtract(b.pool, &b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r));
@@ -619,9 +635,7 @@ pub const Builder = struct {
 /// coordination between them.
 const PartCtx = struct {
     rows: []u32,
-    grads: []hist.GradPair,
     rows_out: []u32,
-    grads_out: []hist.GradPair,
     col: []const u8,
     sp: hist.Split,
     start: usize,
@@ -649,15 +663,14 @@ const PartCtx = struct {
         var i = self.start + begin;
         while (i < self.start + end) : (i += 1) {
             const row = self.rows[i];
-            if (Builder.goesLeft(self.col[row], self.sp)) {
-                self.rows_out[li] = row;
-                self.grads_out[li] = self.grads[i];
-                li += 1;
-            } else {
-                self.rows_out[ri] = row;
-                self.grads_out[ri] = self.grads[i];
-                ri += 1;
-            }
+            // Branchless: which side a row takes is close to a coin flip near
+            // a good split, so a branch here mispredicts about half the time.
+            // Selecting the cursor instead costs a cmov and nothing else.
+            const left = Builder.goesLeft(self.col[row], self.sp);
+            const dst = if (left) li else ri;
+            self.rows_out[dst] = row;
+            li += @intFromBool(left);
+            ri += @intFromBool(!left);
         }
     }
 
@@ -667,21 +680,6 @@ const PartCtx = struct {
         const a = self.start + begin;
         const b_ = self.start + end;
         @memcpy(self.rows[a..b_], self.rows_out[a..b_]);
-        @memcpy(self.grads[a..b_], self.grads_out[a..b_]);
     }
 };
 
-
-/// Permutes gradients into the row order this tree will walk.
-const GatherCtx = struct {
-    dst: []hist.GradPair,
-    src: []const hist.GradPair,
-    rows: []const u32,
-
-    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
-        const self: *GatherCtx = @ptrCast(@alignCast(ctx));
-        var i = begin;
-        while (i < end) : (i += 1) self.dst[i] = self.src[self.rows[i]];
-    }
-};

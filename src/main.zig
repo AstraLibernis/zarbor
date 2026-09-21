@@ -4,6 +4,7 @@
 //! reflection, so the flag surface and the struct can never drift apart.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("config.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
@@ -220,6 +221,7 @@ pub fn main(init: std.process.Init) !void {
         \\rows    {d}
         \\feats   {d}  (label "{s}")
         \\threads {d}
+        \\build   {s}
         \\read    {d} ms
         \\bin     {d} ms
         \\
@@ -229,6 +231,10 @@ pub fn main(init: std.process.Init) !void {
         full.n_features,
         target,
         pool.workerCount(),
+        // `zig build` defaults to Debug, and a Debug binary is ~8x slower
+        // here. Printing the mode means a benchmark can never quietly measure
+        // the wrong build -- which is exactly what happened once.
+        @tagName(builtin.mode),
         @divTrunc(t_read - t0, 1_000_000),
         @divTrunc(t_bin - t_read, 1_000_000),
     });

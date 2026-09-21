@@ -156,49 +156,70 @@ const ValidCtx = struct {
 
 // --------------------------------------------------------------------- GOSS
 
-/// Partition `order` so that the `k` largest |gradient| rows occupy
-/// `order[0..k]`, in no particular order within that prefix.
+/// Buckets in one radix pass over a magnitude's bit pattern.
+pub const radix_bits = 16;
+pub const n_radix = 1 << radix_bits;
+
+/// `|g|` as a sortable integer.
 ///
-/// Hoare partition with a median-of-three pivot, iterating into one side only,
-/// so it is O(n) expected and needs no recursion on the large side.
-fn selectTopK(grads: []const hist.GradPair, order: []u32, k: usize) void {
-    if (k == 0 or k >= order.len) return;
+/// For a non-negative float the IEEE-754 bit pattern is monotonic in the
+/// value, so the pattern can be bucketed directly with no conversion. NaN
+/// sorts above everything, which is where a blown-up gradient belongs.
+inline fn magBits(g: f32) u32 {
+    return @bitCast(@abs(g));
+}
 
-    const mag = struct {
-        fn f(g: []const hist.GradPair, i: u32) f32 {
-            return @abs(g[i].g);
-        }
-    }.f;
+/// The cut separating the `k` largest magnitudes from the rest.
+pub const Cut = struct {
+    /// Rows whose pattern is strictly greater are all in.
+    t: u32,
+    /// How many rows with pattern exactly `t` are in, taken in row order.
+    take: usize,
+};
 
-    var lo: usize = 0;
-    var hi: usize = order.len - 1;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        // Median of three, to keep adversarial orderings (already-sorted
-        // gradients, which boosting produces readily) off the quadratic path.
-        const a = mag(grads, order[lo]);
-        const b = mag(grads, order[mid]);
-        const c = mag(grads, order[hi]);
-        const pivot = @max(@min(a, b), @min(@max(a, b), c));
+/// Find the cut with two counting passes over the magnitude bit patterns.
+///
+/// This replaced a quickselect that was 768 ms of a 1.57 s GOSS fit — 49% of
+/// the run, on a step that is not part of the model. The problem was not its
+/// O(n): Hoare's two scans branch on a comparison that is a coin flip by
+/// construction, so nearly every element cost a misprediction. Counting
+/// passes branch predictably and stream the input, and sixteen bits at a time
+/// means two of them pin the threshold exactly.
+///
+/// Exact, not approximate: afterwards every chosen row's magnitude is >= every
+/// unchosen row's, with exact bit-ties broken by row order.
+pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize) Cut {
+    std.debug.assert(counts.len == n_radix);
+    std.debug.assert(k >= 1 and k <= grads.len);
 
-        var i = lo;
-        var j = hi;
-        while (i <= j) {
-            while (mag(grads, order[i]) > pivot) i += 1;
-            while (mag(grads, order[j]) < pivot) j -= 1;
-            if (i <= j) {
-                std.mem.swap(u32, &order[i], &order[j]);
-                i += 1;
-                if (j == 0) break;
-                j -= 1;
-            }
-        }
-        if (k <= j) {
-            hi = j;
-        } else if (k >= i) {
-            lo = i;
-        } else break;
+    @memset(counts, 0);
+    for (grads) |g| counts[magBits(g.g) >> radix_bits] += 1;
+
+    var above: usize = 0;
+    var hi: u32 = n_radix - 1;
+    while (true) {
+        const c = counts[hi];
+        if (above + c >= k or hi == 0) break;
+        above += c;
+        hi -= 1;
     }
+
+    @memset(counts, 0);
+    const lo_mask: u32 = n_radix - 1;
+    for (grads) |g| {
+        const b = magBits(g.g);
+        if (b >> radix_bits == hi) counts[b & lo_mask] += 1;
+    }
+
+    var lo: u32 = n_radix - 1;
+    while (true) {
+        const c = counts[lo];
+        if (above + c >= k or lo == 0) break;
+        above += c;
+        lo -= 1;
+    }
+
+    return .{ .t = (hi << radix_bits) | lo, .take = k - above };
 }
 
 /// LightGBM's Gradient-based One-Side Sampling.
@@ -212,44 +233,70 @@ fn selectTopK(grads: []const hist.GradPair, order: []u32, k: usize) void {
 /// Mutates `grads` in place; the caller recomputes it every round anyway.
 fn gossSelect(
     grads: []hist.GradPair,
-    order: []u32,
+    counts: []u32,
+    others: []u32,
+    mask: []u64,
     out: []u32,
     top_rate: f32,
     other_rate: f32,
     rng: std.Random,
 ) []u32 {
     const n = grads.len;
-    for (order, 0..) |*o, i| o.* = @intCast(i);
-
     var top: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * top_rate));
     top = std.math.clamp(top, 1, n);
     const rest = n - top;
 
-    // Only the *membership* of the top-k matters — the rows are copied out
-    // wholesale and never read in order — so a full sort is wasted work.
-    // Quickselect partitions around the k-th largest in O(n) expected time
-    // instead of O(n log n). On 535k rows over 200 rounds the sort cost about
-    // 8 seconds, which was more than the rest of training put together.
-    selectTopK(grads, order, top);
+    const cut = gossCut(grads, counts, top);
+
+    // One ordered pass: mark the large-gradient rows and collect the rest, so
+    // the random sample below has something contiguous to draw from.
+    const words = (n + 63) / 64;
+    @memset(mask[0..words], 0);
+    var take = cut.take;
+    var n_other: usize = 0;
+    for (grads, 0..) |g, r| {
+        const b = magBits(g.g);
+        const keep = b > cut.t or (b == cut.t and take > 0);
+        if (keep) {
+            if (b == cut.t) take -= 1;
+            mask[r >> 6] |= @as(u64, 1) << @truncate(r);
+        } else {
+            others[n_other] = @intCast(r);
+            n_other += 1;
+        }
+    }
 
     var rand_n: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * other_rate));
-    rand_n = @min(rand_n, rest);
+    rand_n = @min(rand_n, @min(rest, n_other));
 
-    @memcpy(out[0..top], order[0..top]);
-
+    // Partial Fisher-Yates over the unchosen rows.
     var i: usize = 0;
     while (i < rand_n) : (i += 1) {
-        const j = i + rng.uintLessThan(usize, rest - i);
-        std.mem.swap(u32, &order[top + i], &order[top + j]);
-        out[top + i] = order[top + i];
+        const j = i + rng.uintLessThan(usize, n_other - i);
+        std.mem.swap(u32, &others[i], &others[j]);
     }
 
     const amp: f32 = (1.0 - top_rate) / other_rate;
-    for (out[top .. top + rand_n]) |r| {
+    for (others[0..rand_n]) |r| {
         grads[r].g *= amp;
         grads[r].h *= amp;
+        mask[r >> 6] |= @as(u64, 1) << @truncate(r);
     }
-    return out[0 .. top + rand_n];
+
+    // Emit in ascending row order, from the bitset rather than by sorting.
+    // A scrambled row set is the worst case for the histogram kernel, which
+    // reads the row-major bin matrix and wants a forward walk; sorting 160k
+    // ids would cost more than the selection does.
+    var k: usize = 0;
+    for (mask[0..words], 0..) |w0, wi| {
+        var w = w0;
+        while (w != 0) {
+            out[k] = @intCast(wi * 64 + @ctz(w));
+            k += 1;
+            w &= w - 1;
+        }
+    }
+    return out[0..k];
 }
 
 // ----------------------------------------------------------------- training
@@ -344,13 +391,19 @@ pub fn train(
     defer if (valid_raw.len != 0) gpa.free(valid_raw);
     defer if (valid_scratch.len != 0) gpa.free(valid_scratch);
 
-    var goss_order: []u32 = &.{};
+    var goss_counts: []u32 = &.{};
+    var goss_others: []u32 = &.{};
+    var goss_mask: []u64 = &.{};
     var goss_rows: []u32 = &.{};
     if (cfg.sampling == .goss) {
-        goss_order = try gpa.alloc(u32, ds.n_rows);
+        goss_counts = try gpa.alloc(u32, n_radix);
+        goss_others = try gpa.alloc(u32, ds.n_rows);
+        goss_mask = try gpa.alloc(u64, (ds.n_rows + 63) / 64);
         goss_rows = try gpa.alloc(u32, ds.n_rows);
     }
-    defer if (goss_order.len != 0) gpa.free(goss_order);
+    defer if (goss_counts.len != 0) gpa.free(goss_counts);
+    defer if (goss_others.len != 0) gpa.free(goss_others);
+    defer if (goss_mask.len != 0) gpa.free(goss_mask);
     defer if (goss_rows.len != 0) gpa.free(goss_rows);
     var goss_rng: std.Random.DefaultPrng = .init(cfg.seed +% 0x9E3779B97F4A7C15);
 
@@ -376,7 +429,11 @@ pub fn train(
         prof.stop(.grad, t_g);
 
         const subset: ?[]const u32 = if (cfg.sampling == .goss)
-            gossSelect(grads, goss_order, goss_rows, cfg.top_rate, cfg.other_rate, goss_rng.random())
+            blk: {
+                const t_gs = prof.start();
+                defer prof.stop(.goss_select, t_gs);
+                break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, goss_rng.random());
+            }
         else
             null;
 
@@ -474,18 +531,21 @@ pub fn train(
 
 const testing = std.testing;
 
-test "selectTopK puts exactly the k largest |g| in the prefix" {
-    // Quickselect is easy to get subtly wrong — off by one at the pivot, or
-    // quadratic on ordered input. Checked against a full sort on random,
-    // already-sorted, reverse-sorted and all-equal inputs, since boosting
-    // produces all four.
+test "gossCut separates exactly the k largest |g|" {
+    // A selection step is easy to get subtly wrong — off by one at the
+    // threshold, or wrong when every value is identical. Checked against a
+    // full sort on random, already-sorted, reverse-sorted, all-equal and
+    // sign-mixed inputs, since boosting produces all of them.
     const gpa = testing.allocator;
     var prng: std.Random.DefaultPrng = .init(4);
     const r = prng.random();
 
-    const shapes = enum { random, ascending, descending, all_equal };
+    const counts = try gpa.alloc(u32, n_radix);
+    defer gpa.free(counts);
+
+    const shapes = enum { random, ascending, descending, all_equal, signed, tiny_spread };
     for (std.enums.values(shapes)) |shape| {
-        for ([_]usize{ 1, 2, 7, 64, 1000 }) |n| {
+        for ([_]usize{ 1, 2, 7, 64, 1000, 5000 }) |n| {
             const grads = try gpa.alloc(hist.GradPair, n);
             defer gpa.free(grads);
             for (grads, 0..) |*g, i| {
@@ -494,37 +554,49 @@ test "selectTopK puts exactly the k largest |g| in the prefix" {
                     .ascending => @floatFromInt(i),
                     .descending => @floatFromInt(n - i),
                     .all_equal => 1.0,
+                    // Magnitude is what is ranked, so signs must not matter.
+                    .signed => if (i % 2 == 0) -r.float(f32) else r.float(f32),
+                    // Values inside one radix bucket, which is what forces the
+                    // second pass to do the work.
+                    .tiny_spread => 1.0 + @as(f32, @floatFromInt(i % 3)) * 1e-7,
                 };
                 g.* = .{ .g = v, .h = 1 };
             }
 
-            const order = try gpa.alloc(u32, n);
-            defer gpa.free(order);
+            const mags = try gpa.alloc(f32, n);
+            defer gpa.free(mags);
+            for (mags, grads) |*m, g| m.* = @abs(g.g);
+            std.sort.pdq(f32, mags, {}, std.sort.desc(f32));
 
-            for ([_]usize{ 1, n / 3, n / 2, n - 1 }) |k| {
-                if (k == 0 or k >= n) continue;
-                for (order, 0..) |*o, i| o.* = @intCast(i);
-                selectTopK(grads, order, k);
+            for ([_]usize{ 1, n / 3, n / 2, n - 1, n }) |k| {
+                if (k == 0 or k > n) continue;
+                const cut = gossCut(grads, counts, k);
 
-                // The k-th largest magnitude, found independently.
-                const mags = try gpa.alloc(f32, n);
-                defer gpa.free(mags);
-                for (mags, grads) |*m, g| m.* = @abs(g.g);
-                std.sort.pdq(f32, mags, {}, std.sort.desc(f32));
+                // Replay the selection rule the caller uses.
+                const chosen = try gpa.alloc(bool, n);
+                defer gpa.free(chosen);
+                var take = cut.take;
+                var n_chosen: usize = 0;
+                for (grads, 0..) |g, i| {
+                    const b: u32 = @bitCast(@abs(g.g));
+                    const keep = b > cut.t or (b == cut.t and take > 0);
+                    chosen[i] = keep;
+                    if (keep) {
+                        if (b == cut.t) take -= 1;
+                        n_chosen += 1;
+                    }
+                }
+
+                // Exactly k rows, and every one of them at least as large as
+                // every row left behind. That is the whole contract.
+                try testing.expectEqual(k, n_chosen);
                 const kth = mags[k - 1];
-
-                // Every row in the prefix is >= the k-th largest, and every
-                // row outside it is <=. That is the whole contract.
-                for (order[0..k]) |i| try testing.expect(@abs(grads[i].g) >= kth);
-                for (order[k..]) |i| try testing.expect(@abs(grads[i].g) <= kth);
-
-                // And it is still a permutation.
-                const seen = try gpa.alloc(bool, n);
-                defer gpa.free(seen);
-                @memset(seen, false);
-                for (order) |i| {
-                    try testing.expect(!seen[i]);
-                    seen[i] = true;
+                for (grads, chosen) |g, c| {
+                    if (c) {
+                        try testing.expect(@abs(g.g) >= kth);
+                    } else {
+                        try testing.expect(@abs(g.g) <= kth);
+                    }
                 }
             }
         }
