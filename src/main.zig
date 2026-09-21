@@ -11,6 +11,7 @@ const booster = @import("booster.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const metric = @import("metric.zig");
+const prof = @import("prof.zig");
 
 const usage =
     \\usage: zgbdt <train.csv> --label=<column> [options]
@@ -109,6 +110,8 @@ pub fn main(init: std.process.Init) !void {
             valid_frac = try std.fmt.parseFloat(f32, val);
         } else if (std.mem.eql(u8, key, "split-seed")) {
             split_seed = try std.fmt.parseInt(u64, val, 10);
+        } else if (std.mem.eql(u8, key, "profile")) {
+            prof.enabled = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
         } else if (std.mem.eql(u8, key, "split-col")) {
             split_col = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
@@ -272,6 +275,7 @@ pub fn main(init: std.process.Init) !void {
             }
         },
     }
+    try prof.report(out);
     try out.flush();
 }
 

@@ -12,6 +12,7 @@ const hist = @import("hist.zig");
 const tree = @import("tree.zig");
 const config = @import("config.zig");
 const metric = @import("metric.zig");
+const prof = @import("prof.zig");
 
 const min_hessian: f32 = 1e-6;
 
@@ -155,6 +156,51 @@ const ValidCtx = struct {
 
 // --------------------------------------------------------------------- GOSS
 
+/// Partition `order` so that the `k` largest |gradient| rows occupy
+/// `order[0..k]`, in no particular order within that prefix.
+///
+/// Hoare partition with a median-of-three pivot, iterating into one side only,
+/// so it is O(n) expected and needs no recursion on the large side.
+fn selectTopK(grads: []const hist.GradPair, order: []u32, k: usize) void {
+    if (k == 0 or k >= order.len) return;
+
+    const mag = struct {
+        fn f(g: []const hist.GradPair, i: u32) f32 {
+            return @abs(g[i].g);
+        }
+    }.f;
+
+    var lo: usize = 0;
+    var hi: usize = order.len - 1;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        // Median of three, to keep adversarial orderings (already-sorted
+        // gradients, which boosting produces readily) off the quadratic path.
+        const a = mag(grads, order[lo]);
+        const b = mag(grads, order[mid]);
+        const c = mag(grads, order[hi]);
+        const pivot = @max(@min(a, b), @min(@max(a, b), c));
+
+        var i = lo;
+        var j = hi;
+        while (i <= j) {
+            while (mag(grads, order[i]) > pivot) i += 1;
+            while (mag(grads, order[j]) < pivot) j -= 1;
+            if (i <= j) {
+                std.mem.swap(u32, &order[i], &order[j]);
+                i += 1;
+                if (j == 0) break;
+                j -= 1;
+            }
+        }
+        if (k <= j) {
+            hi = j;
+        } else if (k >= i) {
+            lo = i;
+        } else break;
+    }
+}
+
 /// LightGBM's Gradient-based One-Side Sampling.
 ///
 /// Rows with large |gradient| are the under-fitted ones and are kept in full;
@@ -175,16 +221,16 @@ fn gossSelect(
     const n = grads.len;
     for (order, 0..) |*o, i| o.* = @intCast(i);
 
-    const Ctx = struct { g: []const hist.GradPair };
-    std.sort.pdq(u32, order, Ctx{ .g = grads }, struct {
-        fn lt(c: Ctx, a: u32, b: u32) bool {
-            return @abs(c.g[a].g) > @abs(c.g[b].g);
-        }
-    }.lt);
-
     var top: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * top_rate));
     top = std.math.clamp(top, 1, n);
     const rest = n - top;
+
+    // Only the *membership* of the top-k matters — the rows are copied out
+    // wholesale and never read in order — so a full sort is wasted work.
+    // Quickselect partitions around the k-th largest in O(n) expected time
+    // instead of O(n log n). On 535k rows over 200 rounds the sort cost about
+    // 8 seconds, which was more than the rest of training put together.
+    selectTopK(grads, order, top);
 
     var rand_n: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * other_rate));
     rand_n = @min(rand_n, rest);
@@ -217,7 +263,9 @@ pub const TrainResult = struct {
     /// best round — the two differ, and conflating them hides whether early
     /// stopping ever triggered at all.
     rounds_run: u32,
-    /// Best validation score seen, or NaN when no validation set was given.
+    /// Best validation score seen. With `early_stopping_rounds == 0` the
+    /// metric is only computed on logged rounds and the last one, so this is
+    /// the best of *those*, not of every round. NaN with no validation set.
     best_score: f64,
 };
 
@@ -323,7 +371,9 @@ pub fn train(
             .scale_pos_weight = cfg.scale_pos_weight,
             .objective = cfg.objective,
         };
+        const t_g = prof.start();
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
+        prof.stop(.grad, t_g);
 
         const subset: ?[]const u32 = if (cfg.sampling == .goss)
             gossSelect(grads, goss_order, goss_rows, cfg.top_rate, cfg.other_rate, goss_rng.random())
@@ -336,6 +386,7 @@ pub fn train(
 
         // Spans only cover the rows the tree saw; that is every row only when
         // nothing was sampled away.
+        const t_ap = prof.start();
         if (builder.activeRows().len == ds.n_rows) {
             var actx = ApplyCtx{
                 .spans = builder.leafSpans(),
@@ -351,12 +402,27 @@ pub fn train(
             };
             pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
         }
+        prof.stop(.apply, t_ap);
 
         if (valid) |v| {
+            const t_vp = prof.start();
             var vctx = ValidCtx{ .t = &model.trees.items[model.trees.items.len - 1], .ds = v, .raw = valid_raw };
             pool.parallelFor(v.n_rows, &vctx, ValidCtx.run, 4096);
+            prof.stop(.valid_predict, t_vp);
 
+            // Only score when something will actually consume it. Early
+            // stopping needs every round; a log line needs its own round; the
+            // final round fills in `best_score` for the caller. Without this
+            // guard the metric ran unconditionally, and on 668k rows that was
+            // 52% of total training time — a full 133k-row sort per round,
+            // single-threaded, discarded 199 times out of 200.
+            const log_due = log != null and cfg.verbose_eval != 0 and
+                (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
+            if (cfg.early_stopping_rounds == 0 and !log_due and round + 1 != cfg.n_rounds) continue;
+
+            const t_vm = prof.start();
             const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, valid_scratch);
+            prof.stop(.valid_metric, t_vm);
             const improved = if (better) score > best_score else score < best_score;
             if (improved) {
                 best_score = score;
@@ -404,4 +470,63 @@ pub fn train(
         .rounds_run = round,
         .best_score = if (valid != null) best_score else std.math.nan(f64),
     };
+}
+
+const testing = std.testing;
+
+test "selectTopK puts exactly the k largest |g| in the prefix" {
+    // Quickselect is easy to get subtly wrong — off by one at the pivot, or
+    // quadratic on ordered input. Checked against a full sort on random,
+    // already-sorted, reverse-sorted and all-equal inputs, since boosting
+    // produces all four.
+    const gpa = testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(4);
+    const r = prng.random();
+
+    const shapes = enum { random, ascending, descending, all_equal };
+    for (std.enums.values(shapes)) |shape| {
+        for ([_]usize{ 1, 2, 7, 64, 1000 }) |n| {
+            const grads = try gpa.alloc(hist.GradPair, n);
+            defer gpa.free(grads);
+            for (grads, 0..) |*g, i| {
+                const v: f32 = switch (shape) {
+                    .random => r.floatNorm(f32),
+                    .ascending => @floatFromInt(i),
+                    .descending => @floatFromInt(n - i),
+                    .all_equal => 1.0,
+                };
+                g.* = .{ .g = v, .h = 1 };
+            }
+
+            const order = try gpa.alloc(u32, n);
+            defer gpa.free(order);
+
+            for ([_]usize{ 1, n / 3, n / 2, n - 1 }) |k| {
+                if (k == 0 or k >= n) continue;
+                for (order, 0..) |*o, i| o.* = @intCast(i);
+                selectTopK(grads, order, k);
+
+                // The k-th largest magnitude, found independently.
+                const mags = try gpa.alloc(f32, n);
+                defer gpa.free(mags);
+                for (mags, grads) |*m, g| m.* = @abs(g.g);
+                std.sort.pdq(f32, mags, {}, std.sort.desc(f32));
+                const kth = mags[k - 1];
+
+                // Every row in the prefix is >= the k-th largest, and every
+                // row outside it is <=. That is the whole contract.
+                for (order[0..k]) |i| try testing.expect(@abs(grads[i].g) >= kth);
+                for (order[k..]) |i| try testing.expect(@abs(grads[i].g) <= kth);
+
+                // And it is still a permutation.
+                const seen = try gpa.alloc(bool, n);
+                defer gpa.free(seen);
+                @memset(seen, false);
+                for (order) |i| {
+                    try testing.expect(!seen[i]);
+                    seen[i] = true;
+                }
+            }
+        }
+    }
 }

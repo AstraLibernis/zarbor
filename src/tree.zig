@@ -15,6 +15,7 @@ const data = @import("data.zig");
 const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const config = @import("config.zig");
+const prof = @import("prof.zig");
 
 pub const Node = extern struct {
     feature: u32 = 0,
@@ -440,12 +441,16 @@ pub const Builder = struct {
         b.leaves.clearRetainingCapacity();
         b.level_depth = -1;
 
+        const t_sel = prof.start();
         b.selectRows(subset);
+        prof.stop(.select_rows, t_sel);
 
         // One gather for the whole tree. Random-access over every active row,
         // so it is worth a barrier rather than leaving it on one core.
+        const t_gath = prof.start();
         var gctx = GatherCtx{ .dst = b.grads, .src = gradients, .rows = b.rows };
         b.pool.parallelFor(b.n_active, &gctx, GatherCtx.run, 16384);
+        prof.stop(.gather, t_gath);
 
         b.n_tree_features = b.sample(
             b.all_features,
@@ -463,6 +468,7 @@ pub const Builder = struct {
         const root_total = totalOf(b.grads[0..b.n_active]);
         const tree_feats = b.treeFeatures();
         const root_search = b.featuresFor(0);
+        const t_rh = prof.start();
         hist.build(
             b.pool,
             &b.bank,
@@ -472,7 +478,10 @@ pub const Builder = struct {
             tree_feats,
             b.slot(root_slot),
         );
+        prof.stop(.hist_build, t_rh);
+        const t_rs = prof.start();
         const root_split = hist.bestSplit(&b.bank, b.slot(root_slot), b.ds, root_search, root_total, p);
+        prof.stop(.best_split, t_rs);
         try b.queue.append(b.gpa, .{
             .node = 0,
             .start = 0,
@@ -495,7 +504,9 @@ pub const Builder = struct {
                 continue;
             }
 
+            const t_part = prof.start();
             const mid = b.partition(w.start, w.end, w.split);
+            prof.stop(.partition, t_part);
             // A split the histogram endorsed but the partition cannot realise
             // (every row on one side) would loop forever; treat it as a leaf.
             if (mid == w.start or mid == w.end) {
@@ -523,19 +534,29 @@ pub const Builder = struct {
             const n_left = mid - w.start;
             const n_right = w.end - mid;
             if (n_left <= n_right) {
+                const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], tree_feats, b.slot(slot_l));
+                prof.stop(.hist_build, t_hb);
+                const t_hs = prof.start();
                 hist.subtract(b.pool, &b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), tree_feats);
+                prof.stop(.hist_subtract, t_hs);
             } else {
+                const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], tree_feats, b.slot(slot_r));
+                prof.stop(.hist_build, t_hb);
+                const t_hs = prof.start();
                 hist.subtract(b.pool, &b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), tree_feats);
+                prof.stop(.hist_subtract, t_hs);
             }
             b.giveSlot(w.slot);
 
             // Each child draws its own candidate features, as XGBoost does.
+            const t_bs = prof.start();
             const left_search = b.featuresFor(w.depth + 1);
             const left_split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
             const right_search = b.featuresFor(w.depth + 1);
             const right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
+            prof.stop(.best_split, t_bs);
 
             try b.queue.append(b.gpa, .{
                 .node = li,
