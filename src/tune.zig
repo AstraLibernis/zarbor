@@ -250,6 +250,53 @@ const Trial = struct {
     text: []const u8,
 };
 
+/// Whether a Config field decides how the data is *binned* rather than how a
+/// model is fitted to it.
+///
+/// This distinction is not cosmetic. Binning happens once, before any trial,
+/// so a search that varies one of these and does nothing about it will report
+/// a value it never actually used -- which is exactly what happened: sixty
+/// trials printed `max_bin=64` while every one of them fitted the 256-bin
+/// matrix, and the winning config did not reproduce when run through `cv`.
+fn affectsBinning(name: []const u8) bool {
+    return std.mem.eql(u8, name, "max_bin") or std.mem.eql(u8, name, "bin_policy");
+}
+
+/// Holds the binned matrix, and rebuilds it when a trial asks for binning that
+/// differs from what is loaded. Re-binning costs ~200 ms against seconds of
+/// fitting, so doing it on change is cheap; doing it never was wrong.
+const Binner = struct {
+    gpa: std.mem.Allocator,
+    pool: *pool_mod.Pool,
+    frame: *data.Frame,
+    label_col: usize,
+    enc: *data.LabelEncoder,
+    drops: []const []const u8,
+    ds: data.Dataset,
+    max_bin: u16,
+    policy: config.BinPolicy,
+    rebins: usize = 0,
+
+    fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
+        if (cfg.max_bin != b.max_bin or cfg.bin_policy != b.policy) {
+            const next = try data.quantise(
+                b.gpa,
+                b.pool,
+                b.frame,
+                cfg,
+                .{ .col = b.label_col, .enc = b.enc },
+                b.drops,
+            );
+            b.ds.deinit();
+            b.ds = next;
+            b.max_bin = cfg.max_bin;
+            b.policy = cfg.bin_policy;
+            b.rebins += 1;
+        }
+        return &b.ds;
+    }
+};
+
 /// A configuration and the score it earned at the current rung. Named rather
 /// than anonymous because the sort needs a concrete type to specialise on.
 const Scored = struct { x: []f64, s: f64 };
@@ -258,7 +305,7 @@ const Evaluator = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     pool: *pool_mod.Pool,
-    full: *const data.Dataset,
+    binner: *Binner,
     base: config.Config,
     space: []const Param,
     fold_of: []const u32,
@@ -294,7 +341,10 @@ const Evaluator = struct {
     fn run(e: Evaluator, x: []const f64, use_folds: u32) !?cv.Outcome {
         const cfg = try e.apply(x);
         cfg.validate() catch return null;
-        return cv.crossValidate(e.gpa, e.io, e.pool, e.full, cfg, e.fold_of, e.n_folds, .{
+        // Binning first: a trial that changes `max_bin` needs a different
+        // matrix, not just different flags.
+        const ds = try e.binner.get(cfg);
+        return cv.crossValidate(e.gpa, e.io, e.pool, ds, cfg, e.fold_of, e.n_folds, .{
             .use_folds = use_folds,
             .oof = e.oof,
         }) catch |err| switch (err) {
@@ -562,7 +612,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
     var full = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items);
-    defer full.deinit();
+    errdefer full.deinit();
     try enc.validate(full.labels, cfg.objective);
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
     const prep_ms = @divTrunc(
@@ -570,16 +620,33 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         1_000_000,
     );
 
+    // Row order and labels do not change with binning, so a fold assignment
+    // and an out-of-fold buffer built now stay valid across every re-bin.
     const fold_of = try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
     defer gpa.free(fold_of);
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
 
+    var binner = Binner{
+        .gpa = gpa,
+        .pool = pool,
+        .frame = &frame,
+        .label_col = label_col,
+        .enc = &enc,
+        .drops = drops.items,
+        .ds = full,
+        .max_bin = cfg.max_bin,
+        .policy = cfg.bin_policy,
+    };
+    // `full` is owned by the binner from here on; it frees the old matrix
+    // every time it rebuilds one.
+    defer binner.ds.deinit();
+
     const ev = Evaluator{
         .gpa = gpa,
         .io = io,
         .pool = pool,
-        .full = &full,
+        .binner = &binner,
         .base = cfg,
         .space = space,
         .fold_of = fold_of,
@@ -793,9 +860,27 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     std.sort.pdq(u32, order, Ctx{ .t = results.items, .obj = cfg.objective }, Ctx.lessThan);
 
     const win = results.items[order[0]];
-    try out.print("\nbest     {d:.6}   {d} trials\n  {s}\n", .{
-        win.score, results.items.len, win.text,
-    });
+    try out.print("\nbest     {d:.6}   {d} trials", .{ win.score, results.items.len });
+    if (binner.rebins != 0) try out.print("   ({d} re-bins)", .{binner.rebins});
+    try out.print("\n  {s}\n", .{win.text});
+
+    // Re-run the winner from scratch on the folds it was searched on. A
+    // reported configuration that does not reproduce means the search applied
+    // something it did not print, or printed something it did not apply --
+    // which is how `max_bin` was caught being ignored while sixty trials
+    // claimed to be varying it. One evaluation is a cheap price for knowing.
+    if (try ev.run(win.x, 0)) |again| {
+        const delta = again.pooled - win.score;
+        if (@abs(delta) > 1e-9) {
+            try out.print(
+                "WARNING  re-run gives {d:.6}, searched {d:.6}, difference {d:.6}" ++
+                    " -- the reported config does not reproduce\n",
+                .{ again.pooled, win.score, delta },
+            );
+        } else {
+            try out.print("verified {d:.6}   (winner re-ran identically)\n", .{again.pooled});
+        }
+    }
 
     if (confirm > 0) {
         // The winner is the maximum of many trials on one split, so part of
@@ -1054,4 +1139,15 @@ test "TPE does not pile proposals onto a boundary" {
         if (@abs(outv[0] - 1.0) < 1e-12) on_bound += 1;
     }
     try testing.expect(on_bound < 30);
+}
+
+test "binning parameters are recognised as such" {
+    // If a new binning knob is added to Config and not listed here, `tune`
+    // will silently report a value it never applied. That failure is invisible
+    // in the output, so the list is asserted rather than assumed.
+    try testing.expect(affectsBinning("max_bin"));
+    try testing.expect(affectsBinning("bin_policy"));
+    try testing.expect(!affectsBinning("max_depth"));
+    try testing.expect(!affectsBinning("lambda"));
+    try testing.expect(!affectsBinning("n_rounds"));
 }
