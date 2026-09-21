@@ -728,9 +728,25 @@ test "a categorical column cannot overflow the bin byte" {
     {
         var f = try frameWith(gpa, levels[0..256], &[_]f32{0} ** 256);
         defer f.deinit();
-        // `quantise` collapses a worker's error into BinningFailed; the CSV
-        // path reports CategoricalTooWide directly, before any binning.
-        try testing.expectError(error.BinningFailed, data.quantise(gpa, pool, &f, .{}, null, &.{}));
+        // `quantise` checks width up front, on the columns that survived the
+        // drop list, so the error names the real cause rather than the
+        // BinningFailed a worker would have produced later.
+        try testing.expectError(
+            error.CategoricalTooWide,
+            data.quantise(gpa, pool, &f, .{}, null, &.{}),
+        );
+    }
+
+    {
+        // And the whole point of checking after drops: a column too wide to
+        // bin must not stop a run that excluded it. This used to fail during
+        // the CSV read, before `quantise` had seen the drop list at all.
+        var f = try frameWith(gpa, levels[0..256], &[_]f32{0} ** 256);
+        defer f.deinit();
+        try testing.expectError(
+            error.NoFeatures,
+            data.quantise(gpa, pool, &f, .{}, null, &.{ "colour", "num" }),
+        );
     }
 }
 

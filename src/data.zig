@@ -161,6 +161,12 @@ const ParseCtx = struct {
 
 /// Read and parse a CSV. `pool` is used for the row-parsing pass, which is
 /// where essentially all the time goes.
+/// Ceiling on distinct values in one column while reading. Far above any
+/// usable categorical -- it exists so a free-text column cannot allocate a
+/// dictionary the size of the file. The bin-width limit that actually matters
+/// is `max_bins`, checked in `binOne` after drops are applied.
+const max_levels: usize = 1 << 20;
+
 pub fn readCsv(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -247,15 +253,18 @@ pub fn readCsv(
                 if (dict_storage[c] == null) dict_storage[c] = .empty;
                 const m = &dict_storage[c].?;
                 if (m.contains(t)) continue;
-                // `max_bins - 1`, not `max_bins`: bin 0 is reserved for
-                // missing, so level `j` becomes bin `j + 1` and the highest
-                // level a `u8` bin can address is 254. Admitting a 256th
-                // level made `binOne` compute 256 — a panic in Debug, and in
-                // ReleaseFast a silent truncation to 0, which folded that
-                // level into the missing bin and trained on it without a
-                // word. The numeric path has always reserved the bin
-                // (`max_bin - 1` below); this one did not.
-                if (lists[c].items.len >= max_bins - 1) return error.CategoricalTooWide;
+                // The `u8` bin cap is NOT enforced here. It used to be, and
+                // that made `--drop` useless against a wide column: this pass
+                // runs over every column in the file, before `quantise` has
+                // seen the drop list, so a column the caller had explicitly
+                // excluded still killed the read. The cap belongs where the
+                // `u8` cast is, in `binOne`, which only runs for columns that
+                // survived the drops.
+                //
+                // What remains here is a memory guard: a free-text column in a
+                // large file would otherwise build a dictionary the size of
+                // the file before anyone objected.
+                if (lists[c].items.len >= max_levels) return error.TooManyLevels;
                 const owned = try gpa.dupe(u8, t);
                 errdefer gpa.free(owned);
                 try m.put(gpa, owned, @intCast(lists[c].items.len));
@@ -754,6 +763,14 @@ pub fn quantise(
     }
     const n_features = feats.items.len;
     if (n_features == 0) return error.NoFeatures;
+
+    // Width is checked here, on the columns that survived `skip`, rather than
+    // inside the parallel binning below -- which collapses every worker error
+    // into one `BinningFailed` and so cannot say which column was at fault.
+    for (feats.items) |c| {
+        if (src.kinds[c] == .categorical and src.levels[c].len >= cfg.max_bin)
+            return error.CategoricalTooWide;
+    }
 
     const bins = try gpa.alloc(u8, n_features * src.n_rows);
     errdefer gpa.free(bins);

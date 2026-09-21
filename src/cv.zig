@@ -31,6 +31,11 @@ pub const usage =
     \\
     \\  --folds=N           number of folds (default 5)
     \\  --fold-seed=N       seed for the fold assignment (default 1)
+    \\  --group-col=NAME    keep rows sharing this column's value in the
+    \\                      same fold, and drop it as a feature. Required
+    \\                      whenever a unit appears more than once (a panel,
+    \\                      repeated measures) or CV measures memory, not
+    \\                      generalisation.
     \\  --label=NAME        target column (required)
     \\  --pos-label=NAME    class of a string target to encode as 1
     \\  --drop=NAME         exclude a column; repeatable
@@ -93,6 +98,81 @@ pub fn assignFolds(
         fold[row] = k;
         k += 1;
         if (k == n_folds) k = 0;
+    }
+    return fold;
+}
+
+/// Assign folds by *group* rather than by row: every row sharing a group id
+/// lands in the same fold.
+///
+/// Without this, cross-validation on panel data silently lies. If a ZIP code
+/// appears in May and June and the split is by row, one month trains while
+/// the other validates, and the score measures memory rather than
+/// generalisation. Grouping is the difference between "how well does this
+/// predict a new month for a place I know" and "how well does it predict a
+/// place I have never seen" -- which can be several RMSE apart.
+///
+/// Groups are dealt largest-first into whichever fold is currently smallest,
+/// because group sizes are usually uneven and a round-robin over a shuffled
+/// list would leave the folds lopsided.
+pub fn assignGroupFolds(
+    gpa: std.mem.Allocator,
+    groups: []const f32,
+    n_folds: u32,
+    seed: u64,
+) ![]u32 {
+    const n = groups.len;
+    const fold = try gpa.alloc(u32, n);
+    errdefer gpa.free(fold);
+
+    // Distinct group ids, and how many rows each holds.
+    var counts: std.AutoArrayHashMapUnmanaged(u64, u32) = .empty;
+    defer counts.deinit(gpa);
+    for (groups) |g| {
+        const key: u64 = @bitCast(@as(f64, g));
+        const e = try counts.getOrPut(gpa, key);
+        e.value_ptr.* = if (e.found_existing) e.value_ptr.* + 1 else 1;
+    }
+    const n_groups = counts.count();
+    if (n_groups < n_folds) return error.FewerGroupsThanFolds;
+
+    const order = try gpa.alloc(u32, n_groups);
+    defer gpa.free(order);
+    for (order, 0..) |*v, i| v.* = @intCast(i);
+
+    // Shuffle first so equal-sized groups are not ordered by appearance, then
+    // sort by size; ties keep the shuffled order.
+    var prng: std.Random.DefaultPrng = .init(seed);
+    shuffle(prng.random(), order);
+    const sizes = counts.values();
+    const By = struct {
+        s: []const u32,
+        fn gt(c: @This(), a: u32, b: u32) bool {
+            return c.s[a] > c.s[b];
+        }
+    };
+    std.sort.pdq(u32, order, By{ .s = sizes }, By.gt);
+
+    const load = try gpa.alloc(u32, n_folds);
+    defer gpa.free(load);
+    @memset(load, 0);
+
+    const of = try gpa.alloc(u32, n_groups);
+    defer gpa.free(of);
+    for (order) |gi| {
+        var best: u32 = 0;
+        for (1..n_folds) |k| if (load[k] < load[best]) {
+            best = @intCast(k);
+        };
+        of[gi] = best;
+        load[best] += sizes[gi];
+    }
+
+    for (groups, 0..) |g, i| {
+        const key: u64 = @bitCast(@as(f64, g));
+        // getIndex, not a scan: the map already knows where the group is, and
+        // a linear lookup here would be rows x groups.
+        fold[i] = of[counts.getIndex(key).?];
     }
     return fold;
 }
@@ -269,6 +349,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var max_bytes: usize = 1 << 31;
     var n_folds: u32 = 5;
     var fold_seed: u64 = 1;
+    var group_col: ?[]const u8 = null;
     var quiet = false;
 
     var drops: std.ArrayList([]const u8) = .empty;
@@ -298,6 +379,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             n_folds = try std.fmt.parseInt(u32, val, 10);
         } else if (std.mem.eql(u8, key, "fold-seed")) {
             fold_seed = try std.fmt.parseInt(u64, val, 10);
+        } else if (std.mem.eql(u8, key, "group-col")) {
+            group_col = val;
         } else if (std.mem.eql(u8, key, "oof")) {
             oof_path = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
@@ -339,6 +422,15 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer frame.deinit();
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+
+    // The grouping column is a label on the rows, never a feature: leaving a
+    // ZIP or subject id in the matrix invites the model to memorise it.
+    var group_idx: ?usize = null;
+    if (group_col) |name| {
+        group_idx = frame.columnIndex(name) orelse return error.GroupColumnNotFound;
+        try drops.append(gpa, name);
+    }
+
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
 
@@ -366,14 +458,17 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             path,                          full.n_rows,
             full.n_features,               target,
             n_folds,                       fold_seed,
-            if (cfg.objective == .logistic) ", stratified" else "",
+            if (group_col != null) ", grouped" else if (cfg.objective == .logistic) ", stratified" else "",
             pool.workerCount(),            @tagName(builtin.mode),
             @divTrunc(t_bin - t0, 1_000_000),
         });
         try out.flush();
     }
 
-    const fold_of = try assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
+    const fold_of = if (group_idx) |gi|
+        try assignGroupFolds(gpa, frame.values[gi], n_folds, fold_seed)
+    else
+        try assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
     defer gpa.free(fold_of);
 
     const oof = try gpa.alloc(f32, full.n_rows);
@@ -491,4 +586,64 @@ test "unstratified assignment still partitions completely" {
         total += c;
     }
     try testing.expectEqual(@as(usize, 333), total);
+}
+
+test "grouped folds never split a group across folds" {
+    const gpa = testing.allocator;
+    const n = 1200;
+    const groups = try gpa.alloc(f32, n);
+    defer gpa.free(groups);
+    // 300 groups of 4 rows each -- the panel shape this exists for.
+    for (groups, 0..) |*g, i| g.* = @floatFromInt(i / 4);
+
+    const fold = try assignGroupFolds(gpa, groups, 5, 3);
+    defer gpa.free(fold);
+
+    // Every row of a group shares its fold. A row-wise splitter puts the same
+    // group in both halves, which is exactly the leak this prevents.
+    var seen: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer seen.deinit(gpa);
+    for (groups, fold) |g, k| {
+        const id: u32 = @intFromFloat(g);
+        const e = try seen.getOrPut(gpa, id);
+        if (e.found_existing) {
+            try testing.expectEqual(e.value_ptr.*, k);
+        } else e.value_ptr.* = k;
+    }
+    try testing.expectEqual(@as(usize, 300), seen.count());
+}
+
+test "grouped folds stay balanced when group sizes are uneven" {
+    const gpa = testing.allocator;
+    // Sizes 1..60: dealing these round-robin would leave one fold carrying
+    // far more rows than another, so they are placed largest-first into
+    // whichever fold is currently lightest.
+    var list: std.ArrayList(f32) = .empty;
+    defer list.deinit(gpa);
+    for (1..61) |g| {
+        for (0..g) |_| try list.append(gpa, @floatFromInt(g));
+    }
+    const fold = try assignGroupFolds(gpa, list.items, 5, 11);
+    defer gpa.free(fold);
+
+    var load = [_]usize{0} ** 5;
+    for (fold) |k| load[k] += 1;
+    var lo: usize = std.math.maxInt(usize);
+    var hi: usize = 0;
+    for (load) |v| {
+        lo = @min(lo, v);
+        hi = @max(hi, v);
+    }
+    // 1830 rows over 5 folds is 366 each; allow a little slack for the
+    // largest group being indivisible.
+    try testing.expect(hi - lo <= 60);
+}
+
+test "grouping is refused when there are fewer groups than folds" {
+    const gpa = testing.allocator;
+    const groups = [_]f32{ 1, 1, 2, 2, 3, 3 };
+    try testing.expectError(
+        error.FewerGroupsThanFolds,
+        assignGroupFolds(gpa, &groups, 5, 1),
+    );
 }

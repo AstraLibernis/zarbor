@@ -37,6 +37,13 @@ model that did not train on it — alongside the per-fold mean and sd, because
 those answer different questions and get conflated. Folds are stratified for a
 classification objective.
 
+**`--group-col=NAME` holds out whole groups.** Whenever a unit appears in
+more than one row -- a panel, repeated measures, the same ZIP in two months --
+row-wise folds put one row in training and its sibling in validation, and the
+score measures memory rather than generalisation. Measured on a two-month
+panel of 6,830 ZIP codes: row-wise CV reports RMSE 10.51 where holding out
+whole ZIPs reports 14.17. The column is dropped as a feature automatically.
+
 Predictions are pooled on the natural scale, not raw log-odds: each fold is a
 different model with its own base score, and a metric over the pooled vector
 compares rows *across* folds, so the scale has to mean the same thing in all

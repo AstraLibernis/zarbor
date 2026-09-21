@@ -189,6 +189,7 @@ pub fn main(init: std.process.Init) !void {
     defer enc.deinit();
 
     var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+        if (err == error.CategoricalTooWide) try explainWidth(out, &frame, cfg.max_bin, drops.items);
         try explainLabel(out, err, target);
         return err;
     };
@@ -644,6 +645,39 @@ fn writePredictions(
         try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{d:.6}\n", .{p}));
     }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
+}
+
+
+/// Name the columns that blew the bin cap, and how wide they are.
+///
+/// `error.CategoricalTooWide` on its own sends the reader back to count
+/// distinct values by hand across every column in the file. The frame already
+/// knows, so it may as well say.
+fn explainWidth(
+    out: *std.Io.Writer,
+    frame: *const data.Frame,
+    max_bin: u16,
+    dropped: []const []const u8,
+) !void {
+    try out.print(
+        \\error: a categorical column has more levels than a bin can address
+        \\       (limit {d}, set by --max_bin; a bin is stored as a u8)
+        \\
+    , .{max_bin});
+    outer: for (frame.names, frame.kinds, frame.levels) |name, kind, levels| {
+        if (kind != .categorical or levels.len < max_bin) continue;
+        // A column the caller already dropped is not their problem.
+        for (dropped) |d| if (std.mem.eql(u8, d, name)) continue :outer;
+        try out.print("  {s: <28} {d} levels\n", .{ name, levels.len });
+    }
+    try out.writeAll(
+        \\
+        \\Either --drop the column, or replace it with something numeric --
+        \\for a high-cardinality group, a statistic of that group (its mean
+        \\target, size, or rank) is usually more useful than its identity.
+        \\
+    );
+    try out.flush();
 }
 
 /// Show which class became which number, or that the target was already

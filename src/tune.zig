@@ -55,6 +55,11 @@ pub const usage =
     \\                      --algo is used.
     \\  --folds=N           folds per evaluation (default 5)
     \\  --fold-seed=N       seed for the fold assignment (default 1)
+    \\  --group-col=NAME    keep rows sharing this column's value in the
+    \\                      same fold, and drop it as a feature. Required
+    \\                      whenever a unit appears more than once (a panel,
+    \\                      repeated measures) or CV measures memory, not
+    \\                      generalisation.
     \\  --seed=N            seed for the search itself (default 1)
     \\  --confirm=N         re-score the top N on unseen fold seeds
     \\  --confirm-seeds=N   how many unseen seeds to use (default 2)
@@ -497,6 +502,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var trials_want: usize = 40;
     var n_folds: u32 = 5;
     var fold_seed: u64 = 1;
+    var group_col: ?[]const u8 = null;
     var seed: u64 = 1;
     var grid_steps: usize = 5;
     var warmup: usize = 12;
@@ -542,6 +548,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             n_folds = try std.fmt.parseInt(u32, val, 10);
         } else if (std.mem.eql(u8, key, "fold-seed")) {
             fold_seed = try std.fmt.parseInt(u64, val, 10);
+        } else if (std.mem.eql(u8, key, "group-col")) {
+            group_col = val;
         } else if (std.mem.eql(u8, key, "seed")) {
             seed = try std.fmt.parseInt(u64, val, 10);
         } else if (std.mem.eql(u8, key, "grid-steps")) {
@@ -609,6 +617,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     defer frame.deinit();
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+    var group_idx: ?usize = null;
+    if (group_col) |name| {
+        group_idx = frame.columnIndex(name) orelse return error.GroupColumnNotFound;
+        try drops.append(gpa, name);
+    }
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
     var full = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items);
@@ -622,7 +635,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     // Row order and labels do not change with binning, so a fold assignment
     // and an out-of-fold buffer built now stay valid across every re-bin.
-    const fold_of = try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
+    const fold_of = if (group_idx) |gi|
+        try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fold_seed)
+    else
+        try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
     defer gpa.free(fold_of);
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
@@ -901,7 +917,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             var n_ok: usize = 0;
             for (0..confirm_seeds) |s| {
                 const fs = fold_seed + 1 + s;
-                const folds2 = try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.objective == .logistic);
+                const folds2 = if (group_idx) |gi|
+                    try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fs)
+                else
+                    try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.objective == .logistic);
                 defer gpa.free(folds2);
                 var ev2 = ev;
                 ev2.fold_of = folds2;
