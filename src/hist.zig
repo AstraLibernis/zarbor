@@ -53,9 +53,25 @@ pub const Bank = struct {
     /// `n_workers * n_features * stride`
     private: []Bin,
 
+    /// Bins per stride step, chosen so that `step * @sizeOf(Bin)` is a whole
+    /// number of cache lines.
+    ///
+    /// The obvious `cache_line / @sizeOf(Bin)` is wrong, and wrong in a way
+    /// that only shows up on some CPUs. `Bin` is 24 bytes, and Zig reports a
+    /// 128-byte cache line on Zen 5 (64 on much else), so that expression is
+    /// 128/24 = 5 here — not a power of two, which `alignForward` requires.
+    /// Debug catches it with an assert; ReleaseFast elides the assert and
+    /// silently produces a stride smaller than `max_bins`, overlapping the
+    /// per-feature histogram slices and corrupting every split search.
+    ///
+    /// Dividing by the gcd gives the smallest step whose byte size is a cache
+    /// line multiple: 128/gcd(24,128) = 16 bins here, 8 where the line is 64.
+    const bin_step: usize = @max(1, std.atomic.cache_line / std.math.gcd(@sizeOf(Bin), std.atomic.cache_line));
+
     pub fn init(gpa: std.mem.Allocator, n_workers: usize, n_features: usize, max_bins: usize) !Bank {
-        const per_line = @max(1, std.atomic.cache_line / @sizeOf(Bin));
-        const stride = std.mem.alignForward(usize, max_bins, per_line);
+        // Plain multiple-rounding, not alignForward: `bin_step` is a count of
+        // bins and carries no power-of-two guarantee.
+        const stride = ((max_bins + bin_step - 1) / bin_step) * bin_step;
         const private = try gpa.alloc(Bin, n_workers * n_features * stride);
         return .{
             .gpa = gpa,

@@ -1,9 +1,22 @@
-//! Hyperparameter surface for the gradient-boosted tree booster.
+//! Hyperparameter surface for every model in zmodels.
 //!
 //! Names follow XGBoost where an equivalent exists, so published tunings
-//! transfer without a translation table.
+//! transfer without a translation table. LightGBM-only knobs keep LightGBM's
+//! names for the same reason.
 
 const std = @import("std");
+
+/// Which model to fit. All three share the binning, missing-value and
+/// categorical handling in `data.zig`; they differ in what they do with it.
+pub const Algo = enum {
+    /// Gradient-boosted trees. `grow_policy` selects XGBoost- or
+    /// LightGBM-style growth.
+    gbdt,
+    /// Bagged unshrunk trees, averaged. No boosting.
+    random_forest,
+    /// Regularised linear or logistic regression on the binned design matrix.
+    linear,
+};
 
 /// Loss function. Dispatched at comptime so the boosting loop inlines the
 /// exact gradient/hessian pair with no indirect call in the hot path.
@@ -32,11 +45,26 @@ pub const BinPolicy = enum {
     uniform,
 };
 
+/// How rows are chosen for each tree.
+pub const Sampling = enum {
+    /// Uniform random subset of size `subsample`, without replacement.
+    uniform,
+    /// LightGBM's Gradient-based One-Side Sampling: keep every large-gradient
+    /// row, sample the rest, and amplify the survivors so the gradient sum
+    /// stays unbiased. Ignores `subsample`.
+    goss,
+};
+
 pub const Config = struct {
+    // ---- which model -------------------------------------------------
+    algo: Algo = .gbdt,
+
     // ---- ensemble ----------------------------------------------------
-    /// Number of boosting rounds (trees) to fit.
+    /// Number of boosting rounds (trees) to fit. For `random_forest` this is
+    /// the number of bagged trees, fitted independently.
     n_rounds: u32 = 500,
     /// Shrinkage applied to each tree's leaf values. XGBoost's `eta`.
+    /// Forced to 1.0 for `random_forest`, which averages instead of shrinking.
     learning_rate: f32 = 0.1,
     /// Initial raw score for every row. For logistic this is a log-odds.
     /// Null means "derive from the training label mean", which is what you
@@ -45,9 +73,10 @@ pub const Config = struct {
 
     // ---- tree shape --------------------------------------------------
     grow_policy: GrowPolicy = .depthwise,
-    /// Hard depth cap. 0 disables the cap (only meaningful for lossguide).
+    /// Hard depth cap. 0 disables the cap, which is only safe when
+    /// `max_leaves` is set — otherwise the histogram budget is unbounded.
     max_depth: u32 = 6,
-    /// Leaf cap for lossguide. 0 disables.
+    /// Leaf cap. 0 disables.
     max_leaves: u32 = 0,
     /// Minimum number of training rows that must land in a leaf.
     min_child_samples: u32 = 20,
@@ -67,8 +96,19 @@ pub const Config = struct {
     max_delta_step: f32 = 0.0,
 
     // ---- sampling ----------------------------------------------------
-    /// Fraction of rows sampled per tree, without replacement.
+    /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
+    sampling: Sampling = .uniform,
+    /// Fraction of rows sampled per tree. Without replacement unless
+    /// `bootstrap` is set. Ignored when `sampling = .goss`.
     subsample: f32 = 1.0,
+    /// Sample rows *with* replacement. This is what makes a bagged ensemble a
+    /// random forest rather than a subsample ensemble; on by default for
+    /// `random_forest` and off for everything else.
+    bootstrap: bool = false,
+    /// GOSS: fraction of rows kept for having the largest |gradient|.
+    top_rate: f32 = 0.2,
+    /// GOSS: fraction of the *remaining* rows sampled uniformly.
+    other_rate: f32 = 0.1,
     /// Fraction of features sampled once per tree.
     colsample_bytree: f32 = 1.0,
     /// Fraction of the per-tree features sampled again at each depth level.
@@ -88,9 +128,21 @@ pub const Config = struct {
     /// class for imbalanced binary problems.
     scale_pos_weight: f32 = 1.0,
 
+    // ---- linear model ------------------------------------------------
+    /// Full-batch gradient steps. Linear only.
+    lin_epochs: u32 = 300,
+    /// Adam step size. Linear only.
+    lin_lr: f32 = 0.05,
+    /// Stop when the mean absolute coefficient change falls below this.
+    lin_tol: f32 = 1e-7,
+    /// Standardise each design column to zero mean and unit variance before
+    /// fitting. Off makes the penalties scale-dependent and is rarely right.
+    lin_standardize: bool = true,
+
     // ---- control -----------------------------------------------------
     /// Stop when the validation metric has not improved for this many rounds.
-    /// 0 disables early stopping.
+    /// 0 disables early stopping. Not meaningful for `random_forest`, whose
+    /// trees are independent, or for `linear`.
     early_stopping_rounds: u32 = 0,
     seed: u64 = 0,
     /// Worker threads. 0 means "one per logical core".
@@ -98,16 +150,88 @@ pub const Config = struct {
     /// Print per-round metrics every N rounds. 0 silences training.
     verbose_eval: u32 = 10,
 
+    /// Apply the defaults that define each algorithm, for any field the user
+    /// left at the shared default. Call once, before `validate`.
+    pub fn applyAlgoDefaults(c: *Config, explicit: []const []const u8) void {
+        const set = struct {
+            fn has(ex: []const []const u8, name: []const u8) bool {
+                for (ex) |e| if (std.mem.eql(u8, e, name)) return true;
+                return false;
+            }
+        };
+        switch (c.algo) {
+            .gbdt, .linear => {},
+            .random_forest => {
+                // A forest averages full-strength trees; shrinking them would
+                // make it a very slow boosted model with no boosting.
+                if (!set.has(explicit, "learning_rate")) c.learning_rate = 1.0;
+                if (!set.has(explicit, "bootstrap")) c.bootstrap = true;
+                // Forests want deep, low-bias trees; the ensemble average is
+                // what controls variance. Leaf-capped so the histogram budget
+                // stays bounded.
+                if (!set.has(explicit, "max_depth")) c.max_depth = 0;
+                if (!set.has(explicit, "max_leaves")) c.max_leaves = 1024;
+                if (!set.has(explicit, "min_child_samples")) c.min_child_samples = 1;
+                if (!set.has(explicit, "min_child_weight")) c.min_child_weight = 0.0;
+                if (!set.has(explicit, "lambda")) c.lambda = 0.0;
+                // sqrt(p) features per split is the classic Breiman default;
+                // applied per node by the caller, which knows p.
+                if (!set.has(explicit, "n_rounds")) c.n_rounds = 300;
+            },
+        }
+    }
+
+    /// Breiman's per-split feature default, which needs the feature count and
+    /// so cannot be set until the data is binned. sqrt(p) for classification,
+    /// p/3 for regression.
+    pub fn applyForestFeatureDefault(
+        c: *Config,
+        n_features: usize,
+        explicit: []const []const u8,
+    ) void {
+        if (c.algo != .random_forest) return;
+        for (explicit) |e| if (std.mem.eql(u8, e, "colsample_bynode")) return;
+        if (n_features == 0) return;
+        const p_f: f32 = @floatFromInt(n_features);
+        const want: f32 = switch (c.objective) {
+            .logistic => @sqrt(p_f),
+            .squared_error => p_f / 3.0,
+        };
+        c.colsample_bynode = std.math.clamp(want / p_f, 1.0 / p_f, 1.0);
+    }
+
     pub fn validate(c: Config) !void {
         if (c.n_rounds == 0) return error.NoRounds;
-        if (c.learning_rate <= 0 or c.learning_rate > 1) return error.BadLearningRate;
         if (c.max_bin < 2 or c.max_bin > 256) return error.BadMaxBin;
+
+        if (c.algo == .linear) {
+            if (c.lin_epochs == 0) return error.NoEpochs;
+            if (c.lin_lr <= 0) return error.BadLinearLr;
+            if (c.lambda < 0 or c.alpha < 0) return error.NegativeRegularisation;
+            return;
+        }
+
+        if (c.learning_rate <= 0 or c.learning_rate > 1) return error.BadLearningRate;
         if (c.subsample <= 0 or c.subsample > 1) return error.BadSubsample;
         if (c.colsample_bytree <= 0 or c.colsample_bytree > 1) return error.BadColsample;
         if (c.colsample_bylevel <= 0 or c.colsample_bylevel > 1) return error.BadColsample;
         if (c.colsample_bynode <= 0 or c.colsample_bynode > 1) return error.BadColsample;
         if (c.lambda < 0 or c.alpha < 0) return error.NegativeRegularisation;
-        if (c.grow_policy == .depthwise and c.max_depth == 0) return error.UnboundedDepthwise;
+
+        // Bagging with replacement makes a row's gradient contribute more
+        // than once, which is meaningless when the next round's gradient is
+        // computed from a single accumulated score per row.
+        if (c.bootstrap and c.algo == .gbdt) return error.BootstrapWithBoosting;
+
+        if (c.sampling == .goss) {
+            if (c.top_rate <= 0 or c.top_rate >= 1) return error.BadTopRate;
+            if (c.other_rate <= 0 or c.other_rate >= 1) return error.BadOtherRate;
+            if (c.top_rate + c.other_rate > 1) return error.GossRatesExceedOne;
+            if (c.bootstrap) return error.GossWithBootstrap;
+        }
+
+        // An unbounded tree is only safe if *something* caps its leaves.
+        if (c.max_depth == 0 and c.max_leaves == 0) return error.UnboundedTree;
         if (c.grow_policy == .lossguide and c.max_leaves == 0 and c.max_depth == 0)
             return error.UnboundedLossguide;
     }

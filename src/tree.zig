@@ -210,6 +210,19 @@ pub const Builder = struct {
         return k;
     }
 
+    /// Features whose histograms are materialised for every node of this tree.
+    ///
+    /// This is deliberately the per-*tree* sample and never the per-level or
+    /// per-node one. A node's histogram is derived from its parent's by
+    /// subtraction, which is only valid where parent and child cover the same
+    /// features; sampling per node would subtract against bins the parent
+    /// never accumulated. Level/node sampling therefore restricts which
+    /// features are *considered* for a split, not which are built — which is
+    /// also what XGBoost and LightGBM do.
+    fn treeFeatures(b: *const Builder) []const u32 {
+        return b.tree_features[0..b.n_tree_features];
+    }
+
     fn featuresFor(b: *Builder, depth: u32) []u32 {
         if (b.level_depth != @as(i64, depth)) {
             b.n_level_features = b.sample(
@@ -281,30 +294,66 @@ pub const Builder = struct {
         return .{ .g = g, .h = h, .n = @intCast(grads.len) };
     }
 
-    /// Grow one tree against `gradients` (indexed by original row id).
-    /// Returns the tree; `leafSpans()` describes where its leaves' rows landed.
-    pub fn grow(b: *Builder, gradients: []const hist.GradPair) !Tree {
-        b.nodes.clearRetainingCapacity();
-        b.queue.clearRetainingCapacity();
-        b.leaves.clearRetainingCapacity();
-        b.level_depth = -1;
-
-        // --- row sampling: shuffle, then take a prefix ---
-        for (b.rows, 0..) |*r, i| r.* = @intCast(i);
+    /// Fill `rows[0..n_active]` with the rows this tree will see.
+    ///
+    /// An explicit `subset` wins outright. Otherwise `bootstrap` draws
+    /// `subsample * n` rows *with* replacement (bagging, which is what makes a
+    /// forest a forest), and without it we shuffle and take a prefix.
+    fn selectRows(b: *Builder, subset: ?[]const u32) void {
         const n_all = b.ds.n_rows;
+
+        if (subset) |sel| {
+            @memcpy(b.rows[0..sel.len], sel);
+            b.n_active = sel.len;
+            return;
+        }
+
+        var k: usize = n_all;
         if (b.cfg.subsample < 1.0) {
-            const r = b.rng.random();
-            var k: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n_all)) * b.cfg.subsample));
+            k = @intFromFloat(@round(@as(f32, @floatFromInt(n_all)) * b.cfg.subsample));
             k = std.math.clamp(k, 1, n_all);
+        }
+
+        const r = b.rng.random();
+        if (b.cfg.bootstrap) {
+            // With replacement: duplicates are the point. A row drawn twice
+            // simply carries twice the weight in this tree's histograms.
+            for (b.rows[0..k]) |*slot_row| slot_row.* = r.uintLessThan(u32, @intCast(n_all));
+            b.n_active = k;
+            return;
+        }
+
+        for (b.rows, 0..) |*row, i| row.* = @intCast(i);
+        if (k < n_all) {
             var i: usize = 0;
             while (i < k) : (i += 1) {
                 const j = i + r.uintLessThan(usize, n_all - i);
                 std.mem.swap(u32, &b.rows[i], &b.rows[j]);
             }
-            b.n_active = k;
-        } else {
-            b.n_active = n_all;
         }
+        b.n_active = k;
+    }
+
+    /// Grow one tree against `gradients` (indexed by original row id).
+    /// Returns the tree; `leafSpans()` describes where its leaves' rows landed.
+    pub fn grow(b: *Builder, gradients: []const hist.GradPair) !Tree {
+        return b.growRows(gradients, null);
+    }
+
+    /// As `grow`, but over an explicit row set. GOSS uses this to hand the
+    /// builder the rows it chose; passing null falls back to the config's own
+    /// `subsample`/`bootstrap` policy.
+    pub fn growRows(
+        b: *Builder,
+        gradients: []const hist.GradPair,
+        subset: ?[]const u32,
+    ) !Tree {
+        b.nodes.clearRetainingCapacity();
+        b.queue.clearRetainingCapacity();
+        b.leaves.clearRetainingCapacity();
+        b.level_depth = -1;
+
+        b.selectRows(subset);
 
         // One gather for the whole tree.
         for (0..b.n_active) |i| b.grads[i] = gradients[b.rows[i]];
@@ -323,17 +372,18 @@ pub const Builder = struct {
         try b.nodes.append(b.gpa, .{});
         const root_slot = b.takeSlot();
         const root_total = totalOf(b.grads[0..b.n_active]);
-        const root_feats = b.featuresFor(0);
+        const tree_feats = b.treeFeatures();
+        const root_search = b.featuresFor(0);
         hist.build(
             b.pool,
             &b.bank,
             b.ds,
             b.rows[0..b.n_active],
             b.grads[0..b.n_active],
-            root_feats,
+            tree_feats,
             b.slot(root_slot),
         );
-        const root_split = hist.bestSplit(&b.bank, b.slot(root_slot), b.ds, root_feats, root_total, p);
+        const root_split = hist.bestSplit(&b.bank, b.slot(root_slot), b.ds, root_search, root_total, p);
         try b.queue.append(b.gpa, .{
             .node = 0,
             .start = 0,
@@ -377,7 +427,6 @@ pub const Builder = struct {
                 .right = ri,
             };
 
-            const child_feats = b.featuresFor(w.depth + 1);
             const slot_l = b.takeSlot();
             const slot_r = b.takeSlot();
 
@@ -385,13 +434,19 @@ pub const Builder = struct {
             const n_left = mid - w.start;
             const n_right = w.end - mid;
             if (n_left <= n_right) {
-                hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], child_feats, b.slot(slot_l));
-                hist.subtract(&b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), child_feats);
+                hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.grads[w.start..mid], tree_feats, b.slot(slot_l));
+                hist.subtract(&b.bank, b.slot(slot_r), b.slot(w.slot), b.slot(slot_l), tree_feats);
             } else {
-                hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], child_feats, b.slot(slot_r));
-                hist.subtract(&b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), child_feats);
+                hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.grads[mid..w.end], tree_feats, b.slot(slot_r));
+                hist.subtract(&b.bank, b.slot(slot_l), b.slot(w.slot), b.slot(slot_r), tree_feats);
             }
             b.giveSlot(w.slot);
+
+            // Each child draws its own candidate features, as XGBoost does.
+            const left_search = b.featuresFor(w.depth + 1);
+            const left_split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
+            const right_search = b.featuresFor(w.depth + 1);
+            const right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
 
             try b.queue.append(b.gpa, .{
                 .node = li,
@@ -400,7 +455,7 @@ pub const Builder = struct {
                 .depth = w.depth + 1,
                 .total = w.split.left,
                 .slot = slot_l,
-                .split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, child_feats, w.split.left, p),
+                .split = left_split,
             });
             try b.queue.append(b.gpa, .{
                 .node = ri,
@@ -409,7 +464,7 @@ pub const Builder = struct {
                 .depth = w.depth + 1,
                 .total = w.split.right,
                 .slot = slot_r,
-                .split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, child_feats, w.split.right, p),
+                .split = right_split,
             });
         }
 

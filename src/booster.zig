@@ -120,6 +120,26 @@ const ApplyCtx = struct {
     }
 };
 
+/// Applies a finished tree to *every* training row.
+///
+/// The span-based `ApplyCtx` only touches rows the tree actually saw, which is
+/// correct when the tree saw all of them and wrong the moment any row sampling
+/// is in play: an unsampled row's raw score would stay at the previous round's
+/// value, and next round's gradient for it would be computed against a stale
+/// ensemble. Sampled rounds pay for a full traversal instead.
+const ApplyAllCtx = struct {
+    t: *const tree.Tree,
+    ds: *const Dataset,
+    raw: []f32,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *ApplyAllCtx = @ptrCast(@alignCast(ctx));
+        var r = begin;
+        while (r < end) : (r += 1) self.raw[r] += self.t.predictBinned(self.ds, r);
+    }
+};
+
 const ValidCtx = struct {
     t: *const tree.Tree,
     ds: *const Dataset,
@@ -133,12 +153,70 @@ const ValidCtx = struct {
     }
 };
 
+// --------------------------------------------------------------------- GOSS
+
+/// LightGBM's Gradient-based One-Side Sampling.
+///
+/// Rows with large |gradient| are the under-fitted ones and are kept in full;
+/// the well-fitted remainder is sampled. Dropping most small-gradient rows
+/// would bias the split gains, so the survivors are amplified by
+/// `(1 - top_rate) / other_rate` — the reciprocal of their sampling rate —
+/// which restores the expected gradient sum.
+///
+/// Mutates `grads` in place; the caller recomputes it every round anyway.
+fn gossSelect(
+    grads: []hist.GradPair,
+    order: []u32,
+    out: []u32,
+    top_rate: f32,
+    other_rate: f32,
+    rng: std.Random,
+) []u32 {
+    const n = grads.len;
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+
+    const Ctx = struct { g: []const hist.GradPair };
+    std.sort.pdq(u32, order, Ctx{ .g = grads }, struct {
+        fn lt(c: Ctx, a: u32, b: u32) bool {
+            return @abs(c.g[a].g) > @abs(c.g[b].g);
+        }
+    }.lt);
+
+    var top: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * top_rate));
+    top = std.math.clamp(top, 1, n);
+    const rest = n - top;
+
+    var rand_n: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * other_rate));
+    rand_n = @min(rand_n, rest);
+
+    @memcpy(out[0..top], order[0..top]);
+
+    var i: usize = 0;
+    while (i < rand_n) : (i += 1) {
+        const j = i + rng.uintLessThan(usize, rest - i);
+        std.mem.swap(u32, &order[top + i], &order[top + j]);
+        out[top + i] = order[top + i];
+    }
+
+    const amp: f32 = (1.0 - top_rate) / other_rate;
+    for (out[top .. top + rand_n]) |r| {
+        grads[r].g *= amp;
+        grads[r].h *= amp;
+    }
+    return out[0 .. top + rand_n];
+}
+
 // ----------------------------------------------------------------- training
 
 pub const TrainResult = struct {
     model: Model,
-    /// Rounds kept after early stopping.
+    /// Rounds kept after the post-hoc trim.
     n_rounds: u32,
+    /// Rounds actually executed before early stopping fired. Distinct from
+    /// `n_rounds`, which also reflects trimming the trees that came after the
+    /// best round — the two differ, and conflating them hides whether early
+    /// stopping ever triggered at all.
+    rounds_run: u32,
     /// Best validation score seen, or NaN when no validation set was given.
     best_score: f64,
 };
@@ -218,6 +296,16 @@ pub fn train(
     defer if (valid_raw.len != 0) gpa.free(valid_raw);
     defer if (valid_scratch.len != 0) gpa.free(valid_scratch);
 
+    var goss_order: []u32 = &.{};
+    var goss_rows: []u32 = &.{};
+    if (cfg.sampling == .goss) {
+        goss_order = try gpa.alloc(u32, ds.n_rows);
+        goss_rows = try gpa.alloc(u32, ds.n_rows);
+    }
+    defer if (goss_order.len != 0) gpa.free(goss_order);
+    defer if (goss_rows.len != 0) gpa.free(goss_rows);
+    var goss_rng: std.Random.DefaultPrng = .init(cfg.seed +% 0x9E3779B97F4A7C15);
+
     var builder = try tree.Builder.init(gpa, pool, ds, cfg);
     defer builder.deinit();
 
@@ -237,17 +325,32 @@ pub fn train(
         };
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
 
-        var t = try builder.grow(grads);
+        const subset: ?[]const u32 = if (cfg.sampling == .goss)
+            gossSelect(grads, goss_order, goss_rows, cfg.top_rate, cfg.other_rate, goss_rng.random())
+        else
+            null;
+
+        var t = try builder.growRows(grads, subset);
         errdefer t.deinit(gpa);
-
-        var actx = ApplyCtx{
-            .spans = builder.leafSpans(),
-            .rows = builder.rows,
-            .raw = raw,
-        };
-        pool.parallelFor(builder.leafSpans().len, &actx, ApplyCtx.run, 1);
-
         try model.trees.append(gpa, t);
+
+        // Spans only cover the rows the tree saw; that is every row only when
+        // nothing was sampled away.
+        if (builder.activeRows().len == ds.n_rows) {
+            var actx = ApplyCtx{
+                .spans = builder.leafSpans(),
+                .rows = builder.rows,
+                .raw = raw,
+            };
+            pool.parallelFor(builder.leafSpans().len, &actx, ApplyCtx.run, 1);
+        } else {
+            var actx = ApplyAllCtx{
+                .t = &model.trees.items[model.trees.items.len - 1],
+                .ds = ds,
+                .raw = raw,
+            };
+            pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
+        }
 
         if (valid) |v| {
             var vctx = ValidCtx{ .t = &model.trees.items[model.trees.items.len - 1], .ds = v, .raw = valid_raw };
@@ -298,6 +401,7 @@ pub fn train(
     return .{
         .model = model,
         .n_rounds = @intCast(model.trees.items.len),
+        .rounds_run = round,
         .best_score = if (valid != null) best_score else std.math.nan(f64),
     };
 }

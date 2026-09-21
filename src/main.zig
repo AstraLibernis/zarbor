@@ -8,11 +8,14 @@ const config = @import("config.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
 const booster = @import("booster.zig");
+const forest = @import("forest.zig");
+const linear = @import("linear.zig");
 const metric = @import("metric.zig");
 
 const usage =
     \\usage: zgbdt <train.csv> --label=<column> [options]
     \\
+    \\  --algo=NAME         gbdt | random_forest | linear   (default gbdt)
     \\  --label=NAME        target column (required)
     \\  --drop=NAME         exclude a column; repeatable
     \\  --valid-frac=F      fraction held out for validation (default 0.2)
@@ -23,6 +26,13 @@ const usage =
     \\  --n_rounds=800 --learning_rate=0.05 --max_depth=7 --lambda=2.0
     \\  --grow_policy=lossguide --max_leaves=64 --subsample=0.8
     \\  --colsample_bytree=0.8 --early_stopping_rounds=50 --n_threads=16
+    \\
+    \\XGBoost-style is the default; LightGBM-style is:
+    \\  --grow_policy=lossguide --max_leaves=64 --sampling=goss
+    \\
+    \\Each algo sets its own defaults for anything you do not pass:
+    \\  --algo=random_forest   bagged, unshrunk, 1024-leaf trees, sqrt(p)/split
+    \\  --algo=linear          Adam + L1/L2 on the binned design matrix
     \\
 ;
 
@@ -67,6 +77,11 @@ pub fn main(init: std.process.Init) !void {
     var drops: std.ArrayList([]const u8) = .empty;
     defer drops.deinit(gpa);
 
+    // Which config fields the user named. Each algo fills in the rest with
+    // defaults that suit it, and must not overwrite an explicit choice.
+    var explicit: std.ArrayList([]const u8) = .empty;
+    defer explicit.deinit(gpa);
+
     var it = std.process.Args.Iterator.init(init.minimal.args);
     _ = it.skip();
     while (it.next()) |arg| {
@@ -93,7 +108,9 @@ pub fn main(init: std.process.Init) !void {
             split_seed = try std.fmt.parseInt(u64, val, 10);
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
-        } else if (!try applyConfigFlag(&cfg, key, val)) {
+        } else if (try applyConfigFlag(&cfg, key, val)) {
+            try explicit.append(gpa, key);
+        } else {
             try out.print("unknown flag: --{s}\n\n", .{key});
             try out.writeAll(usage);
             try out.flush();
@@ -112,6 +129,8 @@ pub fn main(init: std.process.Init) !void {
         return error.NoLabel;
     };
 
+    cfg.applyAlgoDefaults(explicit.items);
+
     const pool = try pool_mod.Pool.init(gpa, cfg.n_threads);
     defer pool.deinit();
 
@@ -126,6 +145,7 @@ pub fn main(init: std.process.Init) !void {
     var full = try data.quantise(gpa, pool, &frame, cfg, label_col, drops.items);
     defer full.deinit();
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    cfg.applyForestFeatureDefault(full.n_features, explicit.items);
 
     try out.print(
         \\data    {s}
@@ -174,36 +194,91 @@ pub fn main(init: std.process.Init) !void {
     try out.flush();
 
     const t_train0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    var res = try booster.train(
-        gpa,
-        pool,
-        &train_ds,
-        if (valid_ds) |*v| v else null,
-        cfg,
-        out,
-    );
-    defer res.model.deinit();
-    const t_train1 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    const valid_ptr: ?*const data.Dataset = if (valid_ds) |*v| v else null;
 
-    const ms = @divTrunc(t_train1 - t_train0, 1_000_000);
+    switch (cfg.algo) {
+        .gbdt => {
+            var res = try booster.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            defer res.model.deinit();
+            try printTiming(out, io, t_train0, "tree", res.n_rounds);
+            if (valid_ds) |*v| {
+                const scores = try gpa.alloc(f32, v.n_rows);
+                defer gpa.free(scores);
+                // Raw log-odds: AUC is rank-based so the link does not matter,
+                // and logloss wants the raw scale anyway.
+                res.model.predictRaw(pool, v, scores);
+                try report(gpa, out, cfg.objective, scores, v.labels, .raw);
+            }
+        },
+        .random_forest => {
+            var res = try forest.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            defer res.model.deinit();
+            try printTiming(out, io, t_train0, "tree", res.n_trees);
+            if (valid_ds) |*v| {
+                const scores = try gpa.alloc(f32, v.n_rows);
+                defer gpa.free(scores);
+                res.model.predict(pool, v, scores);
+                try report(gpa, out, cfg.objective, scores, v.labels, .natural);
+            }
+        },
+        .linear => {
+            var res = try linear.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            defer res.model.deinit();
+            try printTiming(out, io, t_train0, "epoch", res.epochs);
+            try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
+            if (valid_ds) |*v| {
+                const scores = try gpa.alloc(f32, v.n_rows);
+                defer gpa.free(scores);
+                res.model.predict(pool, v, scores);
+                try report(gpa, out, cfg.objective, scores, v.labels, .natural);
+            }
+        },
+    }
+    try out.flush();
+}
+
+fn printTiming(
+    out: *std.Io.Writer,
+    io: std.Io,
+    t0: i128,
+    comptime unit: []const u8,
+    n: u32,
+) !void {
+    const ms = @divTrunc(std.Io.Timestamp.now(io, .awake).toNanoseconds() - t0, 1_000_000);
     try out.print(
         \\
         \\rounds  {d}
-        \\train   {d} ms  ({d:.2} ms/tree)
-        \\
-    , .{
-        res.n_rounds,
+        \\train   {d} ms  ({d:.2} ms/
+    ++ unit ++ ")\n", .{
+        n,
         ms,
-        @as(f64, @floatFromInt(ms)) / @as(f64, @floatFromInt(@max(res.n_rounds, 1))),
+        @as(f64, @floatFromInt(ms)) / @as(f64, @floatFromInt(@max(n, 1))),
     });
+}
 
-    if (valid_ds) |*v| {
-        const scores = try gpa.alloc(f32, v.n_rows);
-        defer gpa.free(scores);
-        res.model.predictRaw(pool, v, scores);
-        const a = try metric.auc(gpa, scores, v.labels);
-        const ll = metric.logloss(scores, v.labels);
-        try out.print("valid   auc={d:.6}  logloss={d:.6}\n", .{ a, ll });
+/// Which scale the predictions are on. The booster reports raw log-odds; the
+/// forest and the linear model already apply their own link.
+const Scale = enum { raw, natural };
+
+fn report(
+    gpa: std.mem.Allocator,
+    out: *std.Io.Writer,
+    obj: config.Objective,
+    pred: []const f32,
+    labels: []const f32,
+    scale: Scale,
+) !void {
+    switch (obj) {
+        .logistic => {
+            const a = try metric.auc(gpa, pred, labels);
+            const ll = switch (scale) {
+                .raw => metric.logloss(pred, labels),
+                .natural => metric.loglossProb(pred, labels),
+            };
+            try out.print("valid   auc={d:.6}  logloss={d:.6}\n", .{ a, ll });
+        },
+        .squared_error => {
+            try out.print("valid   rmse={d:.6}\n", .{metric.rmse(pred, labels)});
+        },
     }
-    try out.flush();
 }

@@ -63,6 +63,19 @@ pub fn logloss(raw: []const f32, labels: []const f32) f64 {
     return acc / @as(f64, @floatFromInt(raw.len));
 }
 
+/// Mean binary cross-entropy from probabilities rather than log-odds.
+///
+/// A forest leaf can hold exactly 0 or 1 when its rows are pure, which would
+/// make the loss infinite, so probabilities are clamped away from the ends.
+pub fn loglossProb(prob: []const f32, labels: []const f32) f64 {
+    var acc: f64 = 0;
+    for (prob, labels) |pr, y| {
+        const q = std.math.clamp(@as(f64, pr), 1e-7, 1 - 1e-7);
+        acc += -(@as(f64, y) * @log(q) + (1 - @as(f64, y)) * @log(1 - q));
+    }
+    return acc / @as(f64, @floatFromInt(prob.len));
+}
+
 pub fn rmse(pred: []const f32, labels: []const f32) f64 {
     var acc: f64 = 0;
     for (pred, labels) |p, y| {

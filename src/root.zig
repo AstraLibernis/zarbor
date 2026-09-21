@@ -7,7 +7,11 @@ pub const metric = @import("metric.zig");
 pub const pool = @import("pool.zig");
 pub const tree = @import("tree.zig");
 pub const booster = @import("booster.zig");
+pub const forest = @import("forest.zig");
+pub const linear = @import("linear.zig");
 
 test {
+    _ = @import("model_test.zig");
+    _ = @import("sweep_test.zig");
     @import("std").testing.refAllDecls(@This());
 }
