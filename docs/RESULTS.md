@@ -14,7 +14,7 @@ Read `|d|/sd` as the pre-registered test: the effect counts only above 2.
 | | criterion | what happened |
 |---|---|---|
 | **F1** optimal categorical splits | helps on ≥2 of adult/bank/ames, no significant regression anywhere | helps on **ames only**; adult regressed at n=3 and did not at n=8 |
-| **F2** linear leaves | helps on ≥2 regression sets, no significant regression anywhere | helps on **california only**; adult and bank both regress, at 2–3x the fit time |
+| **F2** linear leaves | helps on ≥2 regression sets, no significant regression anywhere | helps on **california only**; no significant regression once the ridge is fixed and seeds raised, but 1.3–2.2x the fit time |
 
 Both are real capabilities that do real work on the right data. Neither is a
 default, and the numbers below are why.
@@ -107,13 +107,40 @@ a pre-registered result**:
 | housing (RMSE) | −0.194150 | 0.027309 | 7.11 | 1.73x | helps¹ |
 
 The fix cuts the classification damage by 4–5x (adult −0.00074 → −0.00020,
-bank −0.0017 → −0.00033) and leaves california's gain intact. It does not
-change the verdict: both classification sets still regress.
+bank −0.0017 → −0.00033) and leaves california's gain intact.
 
-### What the pattern says
+### Secondary, n = 8 seeds
 
-Linear leaves help squared-error regression and hurt logistic classification,
-consistently, on every dataset here. That is not a tuning artefact:
+Five seeds added after the above, so again not the pre-registered test:
+
+| dataset | delta | sd | \|d\|/sd | verdict |
+|---|---:|---:|---:|---|
+| california (RMSE) | −0.005919 | 0.000859 | 6.89 | helps |
+| adult (AUC) | +0.000004 | 0.000237 | 0.02 | no effect |
+| bank (AUC) | −0.000492 | 0.000265 | 1.86 | no effect |
+| ames (RMSE) | −232.4 | 1120.8 | 0.21 | no effect |
+| housing (RMSE) | −0.158796 | 0.036180 | 4.39 | helps¹ |
+
+**This retracts the "hurts classification" reading.** With the ridge fixed and
+the seed count raised, neither classification set shows a significant
+regression — adult is dead flat and bank sits at 1.86 sd, under the bar. What
+survives is weaker and duller: linear leaves help squared-error regression and
+do nothing else. The same thing happened to F1's adult regression, and for the
+same reason: at n = 3 the sd is badly underestimated, and three seeds is not
+enough to call a sign on an effect this small.
+
+Timing in this secondary run is unusable — the OFF arm was measured while the
+machine was running other benchmarks, which is why its ratios come out below
+1.0. The pre-registered n = 3 timings, taken on an idle box, are the ones to
+read.
+
+The verdict is unchanged, but for a milder reason than first recorded: F2
+helps one non-motivating dataset, not the two the criterion asks for.
+
+### Why regression and not classification
+
+The direction is consistent across every run even where it is not significant,
+and there is a mechanism for it:
 
 * For regression the leaf value *is* the prediction, and a local slope is
   directly what a staircase was approximating.
@@ -150,8 +177,8 @@ move — and all three mutants now fail.
   the signal, and is close to free. The thing to build next is not a better
   search but a wider bin, because the 255-level ceiling is what keeps it away
   from the columns that need it most.
-* **F2** should probably be gated to `squared_error` rather than left as a
-  global flag, on the evidence here. Before that, the extrapolation guard is
-  the obvious missing piece: clipping each leaf's affine output to the range
-  its own training rows spanned costs nothing and is exactly the failure the
-  logistic results point at. Untested.
+* **F2** is a squared-error feature. It is not measurably harmful elsewhere
+  once the ridge is scale-invariant, but it is not useful elsewhere either,
+  and it costs 1.3–2.2x. The obvious untested improvement is an extrapolation
+  guard: clipping each leaf's affine output to the range its own training rows
+  spanned costs nothing and is where the logistic direction points.
