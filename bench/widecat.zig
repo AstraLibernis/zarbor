@@ -176,6 +176,59 @@ fn halfB(gpa: std.mem.Allocator, n_rows: usize) !void {
     }
 }
 
+/// Half C: does a `u16` bin index cost the accumulation kernel anything?
+///
+/// This decides the architecture. If widening is near-free the bin type can
+/// just become `u16` everywhere, one code path. If it is not, the type has to
+/// become a comptime parameter with both widths instantiated, so a table that
+/// fits in `u8` keeps today's cost -- a far larger refactor.
+///
+/// Row-major over `n_feat` features, which is the real kernel's shape: the
+/// difference is entirely how many bytes of `bins_rm` a row occupies.
+fn halfC(gpa: std.mem.Allocator, n_rows: usize) !void {
+    const reps: usize = 30;
+    const n_feat: usize = 13;
+    const bins_per: u32 = 64;
+    std.debug.print("\n  accumulate, row-major, {d} features x {d} rows x {d} reps\n", .{ n_feat, n_rows, reps });
+    std.debug.print("  {s:>9}  {s:>12}  {s:>8}  {s:>12}\n", .{ "bin type", "ns/row", "vs u8", "bins_rm MiB" });
+    var base: f64 = 0;
+    inline for ([2]type{ u8, u16 }) |B| {
+        const rm = try gpa.alloc(B, n_rows * n_feat);
+        defer gpa.free(rm);
+        var prng: std.Random.DefaultPrng = .init(3);
+        const r = prng.random();
+        for (rm) |*b| b.* = @intCast(r.uintLessThan(u32, bins_per));
+        const g = try gpa.alloc(hist.GradPair, n_rows);
+        defer gpa.free(g);
+        for (g) |*v| v.* = .{ .g = 0.5, .h = 1 };
+        const rows = try gpa.alloc(u32, n_rows);
+        defer gpa.free(rows);
+        for (rows, 0..) |*v, i| v.* = @intCast(i);
+        const h = try gpa.alloc(hist.Bin, n_feat * bins_per);
+        defer gpa.free(h);
+
+        const t0 = now();
+        for (0..reps) |_| {
+            @memset(h, .{});
+            for (rows) |row| {
+                const rb = rm[row * n_feat ..][0..n_feat];
+                const gp = g[row];
+                const v = hist.Bin.Vec{ gp.g, gp.h, 1, 0 };
+                inline for (0..n_feat) |f| {
+                    const cell: *hist.Bin.Vec = @ptrCast(&h[f * bins_per + rb[f]]);
+                    cell.* += v;
+                }
+            }
+        }
+        const ns = @as(f64, @floatFromInt(now() - t0)) / @as(f64, @floatFromInt(n_rows * reps));
+        if (B == u8) base = ns;
+        std.debug.print("  {s:>9}  {d:>11.3}   {d:>7.2}x  {d:>11.1}\n", .{
+            @typeName(B), ns, ns / base,
+            @as(f64, @floatFromInt(n_rows * n_feat * @sizeOf(B))) / (1024.0 * 1024.0),
+        });
+    }
+}
+
 pub fn main() !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_state.deinit();
@@ -188,5 +241,8 @@ pub fn main() !void {
     try halfA(gpa, pool, 500_000, 20);
     std.debug.print("\n=== B. scatter alone, bins spanning the full width", .{});
     try halfB(gpa, 500_000);
+    std.debug.print("\n=== C. u8 vs u16 bin index in the accumulation kernel", .{});
+    try halfC(gpa, 500_000);
+    try halfC(gpa, 6_830);
     std.debug.print("\n", .{});
 }
