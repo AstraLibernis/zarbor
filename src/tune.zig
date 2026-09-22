@@ -347,8 +347,15 @@ const Evaluator = struct {
         const cfg = try e.apply(x);
         cfg.validate() catch return null;
         // Binning first: a trial that changes `max_bin` needs a different
-        // matrix, not just different flags.
-        const ds = try e.binner.get(cfg);
+        // matrix, not just different flags. A `max_bin` below the widest
+        // categorical column cannot be binned at all -- that is the search
+        // space proposing something invalid, exactly like a rejected
+        // `validate`, so it is a skipped trial and not a failure. `get` fails
+        // before it frees anything, so the cached matrix is still intact.
+        const ds = e.binner.get(cfg) catch |err| switch (err) {
+            error.CategoricalTooWide => return null,
+            else => return err,
+        };
         return cv.crossValidate(e.gpa, e.io, e.pool, ds, cfg, e.fold_of, e.n_folds, .{
             .use_folds = use_folds,
             .oof = e.oof,
@@ -624,8 +631,27 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     }
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
-    var full = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items);
-    errdefer full.deinit();
+    // The binner owns the binned matrix from the moment it exists, and frees
+    // the old one on every re-bin. It is constructed here, before anything
+    // fallible, precisely so there is never a second owner: an
+    // `errdefer full.deinit()` alongside `defer binner.ds.deinit()` double-freed
+    // on every error path, and freed already-freed memory once a re-bin had
+    // swapped the matrix out from under the stale handle.
+    var binner = Binner{
+        .gpa = gpa,
+        .pool = pool,
+        .frame = &frame,
+        .label_col = label_col,
+        .enc = &enc,
+        .drops = drops.items,
+        .ds = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items),
+        .max_bin = cfg.max_bin,
+        .policy = cfg.bin_policy,
+    };
+    defer binner.ds.deinit();
+    // Row order, labels and feature count do not change with binning, so a
+    // view taken now stays correct across every re-bin.
+    const full = &binner.ds;
     try enc.validate(full.labels, cfg.objective);
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
     const prep_ms = @divTrunc(
@@ -642,21 +668,6 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer gpa.free(fold_of);
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
-
-    var binner = Binner{
-        .gpa = gpa,
-        .pool = pool,
-        .frame = &frame,
-        .label_col = label_col,
-        .enc = &enc,
-        .drops = drops.items,
-        .ds = full,
-        .max_bin = cfg.max_bin,
-        .policy = cfg.bin_policy,
-    };
-    // `full` is owned by the binner from here on; it frees the old matrix
-    // every time it rebuilds one.
-    defer binner.ds.deinit();
 
     const ev = Evaluator{
         .gpa = gpa,
@@ -1169,4 +1180,98 @@ test "binning parameters are recognised as such" {
     try testing.expect(!affectsBinning("max_depth"));
     try testing.expect(!affectsBinning("lambda"));
     try testing.expect(!affectsBinning("n_rounds"));
+}
+
+// ----- regression tests
+
+/// Two categorical columns and a numeric target, built directly so the test
+/// stays hermetic. `wide` controls how many distinct levels the categorical
+/// carries, which is what decides the `max_bin` it can be binned under.
+fn testFrame(gpa: std.mem.Allocator, wide: usize, n_rows: usize) !data.Frame {
+    var levels_list: std.ArrayList([]u8) = .empty;
+    errdefer levels_list.deinit(gpa);
+    const cat = try gpa.alloc(f32, n_rows);
+    const num = try gpa.alloc(f32, n_rows);
+    for (0..wide) |i| {
+        var buf: [16]u8 = undefined;
+        try levels_list.append(gpa, try gpa.dupe(u8, try std.fmt.bufPrint(&buf, "L{d}", .{i})));
+    }
+    for (cat, num, 0..) |*c, *y, i| {
+        c.* = @floatFromInt(i % wide);
+        y.* = @floatFromInt(i % 7);
+    }
+    const names = try gpa.alloc([]u8, 2);
+    names[0] = try gpa.dupe(u8, "cat");
+    names[1] = try gpa.dupe(u8, "y");
+    const kinds = try gpa.alloc(data.ColumnKind, 2);
+    kinds[0] = .categorical;
+    kinds[1] = .numeric;
+    const vals = try gpa.alloc([]f32, 2);
+    vals[0] = cat;
+    vals[1] = num;
+    const levels = try gpa.alloc([][]u8, 2);
+    levels[0] = try levels_list.toOwnedSlice(gpa);
+    levels[1] = &.{};
+    return .{
+        .gpa = gpa,
+        .n_rows = n_rows,
+        .names = names,
+        .kinds = kinds,
+        .values = vals,
+        .levels = levels,
+    };
+}
+
+test "Binner: a rebin too narrow for a categorical leaves the cached matrix intact" {
+    // A `max_bin` below the widest categorical column cannot be binned at all,
+    // and a search space that offers `max_bin` as a choice will propose one.
+    // That has to be a skipped trial, not a failure.
+    //
+    // It used to be fatal, and the escaping error then ran BOTH
+    // `defer binner.ds.deinit()` and a stale `errdefer full.deinit()` over one
+    // allocation: a double free, and a use-after-free once a successful rebin
+    // had already swapped the matrix out from under the stale handle.
+    // ReleaseFast segfaulted inside `free`; Debug aborted there. Only
+    // `--search=bandit` surfaced it, because it is the strategy that reliably
+    // walks the whole `max_bin` choice set early.
+    //
+    // `testing.allocator` fails this test on a double free or a leak, so the
+    // ownership half is asserted by construction.
+    const gpa = testing.allocator;
+    const p = try pool_mod.Pool.init(gpa, 2);
+    defer p.deinit();
+
+    var frame = try testFrame(gpa, 40, 200);
+    defer frame.deinit();
+
+    var b = Binner{
+        .gpa = gpa,
+        .pool = p,
+        .frame = &frame,
+        .label_col = 1,
+        .enc = undefined,
+        .drops = &.{},
+        .ds = try data.quantise(gpa, p, &frame, .{ .max_bin = 64 }, null, &.{}),
+        .max_bin = 64,
+        .policy = (config.Config{}).bin_policy,
+    };
+    defer b.ds.deinit();
+
+    const before = b.ds.n_rows;
+    try testing.expect(before == 200);
+
+    // 40 levels need 41 bins. 32 cannot hold them.
+    try testing.expectError(
+        error.CategoricalTooWide,
+        b.get(.{ .max_bin = 32 }),
+    );
+
+    // The cache must be untouched: same rows, and still the width we loaded.
+    try testing.expectEqual(@as(u16, 64), b.max_bin);
+    try testing.expectEqual(before, b.ds.n_rows);
+
+    // And a later valid request must still rebin normally.
+    const ds = try b.get(.{ .max_bin = 128 });
+    try testing.expectEqual(before, ds.n_rows);
+    try testing.expectEqual(@as(usize, 1), b.rebins);
 }
