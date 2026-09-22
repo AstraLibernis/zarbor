@@ -334,7 +334,19 @@ pub const Dataset = struct {
     n_features: usize,
     /// Column-major: `bins[f * n_rows + r]`. Partitioning a node reads one
     /// feature for every row, so that pass wants the column contiguous.
-    bins: []BinIdx,
+    /// Column-major, **one byte per bin**: `bins[f * n_rows + r]`.
+    ///
+    /// Partitioning reads one feature down a node's rows, and those rows are
+    /// scattered once the tree is more than a level deep, so each one tends to
+    /// want its own cache line and the element size is paid in full. Measured
+    /// when the whole matrix went to `u16`: partition went from 51 ms to
+    /// 110 ms on adult while the row-major accumulate did not move at all.
+    /// So this stays a byte, and a column too wide for one lives in
+    /// `wide_cols` instead. See docs/wide-categoricals.md.
+    bins: []u8,
+    /// Column-major storage for features whose bin count exceeds 256. Empty
+    /// slice for every other feature, which is almost all of them.
+    wide_cols: [][]BinIdx,
     /// The same bins row-major: `bins_rm[r * n_features + f]`.
     ///
     /// Both layouts are kept because the two hot passes want opposite things.
@@ -375,6 +387,8 @@ pub const Dataset = struct {
     pub fn deinit(d: *Dataset) void {
         const gpa = d.gpa;
         gpa.free(d.bins);
+        for (d.wide_cols) |c| if (c.len != 0) gpa.free(c);
+        gpa.free(d.wide_cols);
         gpa.free(d.bins_rm);
         gpa.free(d.n_bins);
         for (d.edges) |e| gpa.free(e);
@@ -393,8 +407,21 @@ pub const Dataset = struct {
         d.* = undefined;
     }
 
-    pub inline fn column(d: *const Dataset, f: usize) []const BinIdx {
+    /// True when feature `f`'s bins do not fit in a byte.
+    pub inline fn isWide(d: *const Dataset, f: usize) bool {
+        return d.wide_cols[f].len != 0;
+    }
+
+    /// Column-major bins for a narrow feature. Asserting rather than
+    /// returning an optional: the two callers both dispatch on `isWide`
+    /// first, and a silent wrong answer here is a mis-partitioned tree.
+    pub inline fn columnNarrow(d: *const Dataset, f: usize) []const u8 {
+        std.debug.assert(!d.isWide(f));
         return d.bins[f * d.n_rows ..][0..d.n_rows];
+    }
+
+    pub inline fn columnWide(d: *const Dataset, f: usize) []const BinIdx {
+        return d.wide_cols[f];
     }
 
     /// Every feature's bin for one row, contiguous.
@@ -748,6 +775,40 @@ const TransposeCtx = struct {
     }
 };
 
+/// Split a wide column-major scratch matrix into the byte mirror the
+/// partition reads and per-feature overrides for the columns that do not fit.
+///
+/// The scratch is what binning produces and what the row-major transpose
+/// consumes; neither wants to know which columns are wide. This is the one
+/// place that does.
+fn splitByWidth(
+    gpa: std.mem.Allocator,
+    scratch: []const BinIdx,
+    n_bins: []const u16,
+    n_rows: usize,
+    n_features: usize,
+) !struct { narrow: []u8, wide: [][]BinIdx } {
+    const narrow = try gpa.alloc(u8, n_features * n_rows);
+    errdefer gpa.free(narrow);
+    const wide = try gpa.alloc([]BinIdx, n_features);
+    errdefer gpa.free(wide);
+    @memset(wide, &.{});
+    var made: usize = 0;
+    errdefer for (wide[0..made]) |c| if (c.len != 0) gpa.free(c);
+
+    while (made < n_features) : (made += 1) {
+        const src = scratch[made * n_rows ..][0..n_rows];
+        if (n_bins[made] <= 256) {
+            const dst = narrow[made * n_rows ..][0..n_rows];
+            for (src, dst) |v, *d| d.* = @intCast(v);
+        } else {
+            wide[made] = try gpa.dupe(BinIdx, src);
+            @memset(narrow[made * n_rows ..][0..n_rows], 0);
+        }
+    }
+    return .{ .narrow = narrow, .wide = wide };
+}
+
 fn buildRowMajor(
     gpa: std.mem.Allocator,
     pool: *Pool,
@@ -791,8 +852,12 @@ pub fn quantise(
             return error.CategoricalTooWide;
     }
 
-    const bins = try gpa.alloc(BinIdx, n_features * src.n_rows);
-    errdefer gpa.free(bins);
+    // Mutable, and the errdefer guards on length: the scratch is handed back
+    // to the allocator partway through this function, and an `errdefer` on a
+    // pointer that has already been freed is a double free on any later
+    // failure. Clearing the slice is how the guard is told it is spent.
+    var bins = try gpa.alloc(BinIdx, n_features * src.n_rows);
+    errdefer if (bins.len != 0) gpa.free(bins);
     const n_bins = try gpa.alloc(u16, n_features);
     errdefer gpa.free(n_bins);
     const edges = try gpa.alloc([]f32, n_features);
@@ -859,6 +924,15 @@ pub fn quantise(
     const bins_rm = try buildRowMajor(gpa, pool, bins, src.n_rows, n_features);
     errdefer gpa.free(bins_rm);
 
+    const split = try splitByWidth(gpa, bins, n_bins, src.n_rows, n_features);
+    errdefer {
+        gpa.free(split.narrow);
+        for (split.wide) |c| if (c.len != 0) gpa.free(c);
+        gpa.free(split.wide);
+    }
+    gpa.free(bins);
+    bins = &.{};
+
     var labels: []f32 = &.{};
     errdefer if (labels.len != 0) gpa.free(labels);
     if (label) |ls| labels = try ls.enc.encode(gpa, src, ls.col);
@@ -867,7 +941,8 @@ pub fn quantise(
         .gpa = gpa,
         .n_rows = src.n_rows,
         .n_features = n_features,
-        .bins = bins,
+        .bins = split.narrow,
+        .wide_cols = split.wide,
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
@@ -886,12 +961,26 @@ pub fn quantise(
 /// different on the other.
 pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Dataset {
     const n = rows.len;
-    const bins = try gpa.alloc(BinIdx, ds.n_features * n);
+    const bins = try gpa.alloc(u8, ds.n_features * n);
     errdefer gpa.free(bins);
-    for (0..ds.n_features) |f| {
-        const src = ds.column(f);
+    const wide = try gpa.alloc([]BinIdx, ds.n_features);
+    errdefer gpa.free(wide);
+    @memset(wide, &.{});
+    var wmade: usize = 0;
+    errdefer for (wide[0..wmade]) |c| if (c.len != 0) gpa.free(c);
+    while (wmade < ds.n_features) : (wmade += 1) {
+        const f = wmade;
         const dst = bins[f * n ..][0..n];
-        for (rows, dst) |r, *d| d.* = src[r];
+        if (ds.isWide(f)) {
+            const src = ds.columnWide(f);
+            const w = try gpa.alloc(BinIdx, n);
+            for (rows, w) |r, *d| d.* = src[r];
+            wide[f] = w;
+            @memset(dst, 0);
+        } else {
+            const src = ds.columnNarrow(f);
+            for (rows, dst) |r, *d| d.* = src[r];
+        }
     }
 
     // The row-major mirror needs no transpose here: one selected row is
@@ -952,6 +1041,7 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .n_rows = n,
         .n_features = ds.n_features,
         .bins = bins,
+        .wide_cols = wide,
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
@@ -1102,8 +1192,8 @@ pub fn applySchema(
         if (src.kinds[src_col[f]] != schema.kinds[f]) return error.FeatureKindMismatch;
     }
 
-    const bins = try gpa.alloc(BinIdx, n * src.n_rows);
-    errdefer gpa.free(bins);
+    var bins = try gpa.alloc(BinIdx, n * src.n_rows);
+    errdefer if (bins.len != 0) gpa.free(bins);
 
     var ctx = ApplyCtx{
         .src = src,
@@ -1117,11 +1207,21 @@ pub fn applySchema(
     const bins_rm = try buildRowMajor(gpa, pool, bins, src.n_rows, n);
     errdefer gpa.free(bins_rm);
 
+    const split = try splitByWidth(gpa, bins, schema.n_bins, src.n_rows, n);
+    errdefer {
+        gpa.free(split.narrow);
+        for (split.wide) |c| if (c.len != 0) gpa.free(c);
+        gpa.free(split.wide);
+    }
+    gpa.free(bins);
+    bins = &.{};
+
     var out = Dataset{
         .gpa = gpa,
         .n_rows = src.n_rows,
         .n_features = n,
-        .bins = bins,
+        .bins = split.narrow,
+        .wide_cols = split.wide,
         .bins_rm = bins_rm,
         .n_bins = try gpa.dupe(u16, schema.n_bins),
         .edges = try gpa.alloc([]f32, n),

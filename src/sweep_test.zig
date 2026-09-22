@@ -22,7 +22,7 @@ const testing = std.testing;
 fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     const n_features: usize = 6;
     const n_bin: u16 = 17;
-    const bins = try gpa.alloc(data.BinIdx, n_features * n_rows);
+    const bins = try gpa.alloc(u8, n_features * n_rows);
     errdefer gpa.free(bins);
     const labels = try gpa.alloc(f32, n_rows);
     errdefer gpa.free(labels);
@@ -65,6 +65,11 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     @memset(means, &.{});
 
     // Mirror of `bins`, since the histogram kernel reads row-major.
+    // Every fixture column is narrow, so the wide overrides are all empty.
+    const wide_cols = try gpa.alloc([]data.BinIdx, n_features);
+    errdefer gpa.free(wide_cols);
+    @memset(wide_cols, &.{});
+
     const bins_rm = try gpa.alloc(data.BinIdx, n_features * n_rows);
     errdefer gpa.free(bins_rm);
     for (0..n_rows) |ri| for (0..n_features) |f| {
@@ -76,6 +81,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         .n_rows = n_rows,
         .n_features = n_features,
         .bins = bins,
+        .wide_cols = wide_cols,
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,

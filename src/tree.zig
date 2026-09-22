@@ -427,10 +427,16 @@ pub const Builder = struct {
     /// every setting.
     const parallel_partition_min: usize = 2048;
 
-    inline fn goesLeft(bin: data.BinIdx, sp: hist.Split) bool {
-        if (bin == 0) return sp.missing_left;
-        if (sp.is_cat) return hist.catContains(sp.cat_ids[0..sp.n_cat], bin);
-        return bin <= sp.threshold;
+    /// Takes the four scalars the decision needs, not the whole `Split`.
+    ///
+    /// `Split` is 160 bytes once a categorical split carries its id array
+    /// inline, and this runs once per row per partition pass. Reading the
+    /// decision through it put partition at 2.2x; the element width of the
+    /// bin, which is what two earlier guesses blamed, was worth nothing.
+    inline fn goesLeft(bin: data.BinIdx, t: hist.SplitTest) bool {
+        if (bin == 0) return t.missing_left;
+        if (t.is_cat) return hist.catContains(t.ids, bin);
+        return bin <= t.threshold;
     }
 
     /// Reorder `rows[start..end]` so the left child's rows come first.
@@ -442,21 +448,33 @@ pub const Builder = struct {
     /// count / prefix-sum / scatter, which is three parallel passes instead of
     /// one serial one.
     fn partition(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
+        if (b.ds.isWide(sp.feature))
+            return b.partitionOn(data.BinIdx, b.ds.columnWide(sp.feature), start, end, sp);
+        return b.partitionOn(u8, b.ds.columnNarrow(sp.feature), start, end, sp);
+    }
+
+    fn partitionOn(
+        b: *Builder,
+        comptime C: type,
+        col: []const C,
+        start: usize,
+        end: usize,
+        sp: hist.Split,
+    ) usize {
         const n = end - start;
         if (n < parallel_partition_min or b.pool.workerCount() == 1)
-            return b.partitionSerial(start, end, sp);
+            return b.partitionSerialOn(C, col, start, end, sp);
 
-        const col = b.ds.column(sp.feature);
         const n_chunks = b.pool.workerCount() * 4;
         const csize = (n + n_chunks - 1) / n_chunks;
         const used = (n + csize - 1) / csize;
         std.debug.assert(used <= b.part_counts.len);
 
-        var ctx = PartCtx{
+        var ctx = PartCtx(C){
             .rows = b.rows,
             .rows_out = b.rows_out,
             .col = col,
-            .sp = sp,
+            .sp = hist.SplitTest.of(&sp),
             .start = start,
             .chunk = csize,
             .counts = b.part_counts[0..used],
@@ -466,7 +484,7 @@ pub const Builder = struct {
 
         // 1. How many of each chunk's rows go left.
         const t_c = prof.start();
-        b.pool.parallelFor(n, &ctx, PartCtx.count, csize);
+        b.pool.parallelFor(n, &ctx, PartCtx(C).count, csize);
         prof.stop(.part_count, t_c);
 
         // 2. Prefix sums. `used` is a few dozen at most, so serial is right.
@@ -483,10 +501,10 @@ pub const Builder = struct {
 
         // 3. Scatter to the scratch buffers, then copy the touched range back.
         const t_s = prof.start();
-        b.pool.parallelFor(n, &ctx, PartCtx.scatter, csize);
+        b.pool.parallelFor(n, &ctx, PartCtx(C).scatter, csize);
         prof.stop(.part_scatter, t_s);
         const t_b = prof.start();
-        b.pool.parallelFor(n, &ctx, PartCtx.copyBack, 8192);
+        b.pool.parallelFor(n, &ctx, PartCtx(C).copyBack, 8192);
         prof.stop(.part_copy, t_b);
 
         return start + total_left;
@@ -499,16 +517,23 @@ pub const Builder = struct {
     /// kernel reads the row-major bin matrix, and an ascending row order is
     /// what lets the hardware prefetcher follow it. Two branchless passes and
     /// a memcpy beat one pass of mispredicted swaps anyway.
-    fn partitionSerial(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
-        const col = b.ds.column(sp.feature);
+    fn partitionSerialOn(
+        b: *Builder,
+        comptime C: type,
+        col: []const C,
+        start: usize,
+        end: usize,
+        sp: hist.Split,
+    ) usize {
         const rows = b.rows[start..end];
+        const t = hist.SplitTest.of(&sp);
         var n_left: usize = 0;
-        for (rows) |row| n_left += @intFromBool(goesLeft(col[row], sp));
+        for (rows) |row| n_left += @intFromBool(goesLeft(col[row], t));
 
         var li = start;
         var ri = start + n_left;
         for (rows) |row| {
-            const left = goesLeft(col[row], sp);
+            const left = goesLeft(col[row], t);
             const dst = if (left) li else ri;
             b.rows_out[dst] = row;
             li += @intFromBool(left);
@@ -993,20 +1018,33 @@ const TotalCtx = struct {
     }
 };
 
-const PartCtx = struct {
-    rows: []u32,
-    rows_out: []u32,
-    col: []const data.BinIdx,
-    sp: hist.Split,
-    start: usize,
-    chunk: usize,
-    counts: []usize,
-    left: []usize,
-    right: []usize,
+/// Generic over the column's element type so a table that fits in a byte
+/// keeps reading bytes here.
+///
+/// This is the one place the bin width is visibly paid. Partitioning walks a
+/// single feature down a node's rows, and those rows are scattered once the
+/// tree is more than a level deep, so each tends to want its own cache line
+/// and the element size is paid in full rather than amortised. Measured when
+/// the whole matrix went to `u16`: 51 ms -> 110 ms on adult, while the
+/// row-major accumulate did not move. The row-major mirror is therefore
+/// uniformly `u16` and only this stays narrow.
+fn PartCtx(comptime C: type) type {
+    return struct {
+        const Self = @This();
+    
+        rows: []u32,
+        rows_out: []u32,
+        col: []const C,
+        sp: hist.SplitTest,
+        start: usize,
+        chunk: usize,
+        counts: []usize,
+        left: []usize,
+        right: []usize,
 
-    fn count(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        fn count(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
-        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         var n: usize = 0;
         for (self.rows[self.start + begin .. self.start + end]) |row| {
             if (Builder.goesLeft(self.col[row], self.sp)) n += 1;
@@ -1014,9 +1052,9 @@ const PartCtx = struct {
         self.counts[begin / self.chunk] = n;
     }
 
-    fn scatter(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        fn scatter(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
-        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         const c = begin / self.chunk;
         var li = self.left[c];
         var ri = self.right[c];
@@ -1034,12 +1072,14 @@ const PartCtx = struct {
         }
     }
 
-    fn copyBack(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        fn copyBack(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
-        const self: *PartCtx = @ptrCast(@alignCast(ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         const a = self.start + begin;
         const b_ = self.start + end;
         @memcpy(self.rows[a..b_], self.rows_out[a..b_]);
     }
-};
+    };
+}
+
 

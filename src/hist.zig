@@ -419,6 +419,29 @@ pub const Split = struct {
     }
 };
 
+/// The four things the partition's row loop actually needs, lifted out of
+/// `Split`.
+///
+/// `Split` is 160 bytes, because a categorical split carries its id array
+/// inline. The row loop was reading through that, and the size showed up
+/// directly in wall clock: partition ran at 2.2x until this was separated.
+/// Nothing here is per-row state -- it is built once per partition.
+pub const SplitTest = struct {
+    missing_left: bool,
+    is_cat: bool,
+    threshold: data.BinIdx,
+    ids: []const data.BinIdx,
+
+    pub fn of(sp: *const Split) SplitTest {
+        return .{
+            .missing_left = sp.missing_left,
+            .is_cat = sp.is_cat,
+            .threshold = sp.threshold,
+            .ids = sp.cat_ids[0..sp.n_cat],
+        };
+    }
+};
+
 pub const SplitParams = struct {
     lambda: f64,
     alpha: f64,

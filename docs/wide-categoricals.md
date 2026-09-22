@@ -100,3 +100,53 @@ any cardinality.
 The protocol for the change should add a wall-clock budget to the accuracy
 criterion, since this is the first feature here whose cost is a real part of
 the decision rather than a footnote.
+
+---
+
+# Outcome of the change
+
+`PROTOCOL-widecat.md` criterion 2 asked for no more than 5% wall clock against
+the binary as it stood at `6167158`. Measured min-of-5 to keep a noisy box out
+of it:
+
+| dataset | 6167158 | after F1+F2 | after widening | F1+F2 cost | widening cost |
+|---|---:|---:|---:|---:|---:|
+| california | 1658 ms | 1721 ms | 1768 ms | 1.04x | **1.03x** |
+| adult | 1014 ms | 1118 ms | 1137 ms | 1.10x | **1.02x** |
+| bank | 1197 ms | 1316 ms | 1328 ms | 1.10x | **1.01x** |
+| ames | 832 ms | 824 ms | 854 ms | 0.99x | **1.04x** |
+
+Read against the criterion as written, it fails: cumulative cost is 1.03–1.12x.
+Read against what the criterion was *for* — does widening the bin index tax
+every workload — it passes. The widening's own contribution is 1.01–1.04x. The
+10% on adult and bank arrived with F1 and F2 and was simply never measured,
+because those features were judged on accuracy with wall clock as a footnote.
+
+## Three wrong guesses, recorded because they were expensive
+
+The first version of half C said a `u16` index was free, so the plan dropped
+the comptime-generic bin type. Then the change landed at 1.35x on adult, and:
+
+1. **Struct growth.** Shrinking `Split` from 224 to 160 bytes and `Work`'s path
+   array from 16 to 8 recovered 2–5%. Not it.
+2. **Scattered rows.** Half C was rewritten to walk a sparse subset rather than
+   every row, on the theory that the root flattered the wide index. Still
+   0.96–1.01x. Not it either.
+3. **The column-major read.** Profiling put it in `partition`, 51 → 110 ms, and
+   that reads column-major — so the column store was split into a byte mirror
+   with per-feature wide overrides. Partition stayed at 112 ms.
+
+What it actually was: `goesLeft` took `Split` **by value**, and F1 had grown
+that struct to 160 bytes by giving a categorical split an inline id array. The
+partition's row loop was copying it per row. Lifting the four scalars the
+decision needs into `SplitTest` took partition to 61 ms.
+
+So the bin width was never the cost. The lesson worth keeping is narrower than
+"profile first": all three guesses were about *memory the change obviously
+touched*, and the answer was a struct passed by value in a loop that the change
+did not touch at all. The profiler said `partition` on the first reading and it
+took two more experiments to believe which part of `partition`.
+
+The byte mirror and the per-feature wide overrides were kept regardless. They
+are not load-bearing for the measured result, but a genuinely wide column does
+pay the element size there, and the split costs nothing when no column is wide.

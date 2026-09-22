@@ -25,7 +25,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     const n_features: usize = 6;
     const n_bin: u16 = 17; // bin 0 is missing; 1..16 are real
 
-    const bins = try gpa.alloc(data.BinIdx, n_features * n_rows);
+    const bins = try gpa.alloc(u8, n_features * n_rows);
     errdefer gpa.free(bins);
     const labels = try gpa.alloc(f32, n_rows);
     errdefer gpa.free(labels);
@@ -75,6 +75,11 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     @memset(means, &.{});
 
     // Mirror of `bins`, since the histogram kernel reads row-major.
+    // Every fixture column is narrow, so the wide overrides are all empty.
+    const wide_cols = try gpa.alloc([]data.BinIdx, n_features);
+    errdefer gpa.free(wide_cols);
+    @memset(wide_cols, &.{});
+
     const bins_rm = try gpa.alloc(data.BinIdx, n_features * n_rows);
     errdefer gpa.free(bins_rm);
     for (0..n_rows) |ri| for (0..n_features) |f| {
@@ -86,6 +91,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
         .n_rows = n_rows,
         .n_features = n_features,
         .bins = bins,
+        .wide_cols = wide_cols,
         .bins_rm = bins_rm,
         .n_bins = n_bins,
         .edges = edges,
@@ -349,8 +355,8 @@ test "applySchema maps categories by string, not by the new file's own ids" {
     var test_ds = try data.applySchema(gpa, pool, &test_f, &schema, null);
     defer test_ds.deinit();
 
-    const cat = test_ds.column(0);
-    const train_cat = train_ds.column(0);
+    const cat = test_ds.columnNarrow(0);
+    const train_cat = train_ds.columnNarrow(0);
     // red is bin 1 and blue bin 2 in training; the test file must agree.
     try testing.expectEqual(train_cat[0], cat[2]); // red
     try testing.expectEqual(train_cat[1], cat[1]); // blue
@@ -922,8 +928,9 @@ test "the categorical width limit is a policy now, and still holds by default" {
         defer ds.deinit();
         // 255 levels -> bins 1..255, plus the missing bin.
         try testing.expectEqual(@as(u16, 256), ds.n_bins[0]);
+        try testing.expect(!ds.isWide(0));
         var max_bin: data.BinIdx = 0;
-        for (ds.column(0)) |b| max_bin = @max(max_bin, b);
+        for (ds.columnNarrow(0)) |b| max_bin = @max(max_bin, b);
         try testing.expectEqual(@as(data.BinIdx, 255), max_bin);
     }
 
@@ -936,9 +943,16 @@ test "the categorical width limit is a policy now, and still holds by default" {
         var ds = try data.quantise(gpa, pool, &f, .{ .max_cat_levels = 4096 }, null, &.{});
         defer ds.deinit();
         try testing.expectEqual(@as(u16, 261), ds.n_bins[0]);
+        // Past 256 bins the column moves out of the byte mirror and into the
+        // wide store, which is the whole point of the split.
+        try testing.expect(ds.isWide(0));
         var max_bin: data.BinIdx = 0;
-        for (ds.column(0)) |b| max_bin = @max(max_bin, b);
+        for (ds.columnWide(0)) |b| max_bin = @max(max_bin, b);
         try testing.expectEqual(@as(data.BinIdx, 260), max_bin);
+        // The row-major mirror is uniform and still carries the real bin.
+        var max_rm: data.BinIdx = 0;
+        for (0..ds.n_rows) |r| max_rm = @max(max_rm, ds.bins_rm[r * ds.n_features]);
+        try testing.expectEqual(@as(data.BinIdx, 260), max_rm);
     }
 
     {

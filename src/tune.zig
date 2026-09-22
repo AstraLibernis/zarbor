@@ -1258,12 +1258,22 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
     var frame = try testFrame(gpa, 40, 200);
     defer frame.deinit();
 
+    // A real encoder, not `undefined`. The label column is numeric, so an
+    // empty class list is the right one -- and `undefined` here meant the test
+    // read uninitialised memory inside `encode`, which happened to be benign
+    // until an unrelated allocation shifted underneath it.
+    var numeric_enc = data.LabelEncoder{ .gpa = gpa, .classes = &.{} };
+
     var b = Binner{
         .gpa = gpa,
         .pool = p,
         .frame = &frame,
         .label_col = 1,
-        .enc = undefined,
+        // A real encoder, not `undefined`. The column is numeric, so an empty
+        // class list is the right one -- and `undefined` here meant the test
+        // was reading uninitialised memory in `encode`, which happened to be
+        // benign until an unrelated allocation shifted underneath it.
+        .enc = &numeric_enc,
         .drops = &.{},
         .ds = try data.quantise(gpa, p, &frame, .{ .max_bin = 64 }, null, &.{}),
         .max_bin = 64,
