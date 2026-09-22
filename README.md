@@ -90,11 +90,33 @@ its own winner and warns if the reported configuration does not reproduce.
 - **`zig build` defaults to Debug, which is ~8x slower.** Every run prints its
   build mode so a benchmark cannot quietly measure the wrong binary.
 
+## Two things measured rather than assumed
+
+Both are off by default, both were pre-registered before they were written,
+and neither met the bar it was given. `docs/PROTOCOL.md` fixes the datasets,
+the fixed hyperparameters and the success criterion; `docs/RESULTS.md` has the
+numbers; `docs/categorical-splits.md` and `docs/linear-leaves.md` carry the
+derivations. `bench/run.py` reproduces the grid.
+
+    --cat_split=optimal    partition a categorical by gradient order rather
+                           than by a cut on its dictionary id
+    --linear_leaves=1      fit an affine function of the root-to-leaf numeric
+                           features in each leaf instead of a constant
+
+`--cat_split=optimal` helps where categorical columns carry a real share of
+the signal (Ames, −1369 RMSE) and does nothing where the widest categorical
+has 12 levels. It is close to free, 1.05–1.25x. Its real limit is the `u8`
+bin: a column with 256+ levels is refused outright, so this does nothing
+whatever for high-cardinality keys.
+
+`--linear_leaves=1` helps squared-error regression (California, −0.0060 RMSE)
+and hurts logistic classification on every set tried, at 1.3–2.2x the fit time.
+The leaf value is a log-odds there, and an affine function of a raw feature has
+nothing holding it in at the edge of a leaf.
+
 ## Not implemented, deliberately
 
-LightGBM's EFB and optimal categorical splitting, and CatBoost's ordered
-boosting. Categoricals currently split on dictionary-id order, which is
-arbitrary; that is the most valuable of the three to add next.
+LightGBM's EFB and CatBoost's ordered boosting.
 
 ## Benchmarks
 
