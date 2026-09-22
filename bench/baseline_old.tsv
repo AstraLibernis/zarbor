@@ -1,0 +1,15 @@
+OLD	california	0	    1.70	oof     0.455604   mean 0.455559   sd 0.006406   1688 ms
+OLD	california	1	    1.67	oof     0.455027   mean 0.455013   sd 0.003556   1665 ms
+OLD	california	2	    1.70	oof     0.453161   mean 0.453059   sd 0.009629   1691 ms
+OLD	adult	0	    1.07	oof     0.923043   mean 0.923125   sd 0.004032   1045 ms
+OLD	adult	1	    1.02	oof     0.923385   mean 0.923408   sd 0.002239   994 ms
+OLD	adult	2	    1.05	oof     0.922921   mean 0.922946   sd 0.001999   1029 ms
+OLD	bank	0	    1.26	oof     0.935569   mean 0.935657   sd 0.004250   1238 ms
+OLD	bank	1	    1.22	oof     0.935160   mean 0.935192   sd 0.003282   1201 ms
+OLD	bank	2	    1.24	oof     0.934709   mean 0.934760   sd 0.002404   1221 ms
+OLD	ames	0	    0.83	oof     30325.867487   mean 30181.684011   sd 2953.673834   825 ms
+OLD	ames	1	    0.86	oof     30802.146447   mean 30678.576417   sd 2756.297291   853 ms
+OLD	ames	2	    0.89	oof     29949.995825   mean 29743.323119   sd 3512.403699   878 ms
+OLD	housing	0	    1.35	oof     14.430147   mean 14.425862   sd 0.351636   1342 ms
+OLD	housing	1	    1.26	oof     14.532163   mean 14.527939   sd 0.350362   1255 ms
+OLD	housing	2	    1.24	oof     14.533695   mean 14.530112   sd 0.322672   1235 ms
