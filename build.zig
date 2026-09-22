@@ -26,4 +26,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+
+    // Cost prototype for widening the bin type; see docs/wide-categoricals.md.
+    const lib = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const wc = b.addExecutable(.{ .name = "widecat", .root_module = b.createModule(.{
+        .root_source_file = b.path("bench/widecat.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zarbor", .module = lib }},
+    }) });
+    b.step("bench-widecat", "Measure what a wide categorical column costs")
+        .dependOn(&b.addRunArtifact(wc).step);
 }
