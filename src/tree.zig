@@ -17,6 +17,18 @@ const hist = @import("hist.zig");
 const config = @import("config.zig");
 const prof = @import("prof.zig");
 
+/// The value a bin stands for when a leaf needs a number rather than an index.
+///
+/// Midpoints of the schema's edges, not `ds.means`: means are a property of
+/// whichever file was binned, so a model using them would score a row
+/// differently depending on what else was in the file with it.
+pub inline fn binValue(ds: *const Dataset, f: u32, bin: u8) f32 {
+    const e = ds.edges[f];
+    if (e.len == 0) return 0;
+    if (bin == 0) return data.binMidpoint(e, e.len / 2); // missing -> centre
+    return data.binMidpoint(e, @as(usize, bin) - 1);
+}
+
 pub const Node = extern struct {
     feature: u32 = 0,
     left: u32 = 0,
@@ -31,6 +43,22 @@ pub const Node = extern struct {
     /// The split tests membership of `cat_masks[cat_ofs..][0..cat_words]`
     /// rather than comparing against `threshold`.
     is_cat: bool = false,
+    /// Slope terms this leaf carries. 0 is a plain constant leaf, which is
+    /// every leaf unless `linear_leaves` is on.
+    n_lin: u8 = 0,
+    _pad: [2]u8 = .{ 0, 0 },
+    /// Where this leaf's terms start in `Tree.lin`.
+    lin_ofs: u32 = 0,
+};
+
+/// One slope term of a linear leaf. `center` is the feature's within-leaf mean
+/// at fit time; subtracting it here rather than folding it into the intercept
+/// keeps the evaluation away from the cancellation that a large intercept and
+/// a large `coef * x` would produce in f32.
+pub const LinTerm = extern struct {
+    feature: u32,
+    coef: f32,
+    center: f32,
 };
 
 pub const Tree = struct {
@@ -39,10 +67,14 @@ pub const Tree = struct {
     /// `hist.cat_words` words each. Empty when no split is categorical, which
     /// is every tree grown under `cat_split = ordinal`.
     cat_masks: []u64 = &.{},
+    /// Flat store of the slope terms this tree's leaves refer to. Empty
+    /// unless `linear_leaves` is on.
+    lin: []LinTerm = &.{},
 
     pub fn deinit(t: *Tree, gpa: std.mem.Allocator) void {
         gpa.free(t.nodes);
         if (t.cat_masks.len != 0) gpa.free(t.cat_masks);
+        if (t.lin.len != 0) gpa.free(t.lin);
         t.* = undefined;
     }
 
@@ -62,7 +94,13 @@ pub const Tree = struct {
             else if (b == 0) n.missing_left else b <= n.threshold;
             i = if (go_left) n.left else n.right;
         }
-        return t.nodes[i].weight;
+        const leaf = t.nodes[i];
+        if (leaf.n_lin == 0) return leaf.weight;
+        var v: f32 = leaf.weight;
+        for (t.lin[leaf.lin_ofs..][0..leaf.n_lin]) |term| {
+            v += term.coef * (binValue(ds, term.feature, rb[term.feature]) - term.center);
+        }
+        return v;
     }
 };
 
@@ -74,6 +112,10 @@ pub const LeafSpan = struct {
     weight: f32,
 };
 
+/// Hard cap on the root-to-leaf features a linear leaf may use. Independent
+/// of `max_depth` so the array stays a fixed size in `Work`.
+const max_path: usize = 16;
+
 const Work = struct {
     node: u32,
     start: usize,
@@ -82,7 +124,52 @@ const Work = struct {
     total: hist.Bin,
     slot: u32,
     split: hist.Split,
+    /// Distinct numeric features tested between the root and this node.
+    /// Empty unless `linear_leaves` is on -- tracking it otherwise is pure
+    /// cost for something nothing reads.
+    path: [max_path]u32 = undefined,
+    n_path: u8 = 0,
 };
+
+/// In-place Cholesky solve of a small symmetric positive-definite system.
+///
+/// `a` is read as its upper triangle and overwritten; `rhs` carries the
+/// solution out. Returns false when the factorisation meets a non-positive
+/// pivot, which is what a feature constant within the leaf looks like and is
+/// common near the bottom of a tree. The caller treats that as "no slopes",
+/// which is the admissible `beta = 0` solution rather than a failure.
+fn choleskySolve(a: *[max_path][max_path]f64, rhs: *[max_path]f64, n: usize) bool {
+    var l: [max_path][max_path]f64 = undefined;
+    for (0..n) |i| for (0..n) |j| {
+        l[i][j] = 0;
+    };
+    for (0..n) |i| {
+        for (0..i + 1) |j| {
+            var sum: f64 = if (j <= i) a[j][i] else a[i][j];
+            for (0..j) |k| sum -= l[i][k] * l[j][k];
+            if (i == j) {
+                if (!(sum > 1e-12)) return false;
+                l[i][i] = @sqrt(sum);
+            } else {
+                l[i][j] = sum / l[j][j];
+            }
+        }
+    }
+    // Forward, then back.
+    for (0..n) |i| {
+        var sum = rhs[i];
+        for (0..i) |k| sum -= l[i][k] * rhs[k];
+        rhs[i] = sum / l[i][i];
+    }
+    var i = n;
+    while (i > 0) {
+        i -= 1;
+        var sum = rhs[i];
+        for (i + 1..n) |k| sum -= l[k][i] * rhs[k];
+        rhs[i] = sum / l[i][i];
+    }
+    return true;
+}
 
 /// Hard ceiling on histogram slot memory. Beyond this the caller is asked to
 /// reduce tree size rather than have the allocator decide for them.
@@ -123,6 +210,7 @@ pub const Builder = struct {
 
     nodes: std.ArrayList(Node),
     cat_masks: std.ArrayList(u64),
+    lin: std.ArrayList(LinTerm),
     queue: std.ArrayList(Work),
     leaves: std.ArrayList(LeafSpan),
 
@@ -201,6 +289,7 @@ pub const Builder = struct {
             .n_active = 0,
             .nodes = .empty,
             .cat_masks = .empty,
+            .lin = .empty,
             .queue = .empty,
             .leaves = .empty,
             .all_features = all_features,
@@ -231,6 +320,7 @@ pub const Builder = struct {
         gpa.free(b.node_features);
         b.nodes.deinit(gpa);
         b.cat_masks.deinit(gpa);
+        b.lin.deinit(gpa);
         b.queue.deinit(gpa);
         b.leaves.deinit(gpa);
         b.* = undefined;
@@ -427,9 +517,79 @@ pub const Builder = struct {
         // its contribution to the ensemble and no caller has to remember eta.
         const raw = hist.leafWeight(w.total.g, w.total.h, p);
         const weight: f32 = @floatCast(raw * b.cfg.learning_rate);
-        b.nodes.items[w.node] = .{ .is_leaf = true, .weight = weight };
+        var n_lin: u8 = 0;
+        var lin_ofs: u32 = 0;
+        if (b.cfg.linear_leaves and w.n_path != 0) {
+            lin_ofs = @intCast(b.lin.items.len);
+            n_lin = try b.fitLinearLeaf(w);
+        }
+        b.nodes.items[w.node] = .{
+            .is_leaf = true,
+            .weight = weight,
+            .n_lin = n_lin,
+            .lin_ofs = lin_ofs,
+        };
         try b.leaves.append(b.gpa, .{ .start = w.start, .end = w.end, .weight = weight });
         b.giveSlot(w.slot);
+    }
+
+    /// Slopes for one leaf, appended to `b.lin`. Returns how many were kept.
+    ///
+    /// Centring each feature on its *hessian-weighted* within-leaf mean is not
+    /// cosmetic. It makes every cross term between the intercept and a slope
+    /// vanish, so the intercept is exactly the constant leaf weight already
+    /// computed and only the slope block has to be solved. A failure there is
+    /// therefore a fallback to the constant leaf rather than an error.
+    fn fitLinearLeaf(b: *Builder, w: Work) !u8 {
+        const n = @min(@as(usize, w.n_path), @as(usize, b.cfg.lin_leaf_max_terms));
+        const rows = b.rows[w.start..w.end];
+        if (rows.len <= n + 1) return 0;
+
+        var center: [max_path]f64 = undefined;
+        var sum_h: f64 = 0;
+        for (0..n) |j| center[j] = 0;
+        for (rows) |r| {
+            const h: f64 = b.g[r].h;
+            sum_h += h;
+            const rb = b.ds.bins_rm[r * b.ds.n_features ..][0..b.ds.n_features];
+            for (0..n) |j| center[j] += h * binValue(b.ds, w.path[j], rb[w.path[j]]);
+        }
+        if (sum_h <= 0) return 0;
+        for (0..n) |j| center[j] /= sum_h;
+
+        // Upper triangle of the slope system, and its right-hand side.
+        var a: [max_path][max_path]f64 = undefined;
+        var rhs: [max_path]f64 = undefined;
+        for (0..n) |j| {
+            rhs[j] = 0;
+            for (0..n) |k| a[j][k] = 0;
+        }
+        var x: [max_path]f64 = undefined;
+        for (rows) |r| {
+            const gp = b.g[r];
+            const rb = b.ds.bins_rm[r * b.ds.n_features ..][0..b.ds.n_features];
+            for (0..n) |j| x[j] = binValue(b.ds, w.path[j], rb[w.path[j]]) - center[j];
+            for (0..n) |j| {
+                rhs[j] -= @as(f64, gp.g) * x[j];
+                for (j..n) |k| a[j][k] += @as(f64, gp.h) * x[j] * x[k];
+            }
+        }
+        for (0..n) |j| a[j][j] += b.cfg.lin_leaf_lambda;
+
+        if (!choleskySolve(&a, &rhs, n)) return 0;
+
+        var kept: u8 = 0;
+        for (0..n) |j| {
+            const c = rhs[j] * b.cfg.learning_rate;
+            if (!std.math.isFinite(c) or c == 0) continue;
+            try b.lin.append(b.gpa, .{
+                .feature = w.path[j],
+                .coef = @floatCast(c),
+                .center = @floatCast(center[j]),
+            });
+            kept += 1;
+        }
+        return kept;
     }
 
     /// Gradient and hessian sums over a node's rows.
@@ -534,6 +694,7 @@ pub const Builder = struct {
     ) !Tree {
         b.nodes.clearRetainingCapacity();
         b.cat_masks.clearRetainingCapacity();
+        b.lin.clearRetainingCapacity();
         b.queue.clearRetainingCapacity();
         b.leaves.clearRetainingCapacity();
         b.level_depth = -1;
@@ -693,6 +854,23 @@ pub const Builder = struct {
                 right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
             prof.stop(.best_split, t_bs);
 
+            // Children inherit the path and add the feature just tested,
+            // unless it is categorical (a dictionary id is not a number to
+            // fit a slope in) or already present.
+            var path = w.path;
+            var n_path = w.n_path;
+            if (b.cfg.linear_leaves and
+                b.ds.kinds[w.split.feature] == .numeric and
+                n_path < max_path)
+            {
+                var seen = false;
+                for (path[0..n_path]) |f| seen = seen or f == w.split.feature;
+                if (!seen) {
+                    path[n_path] = w.split.feature;
+                    n_path += 1;
+                }
+            }
+
             try b.queue.append(b.gpa, .{
                 .node = li,
                 .start = w.start,
@@ -701,6 +879,8 @@ pub const Builder = struct {
                 .total = w.split.left,
                 .slot = slot_l,
                 .split = left_split,
+                .path = path,
+                .n_path = n_path,
             });
             try b.queue.append(b.gpa, .{
                 .node = ri,
@@ -710,6 +890,8 @@ pub const Builder = struct {
                 .total = w.split.right,
                 .slot = slot_r,
                 .split = right_split,
+                .path = path,
+                .n_path = n_path,
             });
         }
 
@@ -719,7 +901,12 @@ pub const Builder = struct {
             &.{}
         else
             try b.gpa.dupe(u64, b.cat_masks.items);
-        return .{ .nodes = nodes, .cat_masks = masks };
+        errdefer if (masks.len != 0) b.gpa.free(masks);
+        const lin: []LinTerm = if (b.lin.items.len == 0)
+            &.{}
+        else
+            try b.gpa.dupe(LinTerm, b.lin.items);
+        return .{ .nodes = nodes, .cat_masks = masks, .lin = lin };
     }
 
     /// Depthwise takes the oldest pending node (breadth-first); lossguide takes

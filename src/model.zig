@@ -238,6 +238,8 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU8(gpa, b, @intFromBool(n.is_leaf));
             try putU8(gpa, b, @intFromBool(n.is_cat));
             try putU32(gpa, b, n.cat_ofs);
+            try putU8(gpa, b, n.n_lin);
+            try putU32(gpa, b, n.lin_ofs);
         }
         // Mask store last, so the node loop above stays the same shape as the
         // version-2 one and the two readers differ only in what they skip.
@@ -245,6 +247,12 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
         for (t.cat_masks) |w| {
             try putU32(gpa, b, @truncate(w));
             try putU32(gpa, b, @truncate(w >> 32));
+        }
+        try putU32(gpa, b, @intCast(t.lin.len));
+        for (t.lin) |term| {
+            try putU32(gpa, b, term.feature);
+            try putF32(gpa, b, term.coef);
+            try putF32(gpa, b, term.center);
         }
     }
 }
@@ -280,6 +288,8 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
             const is_leaf = (try r.u8v()) != 0;
             const is_cat = if (ver >= 3) (try r.u8v()) != 0 else false;
             const cat_ofs = if (ver >= 3) try r.u32v() else 0;
+            const n_lin = if (ver >= 3) try r.u8v() else 0;
+            const lin_ofs = if (ver >= 3) try r.u32v() else 0;
             n.* = .{
                 .feature = feature,
                 .left = left,
@@ -290,6 +300,8 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
                 .missing_left = missing_left,
                 .is_leaf = is_leaf,
                 .is_cat = is_cat,
+                .n_lin = n_lin,
+                .lin_ofs = lin_ofs,
             };
             // A corrupt child index would walk off the node array during
             // prediction; reject it here instead.
@@ -309,8 +321,20 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
             // A mask offset past the store would read out of bounds at
             // prediction time, which is the same class of fault as a bad
             // child index and is rejected the same way.
+            const nl = try r.u32v();
+            if (nl != 0) {
+                const terms = try gpa.alloc(tree.LinTerm, nl);
+                trees[made - 1].lin = terms;
+                for (terms) |*term| {
+                    const feature = try r.u32v();
+                    const coef = try r.f32v();
+                    const center = try r.f32v();
+                    term.* = .{ .feature = feature, .coef = coef, .center = center };
+                }
+            }
             for (nodes) |n| {
                 if (n.is_cat and n.cat_ofs + hist.cat_words > nm) return error.BadModelFile;
+                if (n.n_lin != 0 and n.lin_ofs + n.n_lin > nl) return error.BadModelFile;
             }
         }
     }
@@ -529,6 +553,8 @@ fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
         made += 1;
         if (src[made - 1].cat_masks.len != 0)
             out[made - 1].cat_masks = try gpa.dupe(u64, src[made - 1].cat_masks);
+        if (src[made - 1].lin.len != 0)
+            out[made - 1].lin = try gpa.dupe(tree.LinTerm, src[made - 1].lin);
     }
     return out;
 }

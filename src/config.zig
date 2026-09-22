@@ -160,6 +160,18 @@ pub const Config = struct {
     /// Cap on how many levels may land in the left child.
     max_cat_threshold: u32 = 32,
 
+    // ---- linear leaves -------------------------------------------------
+    /// Fit an affine function of the root-to-leaf path's numeric features in
+    /// each leaf instead of emitting a constant. Off by default: a constant
+    /// leaf is what every model written before this existed used.
+    linear_leaves: bool = false,
+    /// Ridge on the leaf's slope terms. The intercept is left unpenalised, so
+    /// setting this very high recovers the constant leaf rather than shrinking
+    /// the leaf toward zero.
+    lin_leaf_lambda: f32 = 1.0,
+    /// Cap on how many path features enter one leaf's fit.
+    lin_leaf_max_terms: u32 = 8,
+
     // ---- regularisation ----------------------------------------------
     /// L2 penalty on leaf weights. Appears as lambda in the gain formula.
     lambda: f32 = 1.0,

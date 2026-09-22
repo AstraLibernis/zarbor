@@ -520,7 +520,9 @@ pub fn train(
         // Spans only cover the rows the tree saw; that is every row only when
         // nothing was sampled away.
         const t_ap = prof.start();
-        if (builder.activeRows().len == ds.n_rows) {
+        // A linear leaf has no single constant to add to a whole span, so
+        // the span fast path is only valid for constant leaves.
+        if (builder.activeRows().len == ds.n_rows and !cfg.linear_leaves) {
             var actx = ApplyCtx{
                 .spans = builder.leafSpans(),
                 .rows = builder.rows,
