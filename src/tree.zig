@@ -406,10 +406,9 @@ pub const Builder = struct {
             .cat_optimal = b.cfg.cat_split == .optimal,
             .cat_smooth = b.cfg.cat_smooth,
             .cat_l2 = b.cfg.cat_l2,
-            // 0 means "whatever the rest of the tree uses", so there is one
-            // sample floor in play rather than two unrelated ones.
-            .cat_min_group = if (b.cfg.cat_min_group != 0) b.cfg.cat_min_group else b.cfg.min_child_samples,
             .max_cat_threshold = b.cfg.max_cat_threshold,
+            .max_cat_to_onehot = b.cfg.max_cat_to_onehot,
+            .min_data_per_group = b.cfg.min_data_per_group,
         };
     }
 

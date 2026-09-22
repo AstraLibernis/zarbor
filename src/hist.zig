@@ -454,10 +454,9 @@ pub const SplitParams = struct {
     cat_optimal: bool = false,
     cat_smooth: f64 = 10.0,
     cat_l2: f64 = 10.0,
-    /// Levels below this row count sit out the scan. Already resolved from
-    /// `cat_min_group == 0` to `min_child_samples` by the caller.
-    cat_min_group: u32 = 20,
     max_cat_threshold: u32 = 32,
+    max_cat_to_onehot: u32 = 4,
+    min_data_per_group: u32 = 100,
 };
 
 inline fn softThreshold(g: f64, alpha: f64) f64 {
@@ -521,17 +520,27 @@ const CatKey = struct {
     }
 };
 
-/// Best subset split for one categorical feature.
+/// Best split for one categorical feature.
 ///
-/// The levels present in the node are sorted by `CatKey` and only prefixes of
-/// that order are examined -- the argument that this loses nothing is in
-/// docs/categorical-splits.md. Both ends are scanned because
-/// `max_cat_threshold` caps the left child, and the best 32 levels and the
-/// worst 32 are different candidate sets.
+/// Follows LightGBM's `FindBestThresholdCategoricalInner` (v4.7.0,
+/// src/treelearner/feature_histogram.cpp) step for step. It was not written
+/// that way first, and `docs/vs-lightgbm.md` records what the six differences
+/// cost: zarbor recovered 64% of the gain LightGBM got from the same columns.
 ///
-/// Levels below `cat_min_group` rows sit out. They are not thereby lost: the
-/// mask leaves their bits clear, so they fall to the right child, which is
-/// also where every level unseen in this node goes at prediction time.
+/// Two of them are worth naming here because they are not obvious:
+///
+///   * `cat_smooth` is the *participation* threshold, in rows, not just the
+///     padding in the sort key. A level with fewer rows than it does not enter
+///     the order at all and falls to the right child.
+///   * `cat_l2` goes into the children's scores and **not** into the parent's.
+///     Adding it to both, which reads as the self-consistent choice, biases
+///     the comparison against categorical splits rather than regularising
+///     them.
+///
+/// Missing is not searched. A categorical split always sends bin 0 right,
+/// which is `default_left = false` in LightGBM, and is why `missing_left` is
+/// forced false here rather than being left to a search that would find a
+/// direction LightGBM never considers.
 fn bestCatSplit(
     best: *Split,
     fid: u32,
@@ -541,11 +550,44 @@ fn bestCatSplit(
     p: SplitParams,
     scratch: *[data.max_bins]CatKey,
 ) void {
-    const min_group: f64 = @floatFromInt(p.cat_min_group);
+    const min_n: f64 = @floatFromInt(p.min_child_samples);
+    const missing = h[0];
+
+    // A handful of levels: one against the rest, and without `cat_l2` -- in
+    // LightGBM the extra penalty is added only on the sorted-partition path.
+    if (nb <= p.max_cat_to_onehot) {
+        const parent_score = nodeScore(total.g, total.h, p);
+        var b: usize = 1;
+        while (b < nb) : (b += 1) {
+            const left = h[b];
+            const right = total.sub(left);
+            if (left.n < min_n or right.n < min_n) continue;
+            if (left.h < p.min_child_weight or right.h < p.min_child_weight) continue;
+            const gain = 0.5 * (nodeScore(left.g, left.h, p) +
+                nodeScore(right.g, right.h, p) - parent_score) - p.min_split_gain;
+            if (gain > best.gain) {
+                var ids: [max_cat_ids]data.BinIdx = @splat(0);
+                ids[0] = @intCast(b);
+                best.* = .{
+                    .feature = fid,
+                    .is_cat = true,
+                    .n_cat = 1,
+                    .cat_ids = ids,
+                    .missing_left = false,
+                    .gain = gain,
+                    .left = left,
+                    .right = right,
+                };
+            }
+        }
+        return;
+    }
+
+    // Participation is by row count against `cat_smooth`.
     var n_ord: usize = 0;
     var b: usize = 1;
     while (b < nb) : (b += 1) {
-        if (h[b].n < min_group) continue;
+        if (h[b].n < p.cat_smooth) continue;
         scratch[n_ord] = .{ .bin = @intCast(b), .key = h[b].g / (h[b].h + p.cat_smooth) };
         n_ord += 1;
     }
@@ -555,42 +597,45 @@ fn bestCatSplit(
     // near the cost of the histogram that produced these bins.
     std.sort.insertion(CatKey, scratch[0..n_ord], {}, CatKey.lessThan);
 
-    // The extra L2 goes into the parent term as well as the children, so the
-    // number this produces is a loss reduction under one consistent prior and
-    // stays comparable with a numeric split's.
+    // Children carry the extra L2; the parent does not.
     var pc = p;
     pc.lambda = p.lambda + p.cat_l2;
-    const parent_score = nodeScore(total.g, total.h, pc);
-    const missing = h[0];
-    const min_n: f64 = @floatFromInt(p.min_child_samples);
-    const cap: usize = @min(@min(@as(usize, p.max_cat_threshold), max_cat_ids), n_ord - 1);
+    const parent_score = nodeScore(total.g, total.h, p);
+    const group_floor: f64 = @floatFromInt(p.min_data_per_group);
+    const max_num_cat = @min(@min(@as(usize, p.max_cat_threshold), max_cat_ids), (n_ord + 1) / 2);
 
     var best_gain = best.gain;
     var best_k: usize = 0;
     var best_from_low = true;
-    var best_missing_left = false;
     var found = false;
 
     for ([2]bool{ true, false }) |from_low| {
         var acc: Bin = .{};
+        var group: f64 = 0;
         var k: usize = 0;
-        while (k < cap) : (k += 1) {
+        while (k < n_ord and k < max_num_cat) : (k += 1) {
             const idx = if (from_low) k else n_ord - 1 - k;
             acc = acc.add(h[scratch[idx].bin]);
-            for ([2]bool{ false, true }) |missing_left| {
-                const left = if (missing_left) acc.add(missing) else acc;
-                const right = total.sub(left);
-                if (left.n < min_n or right.n < min_n) continue;
-                if (left.h < p.min_child_weight or right.h < p.min_child_weight) continue;
-                const gain = 0.5 * (nodeScore(left.g, left.h, pc) +
-                    nodeScore(right.g, right.h, pc) - parent_score) - p.min_split_gain;
-                if (gain > best_gain) {
-                    best_gain = gain;
-                    best_k = k;
-                    best_from_low = from_low;
-                    best_missing_left = missing_left;
-                    found = true;
-                }
+            group += h[scratch[idx].bin].n;
+
+            if (acc.n < min_n or acc.h < p.min_child_weight) continue;
+            const right = total.sub(acc);
+            // Once the right child is too small every longer prefix is too,
+            // so this stops rather than skipping.
+            if (right.n < min_n or right.n < group_floor) break;
+            if (right.h < p.min_child_weight) break;
+            // Pace the candidates: another cut is only considered once enough
+            // rows have accumulated since the last one.
+            if (group < group_floor) continue;
+            group = 0;
+
+            const gain = 0.5 * (nodeScore(acc.g, acc.h, pc) +
+                nodeScore(right.g, right.h, pc) - parent_score) - p.min_split_gain;
+            if (gain > best_gain) {
+                best_gain = gain;
+                best_k = k;
+                best_from_low = from_low;
+                found = true;
             }
         }
     }
@@ -608,7 +653,7 @@ fn bestCatSplit(
         n_cat += 1;
         acc = acc.add(h[scratch[idx].bin]);
     }
-    if (best_missing_left) acc = acc.add(missing);
+    _ = missing;
     // Gradient order on the way in, bin order on the way out: the search wants
     // the first, the binary search at prediction time wants the second.
     std.sort.insertion(data.BinIdx, ids[0..n_cat], {}, std.sort.asc(data.BinIdx));
@@ -617,7 +662,7 @@ fn bestCatSplit(
         .is_cat = true,
         .n_cat = n_cat,
         .cat_ids = ids,
-        .missing_left = best_missing_left,
+        .missing_left = false,
         .gain = best_gain,
         .left = acc,
         .right = total.sub(acc),

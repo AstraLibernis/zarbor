@@ -154,11 +154,18 @@ pub const Config = struct {
     /// Extra L2 applied to the gain of a categorical split only. A K-way
     /// choice has more ways to fit noise than a single threshold does.
     cat_l2: f32 = 10.0,
-    /// Levels with fewer rows in the node than this are left out of the scan
-    /// and join the right child. 0 means "use `min_child_samples`".
-    cat_min_group: u32 = 0,
-    /// Cap on how many levels may land in the left child.
+    /// Cap on how many levels may land in the left child. Further bounded by
+    /// half the levels that took part, as LightGBM does.
     max_cat_threshold: u32 = 32,
+    /// A categorical with no more bins than this is split one level against
+    /// the rest instead of by a sorted partition, and without `cat_l2`. At
+    /// four levels or fewer the partition search has little to search.
+    max_cat_to_onehot: u32 = 4,
+    /// Rows that must accumulate since the last evaluated cut before another
+    /// is considered, and a floor on the right child. This paces the scan; it
+    /// is not a filter on which levels take part, which is what `cat_smooth`
+    /// does.
+    min_data_per_group: u32 = 100,
     /// Cardinality above which a categorical column is refused outright. The
     /// bin index can hold far more; this exists so a free-text column cannot
     /// turn into a histogram nobody can afford. 255 is what the `u8` bin used
