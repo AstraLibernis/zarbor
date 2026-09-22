@@ -39,6 +39,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "zarbor", .module = lib }},
     }) });
+    const sz = b.addExecutable(.{ .name = "sz", .root_module = b.createModule(.{
+        .root_source_file = b.path("bench/sz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zarbor", .module = lib }},
+    }) });
+    b.step("bench-sz", "Print hot struct sizes").dependOn(&b.addRunArtifact(sz).step);
+
     b.step("bench-widecat", "Measure what a wide categorical column costs")
         .dependOn(&b.addRunArtifact(wc).step);
 }

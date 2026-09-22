@@ -159,6 +159,12 @@ pub const Config = struct {
     cat_min_group: u32 = 0,
     /// Cap on how many levels may land in the left child.
     max_cat_threshold: u32 = 32,
+    /// Cardinality above which a categorical column is refused outright. The
+    /// bin index can hold far more; this exists so a free-text column cannot
+    /// turn into a histogram nobody can afford. 255 is what the `u8` bin used
+    /// to enforce, and is kept as the default so widening the index changes
+    /// no existing run on its own.
+    max_cat_levels: u32 = 255,
 
     // ---- linear leaves -------------------------------------------------
     /// Fit an affine function of the root-to-leaf path's numeric features in

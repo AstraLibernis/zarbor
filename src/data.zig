@@ -1,8 +1,8 @@
 //! CSV ingest and quantisation.
 //!
 //! The booster never sees raw feature values. Every column is reduced to a
-//! `u8` bin index up front, which is what lets the whole design stay in cache:
-//! 668k rows x 13 features is 8.7 MB as bins, versus 35 MB as f32. Split
+//! bin index up front, which is what lets the whole design stay in cache:
+//! 668k rows x 13 features is 17 MB as bins, versus 35 MB as f32. Split
 //! finding then works on bin indices alone and touches the original values
 //! only to report thresholds.
 
@@ -10,7 +10,16 @@ const std = @import("std");
 const Pool = @import("pool.zig").Pool;
 const config = @import("config.zig");
 
-pub const max_bins = 256;
+/// A bin index. Was `u8`, which capped a categorical column at 255 levels and
+/// put ZIP3, city and metro names out of reach entirely. Measured at
+/// 0.98-1.01x of `u8` in the accumulation kernel -- that loop is bound by the
+/// scattered histogram update, not by reading the index -- so the width is
+/// paid in memory only. See docs/wide-categoricals.md.
+pub const BinIdx = u16;
+
+/// Hard ceiling, set by the index type. `n_bins` is a `u16` and must be able
+/// to hold a count this large.
+pub const max_bins = std.math.maxInt(BinIdx);
 
 pub const ColumnKind = enum { numeric, categorical };
 
@@ -325,7 +334,7 @@ pub const Dataset = struct {
     n_features: usize,
     /// Column-major: `bins[f * n_rows + r]`. Partitioning a node reads one
     /// feature for every row, so that pass wants the column contiguous.
-    bins: []u8,
+    bins: []BinIdx,
     /// The same bins row-major: `bins_rm[r * n_features + f]`.
     ///
     /// Both layouts are kept because the two hot passes want opposite things.
@@ -334,7 +343,7 @@ pub const Dataset = struct {
     /// down the rows and would touch thirteen times the cache lines in that
     /// layout. The copy costs 13 bytes a row -- 8.7 MB on 668k rows, against
     /// a 93 MB peak -- and one transpose pass at load time.
-    bins_rm: []u8,
+    bins_rm: []BinIdx,
     /// Bins actually in use per feature, including the missing bin.
     n_bins: []u16,
     /// Cut points per feature; `edges[f][i]` is the inclusive upper bound of
@@ -384,7 +393,7 @@ pub const Dataset = struct {
         d.* = undefined;
     }
 
-    pub inline fn column(d: *const Dataset, f: usize) []const u8 {
+    pub inline fn column(d: *const Dataset, f: usize) []const BinIdx {
         return d.bins[f * d.n_rows ..][0..d.n_rows];
     }
 
@@ -429,12 +438,16 @@ const BinCtx = struct {
     gpa: std.mem.Allocator,
     src: *const Frame,
     feature_cols: []const usize,
-    bins: []u8,
+    bins: []BinIdx,
     n_bins: []u16,
     edges: [][]f32,
     means: [][]f32,
     n_rows: usize,
     max_bin: u16,
+    /// Cardinality above which a categorical column is refused. Not a limit of
+    /// the index type -- it stops a free-text column becoming a 50,000-bin
+    /// histogram that would be legal and unusable.
+    max_cat_levels: u32,
     policy: config.BinPolicy,
     failed: std.atomic.Value(bool),
 
@@ -456,9 +469,15 @@ const BinCtx = struct {
             // Ids are already dense and small; bin j+1 is level j.
             const card = self.src.levels[col].len;
             // Checked here as well as at dictionary build time, because this
-            // is where the `u8` cast is: a frame assembled by any other route
-            // must not be able to reach it with an id that does not fit.
-            if (card >= max_bins) return error.CategoricalTooWide;
+            // is where the cast is: a frame assembled by any other route must
+            // not be able to reach it with an id that does not fit. The
+            // configured limit is the one that usually bites -- it exists to
+            // stop a free-text column becoming a 50,000-bin histogram, not
+            // because the index cannot hold it.
+            // `max_bin` deliberately does not appear here. It is the number of
+            // quantile cuts a *numeric* column gets; a categorical's width is
+            // its cardinality and nothing else decides it.
+            if (card >= max_bins or card > self.max_cat_levels) return error.CategoricalTooWide;
             for (vals, out) |v, *b| {
                 b.* = if (std.math.isNan(v)) 0 else @intCast(@as(usize, @intFromFloat(v)) + 1);
             }
@@ -712,8 +731,8 @@ pub const LabelSpec = struct {
 /// sequentially and writes one contiguous run, which the prefetcher handles
 /// on both sides. Transposing by feature instead would scatter every write.
 const TransposeCtx = struct {
-    bins: []const u8,
-    out: []u8,
+    bins: []const BinIdx,
+    out: []BinIdx,
     n_rows: usize,
     n_features: usize,
 
@@ -732,11 +751,11 @@ const TransposeCtx = struct {
 fn buildRowMajor(
     gpa: std.mem.Allocator,
     pool: *Pool,
-    bins: []const u8,
+    bins: []const BinIdx,
     n_rows: usize,
     n_features: usize,
-) ![]u8 {
-    const out = try gpa.alloc(u8, n_rows * n_features);
+) ![]BinIdx {
+    const out = try gpa.alloc(BinIdx, n_rows * n_features);
     errdefer gpa.free(out);
     var ctx = TransposeCtx{ .bins = bins, .out = out, .n_rows = n_rows, .n_features = n_features };
     pool.parallelFor(n_rows, &ctx, TransposeCtx.run, 4096);
@@ -768,11 +787,11 @@ pub fn quantise(
     // inside the parallel binning below -- which collapses every worker error
     // into one `BinningFailed` and so cannot say which column was at fault.
     for (feats.items) |c| {
-        if (src.kinds[c] == .categorical and src.levels[c].len >= cfg.max_bin)
+        if (src.kinds[c] == .categorical and src.levels[c].len > cfg.max_cat_levels)
             return error.CategoricalTooWide;
     }
 
-    const bins = try gpa.alloc(u8, n_features * src.n_rows);
+    const bins = try gpa.alloc(BinIdx, n_features * src.n_rows);
     errdefer gpa.free(bins);
     const n_bins = try gpa.alloc(u16, n_features);
     errdefer gpa.free(n_bins);
@@ -807,6 +826,7 @@ pub fn quantise(
         .edges = edges,
         .means = means,
         .n_rows = src.n_rows,
+        .max_cat_levels = cfg.max_cat_levels,
         .max_bin = cfg.max_bin,
         .policy = cfg.bin_policy,
         .failed = .init(false),
@@ -866,7 +886,7 @@ pub fn quantise(
 /// different on the other.
 pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Dataset {
     const n = rows.len;
-    const bins = try gpa.alloc(u8, ds.n_features * n);
+    const bins = try gpa.alloc(BinIdx, ds.n_features * n);
     errdefer gpa.free(bins);
     for (0..ds.n_features) |f| {
         const src = ds.column(f);
@@ -877,7 +897,7 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
     // The row-major mirror needs no transpose here: one selected row is
     // already contiguous in the source, so this is a run of short memcpys.
     const nf = ds.n_features;
-    const bins_rm = try gpa.alloc(u8, nf * n);
+    const bins_rm = try gpa.alloc(BinIdx, nf * n);
     errdefer gpa.free(bins_rm);
     for (rows, 0..) |r, i| @memcpy(bins_rm[i * nf ..][0..nf], ds.bins_rm[@as(usize, r) * nf ..][0..nf]);
 
@@ -1014,7 +1034,7 @@ const ApplyCtx = struct {
     schema: *const Schema,
     /// Column of `src` supplying each schema feature.
     src_col: []const usize,
-    bins: []u8,
+    bins: []BinIdx,
     n_rows: usize,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
@@ -1082,7 +1102,7 @@ pub fn applySchema(
         if (src.kinds[src_col[f]] != schema.kinds[f]) return error.FeatureKindMismatch;
     }
 
-    const bins = try gpa.alloc(u8, n * src.n_rows);
+    const bins = try gpa.alloc(BinIdx, n * src.n_rows);
     errdefer gpa.free(bins);
 
     var ctx = ApplyCtx{

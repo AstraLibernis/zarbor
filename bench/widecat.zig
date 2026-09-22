@@ -42,19 +42,19 @@ const numeric_bins: u16 = 64;
 /// `n_numeric` numeric columns plus one categorical *declared* `cat_bins` wide.
 fn makeDs(gpa: std.mem.Allocator, n_rows: usize, cat_bins: u16, seed: u64) !data.Dataset {
     const nf = n_numeric + 1;
-    const bins = try gpa.alloc(u8, nf * n_rows);
-    const bins_rm = try gpa.alloc(u8, nf * n_rows);
+    const bins = try gpa.alloc(data.BinIdx, nf * n_rows);
+    const bins_rm = try gpa.alloc(data.BinIdx, nf * n_rows);
     const labels = try gpa.alloc(f32, n_rows);
     var prng: std.Random.DefaultPrng = .init(seed);
     const r = prng.random();
     for (0..n_rows) |row| {
         var acc: f32 = 0;
         for (0..nf) |f| {
-            const top: u8 = if (f == n_numeric)
+            const top: data.BinIdx = if (f == n_numeric)
                 @intCast(@min(@as(usize, cat_bins) - 1, 255))
             else
                 @intCast(numeric_bins - 1);
-            const b = r.intRangeAtMost(u8, 1, top);
+            const b = r.intRangeAtMost(data.BinIdx, 1, top);
             bins[f * n_rows + row] = b;
             bins_rm[row * nf + f] = b;
             if (f < 3) acc += @floatFromInt(b);
@@ -185,13 +185,30 @@ fn halfB(gpa: std.mem.Allocator, n_rows: usize) !void {
 ///
 /// Row-major over `n_feat` features, which is the real kernel's shape: the
 /// difference is entirely how many bytes of `bins_rm` a row occupies.
+fn strideIdx(st: usize) usize {
+    return switch (st) {
+        1 => 0,
+        4 => 1,
+        else => 2,
+    };
+}
+
+/// Half C: does a `u16` bin index cost the accumulation kernel anything?
+///
+/// This decides the architecture, and the first version of it got the answer
+/// wrong. It scanned every row in order, which is what the *root* node does --
+/// there one cache line of `bins_rm` serves several rows whatever the index
+/// width, and widening looked free. Every node below the root holds an
+/// ascending subset, and once the rows thin out each one wants its own line;
+/// then doubling the row stride doubles the lines touched. `stride` here is
+/// how sparse the node is: 1 is the root, 16 is roughly depth four.
 fn halfC(gpa: std.mem.Allocator, n_rows: usize) !void {
     const reps: usize = 30;
     const n_feat: usize = 13;
     const bins_per: u32 = 64;
     std.debug.print("\n  accumulate, row-major, {d} features x {d} rows x {d} reps\n", .{ n_feat, n_rows, reps });
-    std.debug.print("  {s:>9}  {s:>12}  {s:>8}  {s:>12}\n", .{ "bin type", "ns/row", "vs u8", "bins_rm MiB" });
-    var base: f64 = 0;
+    std.debug.print("  {s:>9}  {s:>10}  {s:>12}  {s:>8}\n", .{ "bin type", "node holds", "ns/row", "vs u8" });
+    var base_by: [3]f64 = .{ 1, 1, 1 };
     inline for ([2]type{ u8, u16 }) |B| {
         const rm = try gpa.alloc(B, n_rows * n_feat);
         defer gpa.free(rm);
@@ -203,29 +220,36 @@ fn halfC(gpa: std.mem.Allocator, n_rows: usize) !void {
         for (g) |*v| v.* = .{ .g = 0.5, .h = 1 };
         const rows = try gpa.alloc(u32, n_rows);
         defer gpa.free(rows);
-        for (rows, 0..) |*v, i| v.* = @intCast(i);
         const h = try gpa.alloc(hist.Bin, n_feat * bins_per);
         defer gpa.free(h);
 
-        const t0 = now();
-        for (0..reps) |_| {
-            @memset(h, .{});
-            for (rows) |row| {
-                const rb = rm[row * n_feat ..][0..n_feat];
-                const gp = g[row];
-                const v = hist.Bin.Vec{ gp.g, gp.h, 1, 0 };
-                inline for (0..n_feat) |f| {
-                    const cell: *hist.Bin.Vec = @ptrCast(&h[f * bins_per + rb[f]]);
-                    cell.* += v;
+        for ([3]usize{ 1, 4, 16 }) |stride| {
+            var n_sel: usize = 0;
+            var i: usize = 0;
+            while (i < n_rows) : (i += stride) {
+                rows[n_sel] = @intCast(i);
+                n_sel += 1;
+            }
+            const sel = rows[0..n_sel];
+            const t0 = now();
+            for (0..reps) |_| {
+                @memset(h, .{});
+                for (sel) |row| {
+                    const rb = rm[row * n_feat ..][0..n_feat];
+                    const gp = g[row];
+                    const v = hist.Bin.Vec{ gp.g, gp.h, 1, 0 };
+                    inline for (0..n_feat) |f| {
+                        const cell: *hist.Bin.Vec = @ptrCast(&h[f * bins_per + rb[f]]);
+                        cell.* += v;
+                    }
                 }
             }
+            const ns = @as(f64, @floatFromInt(now() - t0)) / @as(f64, @floatFromInt(n_sel * reps));
+            if (B == u8) base_by[strideIdx(stride)] = ns;
+            std.debug.print("  {s:>9}  1 row in {d:>2}  {d:>11.3}   {d:>7.2}x\n", .{
+                @typeName(B), stride, ns, ns / base_by[strideIdx(stride)],
+            });
         }
-        const ns = @as(f64, @floatFromInt(now() - t0)) / @as(f64, @floatFromInt(n_rows * reps));
-        if (B == u8) base = ns;
-        std.debug.print("  {s:>9}  {d:>11.3}   {d:>7.2}x  {d:>11.1}\n", .{
-            @typeName(B), ns, ns / base,
-            @as(f64, @floatFromInt(n_rows * n_feat * @sizeOf(B))) / (1024.0 * 1024.0),
-        });
     }
 }
 

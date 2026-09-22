@@ -22,7 +22,7 @@ const prof = @import("prof.zig");
 /// Midpoints of the schema's edges, not `ds.means`: means are a property of
 /// whichever file was binned, so a model using them would score a row
 /// differently depending on what else was in the file with it.
-pub inline fn binValue(ds: *const Dataset, f: u32, bin: u8) f32 {
+pub inline fn binValue(ds: *const Dataset, f: u32, bin: data.BinIdx) f32 {
     const e = ds.edges[f];
     if (e.len == 0) return 0;
     if (bin == 0) return data.binMidpoint(e, e.len / 2); // missing -> centre
@@ -34,19 +34,22 @@ pub const Node = extern struct {
     left: u32 = 0,
     right: u32 = 0,
     weight: f32 = 0,
-    /// Where this split's mask starts in `Tree.cat_masks`. Meaningless
+    /// Where this split's level ids start in `Tree.cat_ids`. Meaningless
     /// unless `is_cat`.
     cat_ofs: u32 = 0,
-    threshold: u8 = 0,
+    threshold: data.BinIdx = 0,
     missing_left: bool = true,
     is_leaf: bool = true,
-    /// The split tests membership of `cat_masks[cat_ofs..][0..cat_words]`
-    /// rather than comparing against `threshold`.
+    /// The split tests membership of `cat_ids[cat_ofs..][0..n_cat]` rather
+    /// than comparing against `threshold`.
     is_cat: bool = false,
+    /// How many level ids this split sends left. Bounded by
+    /// `hist.max_cat_ids`, which is why a byte is enough.
+    n_cat: u8 = 0,
     /// Slope terms this leaf carries. 0 is a plain constant leaf, which is
     /// every leaf unless `linear_leaves` is on.
     n_lin: u8 = 0,
-    _pad: [2]u8 = .{ 0, 0 },
+    _pad: u8 = 0,
     /// Where this leaf's terms start in `Tree.lin`.
     lin_ofs: u32 = 0,
 };
@@ -66,14 +69,14 @@ pub const Tree = struct {
     /// Flat store of the categorical masks this tree's splits refer to,
     /// `hist.cat_words` words each. Empty when no split is categorical, which
     /// is every tree grown under `cat_split = ordinal`.
-    cat_masks: []u64 = &.{},
+    cat_ids: []data.BinIdx = &.{},
     /// Flat store of the slope terms this tree's leaves refer to. Empty
     /// unless `linear_leaves` is on.
     lin: []LinTerm = &.{},
 
     pub fn deinit(t: *Tree, gpa: std.mem.Allocator) void {
         gpa.free(t.nodes);
-        if (t.cat_masks.len != 0) gpa.free(t.cat_masks);
+        if (t.cat_ids.len != 0) gpa.free(t.cat_ids);
         if (t.lin.len != 0) gpa.free(t.lin);
         t.* = undefined;
     }
@@ -89,9 +92,12 @@ pub const Tree = struct {
         while (!t.nodes[i].is_leaf) {
             const n = t.nodes[i];
             const b = rb[n.feature];
-            const go_left = if (n.is_cat)
-                hist.maskGet(t.cat_masks[n.cat_ofs..][0..hist.cat_words], b)
-            else if (b == 0) n.missing_left else b <= n.threshold;
+            const go_left = if (b == 0)
+                n.missing_left
+            else if (n.is_cat)
+                hist.catContains(t.cat_ids[n.cat_ofs..][0..n.n_cat], b)
+            else
+                b <= n.threshold;
             i = if (go_left) n.left else n.right;
         }
         const leaf = t.nodes[i];
@@ -114,7 +120,7 @@ pub const LeafSpan = struct {
 
 /// Hard cap on the root-to-leaf features a linear leaf may use. Independent
 /// of `max_depth` so the array stays a fixed size in `Work`.
-const max_path: usize = 16;
+const max_path: usize = 8;
 
 const Work = struct {
     node: u32,
@@ -209,7 +215,7 @@ pub const Builder = struct {
     n_active: usize,
 
     nodes: std.ArrayList(Node),
-    cat_masks: std.ArrayList(u64),
+    cat_ids: std.ArrayList(data.BinIdx),
     lin: std.ArrayList(LinTerm),
     queue: std.ArrayList(Work),
     leaves: std.ArrayList(LeafSpan),
@@ -288,7 +294,7 @@ pub const Builder = struct {
             .part_right = part_right,
             .n_active = 0,
             .nodes = .empty,
-            .cat_masks = .empty,
+            .cat_ids = .empty,
             .lin = .empty,
             .queue = .empty,
             .leaves = .empty,
@@ -319,7 +325,7 @@ pub const Builder = struct {
         gpa.free(b.level_features);
         gpa.free(b.node_features);
         b.nodes.deinit(gpa);
-        b.cat_masks.deinit(gpa);
+        b.cat_ids.deinit(gpa);
         b.lin.deinit(gpa);
         b.queue.deinit(gpa);
         b.leaves.deinit(gpa);
@@ -421,9 +427,10 @@ pub const Builder = struct {
     /// every setting.
     const parallel_partition_min: usize = 2048;
 
-    inline fn goesLeft(bin: u8, sp: hist.Split) bool {
-        if (sp.is_cat) return hist.maskGet(&sp.cat_mask, bin);
-        return if (bin == 0) sp.missing_left else bin <= sp.threshold;
+    inline fn goesLeft(bin: data.BinIdx, sp: hist.Split) bool {
+        if (bin == 0) return sp.missing_left;
+        if (sp.is_cat) return hist.catContains(sp.cat_ids[0..sp.n_cat], bin);
+        return bin <= sp.threshold;
     }
 
     /// Reorder `rows[start..end]` so the left child's rows come first.
@@ -710,7 +717,7 @@ pub const Builder = struct {
         subset: ?[]const u32,
     ) !Tree {
         b.nodes.clearRetainingCapacity();
-        b.cat_masks.clearRetainingCapacity();
+        b.cat_ids.clearRetainingCapacity();
         b.lin.clearRetainingCapacity();
         b.queue.clearRetainingCapacity();
         b.leaves.clearRetainingCapacity();
@@ -790,14 +797,15 @@ pub const Builder = struct {
             try b.nodes.append(b.gpa, .{});
             var cat_ofs: u32 = 0;
             if (w.split.is_cat) {
-                cat_ofs = @intCast(b.cat_masks.items.len);
-                try b.cat_masks.appendSlice(b.gpa, &w.split.cat_mask);
+                cat_ofs = @intCast(b.cat_ids.items.len);
+                try b.cat_ids.appendSlice(b.gpa, w.split.cat_ids[0..w.split.n_cat]);
             }
             b.nodes.items[w.node] = .{
                 .feature = w.split.feature,
                 .threshold = w.split.threshold,
                 .missing_left = w.split.missing_left,
                 .is_cat = w.split.is_cat,
+                .n_cat = w.split.n_cat,
                 .cat_ofs = cat_ofs,
                 .is_leaf = false,
                 .left = li,
@@ -914,16 +922,16 @@ pub const Builder = struct {
 
         const nodes = try b.gpa.dupe(Node, b.nodes.items);
         errdefer b.gpa.free(nodes);
-        const masks: []u64 = if (b.cat_masks.items.len == 0)
+        const ids: []data.BinIdx = if (b.cat_ids.items.len == 0)
             &.{}
         else
-            try b.gpa.dupe(u64, b.cat_masks.items);
-        errdefer if (masks.len != 0) b.gpa.free(masks);
+            try b.gpa.dupe(data.BinIdx, b.cat_ids.items);
+        errdefer if (ids.len != 0) b.gpa.free(ids);
         const lin: []LinTerm = if (b.lin.items.len == 0)
             &.{}
         else
             try b.gpa.dupe(LinTerm, b.lin.items);
-        return .{ .nodes = nodes, .cat_masks = masks, .lin = lin };
+        return .{ .nodes = nodes, .cat_ids = ids, .lin = lin };
     }
 
     /// Depthwise takes the oldest pending node (breadth-first); lossguide takes
@@ -988,7 +996,7 @@ const TotalCtx = struct {
 const PartCtx = struct {
     rows: []u32,
     rows_out: []u32,
-    col: []const u8,
+    col: []const data.BinIdx,
     sp: hist.Split,
     start: usize,
     chunk: usize,

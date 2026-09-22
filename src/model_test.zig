@@ -25,7 +25,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     const n_features: usize = 6;
     const n_bin: u16 = 17; // bin 0 is missing; 1..16 are real
 
-    const bins = try gpa.alloc(u8, n_features * n_rows);
+    const bins = try gpa.alloc(data.BinIdx, n_features * n_rows);
     errdefer gpa.free(bins);
     const labels = try gpa.alloc(f32, n_rows);
     errdefer gpa.free(labels);
@@ -75,7 +75,7 @@ fn synth(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
     @memset(means, &.{});
 
     // Mirror of `bins`, since the histogram kernel reads row-major.
-    const bins_rm = try gpa.alloc(u8, n_features * n_rows);
+    const bins_rm = try gpa.alloc(data.BinIdx, n_features * n_rows);
     errdefer gpa.free(bins_rm);
     for (0..n_rows) |ri| for (0..n_features) |f| {
         bins_rm[ri * n_features + f] = bins[f * n_rows + ri];
@@ -897,13 +897,14 @@ test "a saved model decodes a holdout with its own class order" {
     try testing.expectEqualSlices(f32, &.{ 1, 0, 1, 0 }, ds.labels);
 }
 
-test "a categorical column cannot overflow the bin byte" {
-    // Bins are u8 and bin 0 is reserved for missing, so 255 levels is the
-    // most a column can carry. The dictionary guard used to admit 256, and
-    // `binOne` then cast 255 + 1 into a u8: a panic in Debug, and in
-    // ReleaseFast a silent truncation to 0 that folded the last level into
-    // the missing bin and trained on it without a word. Checked from both
-    // sides of the boundary because an off-by-one is exactly what went wrong.
+test "the categorical width limit is a policy now, and still holds by default" {
+    // This limit used to be the bin type: bins were u8, bin 0 was missing, so
+    // 255 levels was all a column could carry. The index is u16 now and the
+    // limit is `max_cat_levels`, which *defaults* to the same 255 so that
+    // widening the index changes no existing run on its own.
+    //
+    // Both sides of the boundary, because an off-by-one here once truncated a
+    // level into the missing bin in ReleaseFast and trained on it silently.
     const gpa = testing.allocator;
     const pool = try Pool.init(gpa, 2);
     defer pool.deinit();
@@ -921,9 +922,23 @@ test "a categorical column cannot overflow the bin byte" {
         defer ds.deinit();
         // 255 levels -> bins 1..255, plus the missing bin.
         try testing.expectEqual(@as(u16, 256), ds.n_bins[0]);
-        var max_bin: u8 = 0;
+        var max_bin: data.BinIdx = 0;
         for (ds.column(0)) |b| max_bin = @max(max_bin, b);
-        try testing.expectEqual(@as(u8, 255), max_bin);
+        try testing.expectEqual(@as(data.BinIdx, 255), max_bin);
+    }
+
+    {
+        // And the capability the widening exists for: raise the policy and a
+        // column past the old ceiling bins correctly, into bins the u8 index
+        // could not have addressed.
+        var f = try frameWith(gpa, levels[0..260], &[_]f32{0} ** 260);
+        defer f.deinit();
+        var ds = try data.quantise(gpa, pool, &f, .{ .max_cat_levels = 4096 }, null, &.{});
+        defer ds.deinit();
+        try testing.expectEqual(@as(u16, 261), ds.n_bins[0]);
+        var max_bin: data.BinIdx = 0;
+        for (ds.column(0)) |b| max_bin = @max(max_bin, b);
+        try testing.expectEqual(@as(data.BinIdx, 260), max_bin);
     }
 
     {

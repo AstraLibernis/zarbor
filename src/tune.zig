@@ -264,7 +264,9 @@ const Trial = struct {
 /// trials printed `max_bin=64` while every one of them fitted the 256-bin
 /// matrix, and the winning config did not reproduce when run through `cv`.
 fn affectsBinning(name: []const u8) bool {
-    return std.mem.eql(u8, name, "max_bin") or std.mem.eql(u8, name, "bin_policy");
+    return std.mem.eql(u8, name, "max_bin") or
+        std.mem.eql(u8, name, "bin_policy") or
+        std.mem.eql(u8, name, "max_cat_levels");
 }
 
 /// Holds the binned matrix, and rebuilds it when a trial asks for binning that
@@ -279,11 +281,16 @@ const Binner = struct {
     drops: []const []const u8,
     ds: data.Dataset,
     max_bin: u16,
+    /// Tracked like `max_bin`, because it changes the binning and a cached
+    /// matrix built under a different value is the wrong matrix.
+    max_cat_levels: u32 = (config.Config{}).max_cat_levels,
     policy: config.BinPolicy,
     rebins: usize = 0,
 
     fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
-        if (cfg.max_bin != b.max_bin or cfg.bin_policy != b.policy) {
+        if (cfg.max_bin != b.max_bin or cfg.bin_policy != b.policy or
+            cfg.max_cat_levels != b.max_cat_levels)
+        {
             const next = try data.quantise(
                 b.gpa,
                 b.pool,
@@ -296,6 +303,7 @@ const Binner = struct {
             b.ds = next;
             b.max_bin = cfg.max_bin;
             b.policy = cfg.bin_policy;
+            b.max_cat_levels = cfg.max_cat_levels;
             b.rebins += 1;
         }
         return &b.ds;
@@ -1223,9 +1231,15 @@ fn testFrame(gpa: std.mem.Allocator, wide: usize, n_rows: usize) !data.Frame {
 }
 
 test "Binner: a rebin too narrow for a categorical leaves the cached matrix intact" {
-    // A `max_bin` below the widest categorical column cannot be binned at all,
-    // and a search space that offers `max_bin` as a choice will propose one.
+    // A `max_cat_levels` below the widest categorical column cannot be binned
+    // at all, and a search space that offers it as a choice will propose one.
     // That has to be a skipped trial, not a failure.
+    //
+    // This used to be provoked through `max_bin`, which doubled as the
+    // categorical width limit. The two are separate now -- `max_bin` cuts
+    // numeric columns and has nothing to say about how many levels a
+    // categorical has -- so the same path is reached through the knob that
+    // actually governs it.
     //
     // It used to be fatal, and the escaping error then ran BOTH
     // `defer binner.ds.deinit()` and a stale `errdefer full.deinit()` over one
@@ -1260,10 +1274,10 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
     const before = b.ds.n_rows;
     try testing.expect(before == 200);
 
-    // 40 levels need 41 bins. 32 cannot hold them.
+    // 40 levels. A limit of 32 cannot admit them.
     try testing.expectError(
         error.CategoricalTooWide,
-        b.get(.{ .max_bin = 32 }),
+        b.get(.{ .max_bin = 64, .max_cat_levels = 32 }),
     );
 
     // The cache must be untouched: same rows, and still the width we loaded.

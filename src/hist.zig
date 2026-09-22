@@ -377,32 +377,39 @@ pub fn subtract(pool: *Pool, bank: *Bank, out: []Bin, parent: []const Bin, sibli
 
 // ------------------------------------------------------------ split search
 
-/// `u64` words needed to give every bin of a `max_bins`-wide column one bit.
-pub const cat_words: usize = (data.max_bins + 63) / 64;
-/// Which bins of a categorical feature belong to the left child. Bit `b` set
-/// means bin `b` goes left, including bin 0, which is the missing bin -- so a
-/// categorical split needs no separate missing direction.
-pub const CatMask = [cat_words]u64;
+/// Hard cap on how many levels one categorical split may send left, and so on
+/// the size of the id list a split carries.
+///
+/// The set used to be a bitmask over every bin. That was affordable at 256
+/// bins and is not at 65,535, where it would be 8 KiB per split node. A sorted
+/// list of the ids on the left is smaller than the mask at every cardinality,
+/// because `max_cat_threshold` already bounds it.
+pub const max_cat_ids: usize = 32;
 
-pub inline fn maskGet(m: *const CatMask, bin: u8) bool {
-    return (m[bin >> 6] >> @intCast(bin & 63)) & 1 != 0;
-}
-
-pub inline fn maskSet(m: *CatMask, bin: u8) void {
-    m[bin >> 6] |= @as(u64, 1) << @intCast(bin & 63);
+/// Ascending; binary search rather than a scan, since a split can carry 64 of
+/// them and this runs once per node per row at prediction time.
+pub inline fn catContains(ids: []const data.BinIdx, bin: data.BinIdx) bool {
+    var lo: usize = 0;
+    var hi: usize = ids.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (ids[mid] < bin) lo = mid + 1 else hi = mid;
+    }
+    return lo < ids.len and ids[lo] == bin;
 }
 
 pub const Split = struct {
     feature: u32 = 0,
     /// Rows with `bin <= threshold` go left (before the missing adjustment).
     /// Unused when `is_cat`.
-    threshold: u8 = 0,
-    /// Whether the missing bin joins the left child. Unused when `is_cat`,
-    /// where bit 0 of the mask carries the same decision.
+    threshold: data.BinIdx = 0,
+    /// Whether the missing bin joins the left child. Applies to categorical
+    /// splits too: bin 0 is never in `cat_ids`.
     missing_left: bool = true,
-    /// The split is a set membership test against `cat_mask`, not a threshold.
+    /// The split tests membership of `cat_ids[0..n_cat]`, not a threshold.
     is_cat: bool = false,
-    cat_mask: CatMask = @splat(0),
+    n_cat: u8 = 0,
+    cat_ids: [max_cat_ids]data.BinIdx = @splat(0),
     gain: f64 = -std.math.inf(f64),
     left: Bin = .{},
     right: Bin = .{},
@@ -453,7 +460,7 @@ pub inline fn leafWeight(g: f64, h: f64, p: SplitParams) f64 {
 inline fn consider(
     best: *Split,
     fid: u32,
-    thr: u8,
+    thr: data.BinIdx,
     missing_left: bool,
     left: Bin,
     right: Bin,
@@ -480,7 +487,7 @@ inline fn consider(
 /// hessian padded so a level carrying three rows cannot reach an extreme of
 /// the order on the strength of those three.
 const CatKey = struct {
-    bin: u8,
+    bin: data.BinIdx,
     key: f64,
 
     fn lessThan(_: void, a: CatKey, b: CatKey) bool {
@@ -533,7 +540,7 @@ fn bestCatSplit(
     const parent_score = nodeScore(total.g, total.h, pc);
     const missing = h[0];
     const min_n: f64 = @floatFromInt(p.min_child_samples);
-    const cap: usize = @min(@as(usize, p.max_cat_threshold), n_ord - 1);
+    const cap: usize = @min(@min(@as(usize, p.max_cat_threshold), max_cat_ids), n_ord - 1);
 
     var best_gain = best.gain;
     var best_k: usize = 0;
@@ -566,24 +573,28 @@ fn bestCatSplit(
     }
     if (!found) return;
 
-    // Materialise the winner once, rather than carrying a 32-byte mask
-    // through every candidate.
-    var mask: CatMask = @splat(0);
+    // Materialise the winner once, rather than carrying the id list through
+    // every candidate.
+    var ids: [max_cat_ids]data.BinIdx = @splat(0);
+    var n_cat: u8 = 0;
     var acc: Bin = .{};
     var k: usize = 0;
     while (k <= best_k) : (k += 1) {
         const idx = if (best_from_low) k else n_ord - 1 - k;
-        maskSet(&mask, scratch[idx].bin);
+        ids[n_cat] = scratch[idx].bin;
+        n_cat += 1;
         acc = acc.add(h[scratch[idx].bin]);
     }
-    if (best_missing_left) {
-        maskSet(&mask, 0);
-        acc = acc.add(missing);
-    }
+    if (best_missing_left) acc = acc.add(missing);
+    // Gradient order on the way in, bin order on the way out: the search wants
+    // the first, the binary search at prediction time wants the second.
+    std.sort.insertion(data.BinIdx, ids[0..n_cat], {}, std.sort.asc(data.BinIdx));
     best.* = .{
         .feature = fid,
         .is_cat = true,
-        .cat_mask = mask,
+        .n_cat = n_cat,
+        .cat_ids = ids,
+        .missing_left = best_missing_left,
         .gain = best_gain,
         .left = acc,
         .right = total.sub(acc),

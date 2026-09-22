@@ -26,7 +26,11 @@ pub const magic = "ZMDL";
 /// 3 added categorical subset splits. A version-2 file still loads: it has no
 /// mask store and no node claiming one, which is exactly what an ordinal-split
 /// model is.
-pub const format_version: u32 = 3;
+/// 4 widened the bin index to `u16` and replaced the categorical bitmask with
+/// a sorted list of the level ids on the left. Versions 2 and 3 still load;
+/// their thresholds are read a byte at a time and their masks expanded into
+/// the list form, so a model saved before this change scores identically.
+pub const format_version: u32 = 4;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -233,21 +237,19 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU32(gpa, b, n.left);
             try putU32(gpa, b, n.right);
             try putF32(gpa, b, n.weight);
-            try putU8(gpa, b, n.threshold);
+            try putU16(gpa, b, n.threshold);
             try putU8(gpa, b, @intFromBool(n.missing_left));
             try putU8(gpa, b, @intFromBool(n.is_leaf));
             try putU8(gpa, b, @intFromBool(n.is_cat));
+            try putU8(gpa, b, n.n_cat);
             try putU32(gpa, b, n.cat_ofs);
             try putU8(gpa, b, n.n_lin);
             try putU32(gpa, b, n.lin_ofs);
         }
         // Mask store last, so the node loop above stays the same shape as the
         // version-2 one and the two readers differ only in what they skip.
-        try putU32(gpa, b, @intCast(t.cat_masks.len));
-        for (t.cat_masks) |w| {
-            try putU32(gpa, b, @truncate(w));
-            try putU32(gpa, b, @truncate(w >> 32));
-        }
+        try putU32(gpa, b, @intCast(t.cat_ids.len));
+        for (t.cat_ids) |id| try putU16(gpa, b, id);
         try putU32(gpa, b, @intCast(t.lin.len));
         for (t.lin) |term| {
             try putU32(gpa, b, term.feature);
@@ -255,6 +257,46 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putF32(gpa, b, term.center);
         }
     }
+}
+
+/// Version 3 wrote a 256-bit mask per categorical split and a node pointed at
+/// it by word offset. Version 4 stores the ids on the left instead. Expanding
+/// on load rather than keeping two prediction paths is what lets the reader be
+/// the only place that knows version 3 ever existed.
+fn expandV3Masks(
+    gpa: std.mem.Allocator,
+    r: *Reader,
+    n_words: u32,
+    nodes: []tree.Node,
+    t: *tree.Tree,
+) !void {
+    const words = try gpa.alloc(u64, n_words);
+    defer gpa.free(words);
+    for (words) |*w| {
+        const lo: u64 = try r.u32v();
+        const hi: u64 = try r.u32v();
+        w.* = lo | (hi << 32);
+    }
+    const v3_words: usize = 4; // 256 bins
+    var ids: std.ArrayList(data.BinIdx) = .empty;
+    errdefer ids.deinit(gpa);
+    for (nodes) |*n| {
+        if (!n.is_cat) continue;
+        if (n.cat_ofs + v3_words > n_words) return error.BadModelFile;
+        const m = words[n.cat_ofs..][0..v3_words];
+        const start = ids.items.len;
+        // Bit 0 was the missing bin in version 3; it is `missing_left` now.
+        n.missing_left = (m[0] & 1) != 0;
+        var bin: usize = 1;
+        while (bin < 256) : (bin += 1) {
+            if ((m[bin >> 6] >> @intCast(bin & 63)) & 1 == 0) continue;
+            if (ids.items.len - start >= hist.max_cat_ids) return error.BadModelFile;
+            try ids.append(gpa, @intCast(bin));
+        }
+        n.cat_ofs = @intCast(start);
+        n.n_cat = @intCast(ids.items.len - start);
+    }
+    t.cat_ids = try ids.toOwnedSlice(gpa);
 }
 
 fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
@@ -283,10 +325,11 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
             const left = try r.u32v();
             const right = try r.u32v();
             const weight = try r.f32v();
-            const threshold = try r.u8v();
+            const threshold: data.BinIdx = if (ver >= 4) try r.u16v() else try r.u8v();
             const missing_left = (try r.u8v()) != 0;
             const is_leaf = (try r.u8v()) != 0;
             const is_cat = if (ver >= 3) (try r.u8v()) != 0 else false;
+            const n_cat = if (ver >= 4) try r.u8v() else 0;
             const cat_ofs = if (ver >= 3) try r.u32v() else 0;
             const n_lin = if (ver >= 3) try r.u8v() else 0;
             const lin_ofs = if (ver >= 3) try r.u32v() else 0;
@@ -300,6 +343,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
                 .missing_left = missing_left,
                 .is_leaf = is_leaf,
                 .is_cat = is_cat,
+                .n_cat = n_cat,
                 .n_lin = n_lin,
                 .lin_ofs = lin_ofs,
             };
@@ -310,12 +354,15 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
         if (ver >= 3) {
             const nm = try r.u32v();
             if (nm != 0) {
-                const masks = try gpa.alloc(u64, nm);
-                trees[made - 1].cat_masks = masks;
-                for (masks) |*w| {
-                    const lo: u64 = try r.u32v();
-                    const hi: u64 = try r.u32v();
-                    w.* = lo | (hi << 32);
+                if (ver >= 4) {
+                    const ids = try gpa.alloc(data.BinIdx, nm);
+                    trees[made - 1].cat_ids = ids;
+                    for (ids) |*id| id.* = try r.u16v();
+                } else {
+                    // Version 3 stored a 256-bit mask per split. Expand each
+                    // into the list form so the rest of the loader, and every
+                    // prediction path, sees one representation.
+                    try expandV3Masks(gpa, r, nm, nodes, &trees[made - 1]);
                 }
             }
             // A mask offset past the store would read out of bounds at
@@ -332,8 +379,9 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
                     term.* = .{ .feature = feature, .coef = coef, .center = center };
                 }
             }
+            const n_ids = trees[made - 1].cat_ids.len;
             for (nodes) |n| {
-                if (n.is_cat and n.cat_ofs + hist.cat_words > nm) return error.BadModelFile;
+                if (n.is_cat and n.cat_ofs + n.n_cat > n_ids) return error.BadModelFile;
                 if (n.n_lin != 0 and n.lin_ofs + n.n_lin > nl) return error.BadModelFile;
             }
         }
@@ -551,8 +599,8 @@ fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
         // Owned before the second allocation, so a failure there frees the
         // nodes rather than leaking them.
         made += 1;
-        if (src[made - 1].cat_masks.len != 0)
-            out[made - 1].cat_masks = try gpa.dupe(u64, src[made - 1].cat_masks);
+        if (src[made - 1].cat_ids.len != 0)
+            out[made - 1].cat_ids = try gpa.dupe(data.BinIdx, src[made - 1].cat_ids);
         if (src[made - 1].lin.len != 0)
             out[made - 1].lin = try gpa.dupe(tree.LinTerm, src[made - 1].lin);
     }
