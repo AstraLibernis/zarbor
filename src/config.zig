@@ -37,6 +37,17 @@ pub const GrowPolicy = enum {
     lossguide,
 };
 
+/// How a categorical feature's levels are partitioned at a split.
+pub const CatSplit = enum {
+    /// Cut the dictionary id like a numeric bin. The ids are assigned in
+    /// order of first appearance, so the reachable partitions are prefixes of
+    /// an arbitrary order.
+    ordinal,
+    /// Sort the levels present in the node by their smoothed gradient ratio
+    /// and cut that order instead. See docs/categorical-splits.md.
+    optimal,
+};
+
 /// Strategy for choosing bin edges when quantising a numeric column.
 pub const BinPolicy = enum {
     /// Equal-count bins from the empirical distribution. Robust to skew.
@@ -132,6 +143,22 @@ pub const Config = struct {
     /// Minimum summed hessian in a leaf. For logistic this is a measure of
     /// confidence mass, not row count, and is the more principled of the two.
     min_child_weight: f32 = 1.0,
+
+    // ---- categorical splits -------------------------------------------
+    /// How a categorical column's levels are partitioned. Defaults to
+    /// `ordinal`, which is what every model written before this existed used.
+    cat_split: CatSplit = .ordinal,
+    /// Added to a level's hessian in the sort key, so a level carrying little
+    /// mass cannot reach an extreme of the order on a handful of rows.
+    cat_smooth: f32 = 10.0,
+    /// Extra L2 applied to the gain of a categorical split only. A K-way
+    /// choice has more ways to fit noise than a single threshold does.
+    cat_l2: f32 = 10.0,
+    /// Levels with fewer rows in the node than this are left out of the scan
+    /// and join the right child. 0 means "use `min_child_samples`".
+    cat_min_group: u32 = 0,
+    /// Cap on how many levels may land in the left child.
+    max_cat_threshold: u32 = 32,
 
     // ---- regularisation ----------------------------------------------
     /// L2 penalty on leaf weights. Appears as lambda in the gain formula.

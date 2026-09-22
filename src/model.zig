@@ -14,6 +14,7 @@ const std = @import("std");
 const data = @import("data.zig");
 const config = @import("config.zig");
 const tree = @import("tree.zig");
+const hist = @import("hist.zig");
 const booster = @import("booster.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
@@ -22,7 +23,10 @@ const Pool = @import("pool.zig").Pool;
 pub const magic = "ZMDL";
 /// 2 added the label encoding. A version-1 file still loads; it simply has
 /// no class order, which the scoring path rejects rather than guessing at.
-pub const format_version: u32 = 2;
+/// 3 added categorical subset splits. A version-2 file still loads: it has no
+/// mask store and no node claiming one, which is exactly what an ordinal-split
+/// model is.
+pub const format_version: u32 = 3;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -232,11 +236,20 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU8(gpa, b, n.threshold);
             try putU8(gpa, b, @intFromBool(n.missing_left));
             try putU8(gpa, b, @intFromBool(n.is_leaf));
+            try putU8(gpa, b, @intFromBool(n.is_cat));
+            try putU32(gpa, b, n.cat_ofs);
+        }
+        // Mask store last, so the node loop above stays the same shape as the
+        // version-2 one and the two readers differ only in what they skip.
+        try putU32(gpa, b, @intCast(t.cat_masks.len));
+        for (t.cat_masks) |w| {
+            try putU32(gpa, b, @truncate(w));
+            try putU32(gpa, b, @truncate(w >> 32));
         }
     }
 }
 
-fn readTrees(gpa: std.mem.Allocator, r: *Reader) ![]tree.Tree {
+fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
     const nt = try r.u32v();
     const trees = try gpa.alloc(tree.Tree, nt);
     var made: usize = 0;
@@ -254,18 +267,51 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader) ![]tree.Tree {
         // `trees[0..made]` window, so a truncated file leaks it.
         made += 1;
         for (nodes) |*n| {
+            // Read into locals rather than into a struct literal. The fields
+            // are not declared in wire order, and a literal's initialisers
+            // are not guaranteed to run in the order they are written -- so
+            // side-effecting reads inside one silently reorder the file.
+            const feature = try r.u32v();
+            const left = try r.u32v();
+            const right = try r.u32v();
+            const weight = try r.f32v();
+            const threshold = try r.u8v();
+            const missing_left = (try r.u8v()) != 0;
+            const is_leaf = (try r.u8v()) != 0;
+            const is_cat = if (ver >= 3) (try r.u8v()) != 0 else false;
+            const cat_ofs = if (ver >= 3) try r.u32v() else 0;
             n.* = .{
-                .feature = try r.u32v(),
-                .left = try r.u32v(),
-                .right = try r.u32v(),
-                .weight = try r.f32v(),
-                .threshold = try r.u8v(),
-                .missing_left = (try r.u8v()) != 0,
-                .is_leaf = (try r.u8v()) != 0,
+                .feature = feature,
+                .left = left,
+                .right = right,
+                .weight = weight,
+                .cat_ofs = cat_ofs,
+                .threshold = threshold,
+                .missing_left = missing_left,
+                .is_leaf = is_leaf,
+                .is_cat = is_cat,
             };
             // A corrupt child index would walk off the node array during
             // prediction; reject it here instead.
             if (!n.is_leaf and (n.left >= nn or n.right >= nn)) return error.BadModelFile;
+        }
+        if (ver >= 3) {
+            const nm = try r.u32v();
+            if (nm != 0) {
+                const masks = try gpa.alloc(u64, nm);
+                trees[made - 1].cat_masks = masks;
+                for (masks) |*w| {
+                    const lo: u64 = try r.u32v();
+                    const hi: u64 = try r.u32v();
+                    w.* = lo | (hi << 32);
+                }
+            }
+            // A mask offset past the store would read out of bounds at
+            // prediction time, which is the same class of fault as a bad
+            // child index and is rejected the same way.
+            for (nodes) |n| {
+                if (n.is_cat and n.cat_ofs + hist.cat_words > nm) return error.BadModelFile;
+            }
         }
     }
     return trees;
@@ -350,7 +396,7 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     };
 
     switch (kind) {
-        .gbdt, .forest => b.trees = try readTrees(gpa, &r),
+        .gbdt, .forest => b.trees = try readTrees(gpa, &r, ver),
         .linear => {
             const intercept = try r.f32v();
             const nw = try r.u32v();
@@ -476,8 +522,13 @@ fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
         for (out[0..made]) |*t| t.deinit(gpa);
         gpa.free(out);
     }
-    while (made < src.len) : (made += 1) {
+    while (made < src.len) {
         out[made] = .{ .nodes = try gpa.dupe(tree.Node, src[made].nodes) };
+        // Owned before the second allocation, so a failure there frees the
+        // nodes rather than leaking them.
+        made += 1;
+        if (src[made - 1].cat_masks.len != 0)
+            out[made - 1].cat_masks = try gpa.dupe(u64, src[made - 1].cat_masks);
     }
     return out;
 }

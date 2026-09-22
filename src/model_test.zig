@@ -416,6 +416,88 @@ fn roundTrip(kind: config.Algo) !void {
     try testing.expectEqual(bundle.schema.n_features, loaded.schema.n_features);
 }
 
+/// `synth` with two of its columns relabelled categorical, so the subset-split
+/// path has something to act on. The bins are unchanged -- a categorical bin
+/// *is* its dictionary id, so relabelling is all it takes.
+fn synthWithCats(gpa: std.mem.Allocator, n_rows: usize, seed: u64) !data.Dataset {
+    var ds = try synth(gpa, n_rows, seed);
+    ds.kinds[3] = .categorical;
+    ds.kinds[4] = .categorical;
+    return ds;
+}
+
+fn countCatNodes(b: *const model_mod.Bundle) usize {
+    var n: usize = 0;
+    for (b.trees) |t| for (t.nodes) |nd| {
+        if (!nd.is_leaf and nd.is_cat) n += 1;
+    };
+    return n;
+}
+
+test "optimal categorical splits actually fire, and ordinal ones never do" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try synthWithCats(gpa, 3000, 7);
+    defer ds.deinit();
+
+    for ([2]config.CatSplit{ .ordinal, .optimal }) |mode| {
+        var schema = try data.Schema.fromDataset(gpa, &ds);
+        errdefer schema.deinit();
+        var res = try booster.train(gpa, pool, &ds, null, .{
+            .n_rounds = 30,
+            .max_depth = 4,
+            .cat_split = mode,
+            .verbose_eval = 0,
+        }, null);
+        defer res.model.deinit();
+        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        defer bundle.deinit();
+        const n = countCatNodes(&bundle);
+        switch (mode) {
+            // Without this the round-trip test below would pass vacuously.
+            .optimal => try testing.expect(n > 0),
+            .ordinal => try testing.expectEqual(@as(usize, 0), n),
+        }
+    }
+}
+
+test "a model carrying categorical subset splits round trips exactly" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try synthWithCats(gpa, 3000, 11);
+    defer ds.deinit();
+    var schema = try data.Schema.fromDataset(gpa, &ds);
+    errdefer schema.deinit();
+
+    var res = try booster.train(gpa, pool, &ds, null, .{
+        .n_rounds = 30,
+        .max_depth = 4,
+        .cat_split = .optimal,
+        .verbose_eval = 0,
+    }, null);
+    defer res.model.deinit();
+    var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+    defer bundle.deinit();
+    try testing.expect(countCatNodes(&bundle) > 0);
+
+    const before = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(before);
+    bundle.predict(pool, &ds, before);
+
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+    var loaded = try model_mod.deserialise(gpa, bytes);
+    defer loaded.deinit();
+    try testing.expectEqual(countCatNodes(&bundle), countCatNodes(&loaded));
+
+    const after = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(after);
+    loaded.predict(pool, &ds, after);
+    for (before, after) |x, y| try testing.expectEqual(x, y);
+}
+
 test "gbdt survives a save/load round trip exactly" {
     try roundTrip(.gbdt);
 }

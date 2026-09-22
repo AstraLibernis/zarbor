@@ -17,7 +17,8 @@
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
-const Dataset = @import("data.zig").Dataset;
+const data = @import("data.zig");
+const Dataset = data.Dataset;
 const prof = @import("prof.zig");
 
 /// First-order and second-order derivative of the loss at one row.
@@ -376,12 +377,32 @@ pub fn subtract(pool: *Pool, bank: *Bank, out: []Bin, parent: []const Bin, sibli
 
 // ------------------------------------------------------------ split search
 
+/// `u64` words needed to give every bin of a `max_bins`-wide column one bit.
+pub const cat_words: usize = (data.max_bins + 63) / 64;
+/// Which bins of a categorical feature belong to the left child. Bit `b` set
+/// means bin `b` goes left, including bin 0, which is the missing bin -- so a
+/// categorical split needs no separate missing direction.
+pub const CatMask = [cat_words]u64;
+
+pub inline fn maskGet(m: *const CatMask, bin: u8) bool {
+    return (m[bin >> 6] >> @intCast(bin & 63)) & 1 != 0;
+}
+
+pub inline fn maskSet(m: *CatMask, bin: u8) void {
+    m[bin >> 6] |= @as(u64, 1) << @intCast(bin & 63);
+}
+
 pub const Split = struct {
     feature: u32 = 0,
     /// Rows with `bin <= threshold` go left (before the missing adjustment).
+    /// Unused when `is_cat`.
     threshold: u8 = 0,
-    /// Whether the missing bin joins the left child.
+    /// Whether the missing bin joins the left child. Unused when `is_cat`,
+    /// where bit 0 of the mask carries the same decision.
     missing_left: bool = true,
+    /// The split is a set membership test against `cat_mask`, not a threshold.
+    is_cat: bool = false,
+    cat_mask: CatMask = @splat(0),
     gain: f64 = -std.math.inf(f64),
     left: Bin = .{},
     right: Bin = .{},
@@ -398,6 +419,15 @@ pub const SplitParams = struct {
     min_child_weight: f64,
     min_child_samples: u32,
     max_delta_step: f64,
+    /// Search categorical features by gradient order rather than by a cut on
+    /// the dictionary id.
+    cat_optimal: bool = false,
+    cat_smooth: f64 = 10.0,
+    cat_l2: f64 = 10.0,
+    /// Levels below this row count sit out the scan. Already resolved from
+    /// `cat_min_group == 0` to `min_child_samples` by the caller.
+    cat_min_group: u32 = 20,
+    max_cat_threshold: u32 = 32,
 };
 
 inline fn softThreshold(g: f64, alpha: f64) f64 {
@@ -446,6 +476,120 @@ inline fn consider(
     }
 }
 
+/// Sort key for a categorical level: its gradient per unit hessian, with the
+/// hessian padded so a level carrying three rows cannot reach an extreme of
+/// the order on the strength of those three.
+const CatKey = struct {
+    bin: u8,
+    key: f64,
+
+    fn lessThan(_: void, a: CatKey, b: CatKey) bool {
+        if (a.key != b.key) return a.key < b.key;
+        // Ties broken on the bin index so the order is total and the search
+        // does not depend on the sort's internal choices.
+        return a.bin < b.bin;
+    }
+};
+
+/// Best subset split for one categorical feature.
+///
+/// The levels present in the node are sorted by `CatKey` and only prefixes of
+/// that order are examined -- the argument that this loses nothing is in
+/// docs/categorical-splits.md. Both ends are scanned because
+/// `max_cat_threshold` caps the left child, and the best 32 levels and the
+/// worst 32 are different candidate sets.
+///
+/// Levels below `cat_min_group` rows sit out. They are not thereby lost: the
+/// mask leaves their bits clear, so they fall to the right child, which is
+/// also where every level unseen in this node goes at prediction time.
+fn bestCatSplit(
+    best: *Split,
+    fid: u32,
+    h: []const Bin,
+    nb: u16,
+    total: Bin,
+    p: SplitParams,
+    scratch: *[data.max_bins]CatKey,
+) void {
+    const min_group: f64 = @floatFromInt(p.cat_min_group);
+    var n_ord: usize = 0;
+    var b: usize = 1;
+    while (b < nb) : (b += 1) {
+        if (h[b].n < min_group) continue;
+        scratch[n_ord] = .{ .bin = @intCast(b), .key = h[b].g / (h[b].h + p.cat_smooth) };
+        n_ord += 1;
+    }
+    if (n_ord < 2) return;
+
+    // Stable, allocation-free, and at most 255 elements. The sort is nowhere
+    // near the cost of the histogram that produced these bins.
+    std.sort.insertion(CatKey, scratch[0..n_ord], {}, CatKey.lessThan);
+
+    // The extra L2 goes into the parent term as well as the children, so the
+    // number this produces is a loss reduction under one consistent prior and
+    // stays comparable with a numeric split's.
+    var pc = p;
+    pc.lambda = p.lambda + p.cat_l2;
+    const parent_score = nodeScore(total.g, total.h, pc);
+    const missing = h[0];
+    const min_n: f64 = @floatFromInt(p.min_child_samples);
+    const cap: usize = @min(@as(usize, p.max_cat_threshold), n_ord - 1);
+
+    var best_gain = best.gain;
+    var best_k: usize = 0;
+    var best_from_low = true;
+    var best_missing_left = false;
+    var found = false;
+
+    for ([2]bool{ true, false }) |from_low| {
+        var acc: Bin = .{};
+        var k: usize = 0;
+        while (k < cap) : (k += 1) {
+            const idx = if (from_low) k else n_ord - 1 - k;
+            acc = acc.add(h[scratch[idx].bin]);
+            for ([2]bool{ false, true }) |missing_left| {
+                const left = if (missing_left) acc.add(missing) else acc;
+                const right = total.sub(left);
+                if (left.n < min_n or right.n < min_n) continue;
+                if (left.h < p.min_child_weight or right.h < p.min_child_weight) continue;
+                const gain = 0.5 * (nodeScore(left.g, left.h, pc) +
+                    nodeScore(right.g, right.h, pc) - parent_score) - p.min_split_gain;
+                if (gain > best_gain) {
+                    best_gain = gain;
+                    best_k = k;
+                    best_from_low = from_low;
+                    best_missing_left = missing_left;
+                    found = true;
+                }
+            }
+        }
+    }
+    if (!found) return;
+
+    // Materialise the winner once, rather than carrying a 32-byte mask
+    // through every candidate.
+    var mask: CatMask = @splat(0);
+    var acc: Bin = .{};
+    var k: usize = 0;
+    while (k <= best_k) : (k += 1) {
+        const idx = if (best_from_low) k else n_ord - 1 - k;
+        maskSet(&mask, scratch[idx].bin);
+        acc = acc.add(h[scratch[idx].bin]);
+    }
+    if (best_missing_left) {
+        maskSet(&mask, 0);
+        acc = acc.add(missing);
+    }
+    best.* = .{
+        .feature = fid,
+        .is_cat = true,
+        .cat_mask = mask,
+        .gain = best_gain,
+        .left = acc,
+        .right = total.sub(acc),
+    };
+}
+
 /// Best split for one node over `features`.
 ///
 /// Bin 0 holds the missing mass and is never itself a threshold. Each feature
@@ -461,11 +605,18 @@ pub fn bestSplit(
 ) Split {
     var best: Split = .{};
     const parent_score = nodeScore(total.g, total.h, p);
+    var cat_scratch: [data.max_bins]CatKey = undefined;
 
     for (features) |fid| {
         const h = bank.featureSliceConst(hist, fid);
         const nb = ds.n_bins[fid];
         if (nb < 3) continue; // missing bin plus one real bin: nothing to cut
+
+        if (p.cat_optimal and ds.kinds[fid] == .categorical) {
+            bestCatSplit(&best, fid, h, nb, total, p, &cat_scratch);
+            continue;
+        }
+
         const missing = h[0];
 
         // missing -> left

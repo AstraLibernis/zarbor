@@ -22,17 +22,27 @@ pub const Node = extern struct {
     left: u32 = 0,
     right: u32 = 0,
     weight: f32 = 0,
+    /// Where this split's mask starts in `Tree.cat_masks`. Meaningless
+    /// unless `is_cat`.
+    cat_ofs: u32 = 0,
     threshold: u8 = 0,
     missing_left: bool = true,
     is_leaf: bool = true,
-    _pad: u8 = 0,
+    /// The split tests membership of `cat_masks[cat_ofs..][0..cat_words]`
+    /// rather than comparing against `threshold`.
+    is_cat: bool = false,
 };
 
 pub const Tree = struct {
     nodes: []Node,
+    /// Flat store of the categorical masks this tree's splits refer to,
+    /// `hist.cat_words` words each. Empty when no split is categorical, which
+    /// is every tree grown under `cat_split = ordinal`.
+    cat_masks: []u64 = &.{},
 
     pub fn deinit(t: *Tree, gpa: std.mem.Allocator) void {
         gpa.free(t.nodes);
+        if (t.cat_masks.len != 0) gpa.free(t.cat_masks);
         t.* = undefined;
     }
 
@@ -47,7 +57,9 @@ pub const Tree = struct {
         while (!t.nodes[i].is_leaf) {
             const n = t.nodes[i];
             const b = rb[n.feature];
-            const go_left = if (b == 0) n.missing_left else b <= n.threshold;
+            const go_left = if (n.is_cat)
+                hist.maskGet(t.cat_masks[n.cat_ofs..][0..hist.cat_words], b)
+            else if (b == 0) n.missing_left else b <= n.threshold;
             i = if (go_left) n.left else n.right;
         }
         return t.nodes[i].weight;
@@ -110,6 +122,7 @@ pub const Builder = struct {
     n_active: usize,
 
     nodes: std.ArrayList(Node),
+    cat_masks: std.ArrayList(u64),
     queue: std.ArrayList(Work),
     leaves: std.ArrayList(LeafSpan),
 
@@ -187,6 +200,7 @@ pub const Builder = struct {
             .part_right = part_right,
             .n_active = 0,
             .nodes = .empty,
+            .cat_masks = .empty,
             .queue = .empty,
             .leaves = .empty,
             .all_features = all_features,
@@ -216,6 +230,7 @@ pub const Builder = struct {
         gpa.free(b.level_features);
         gpa.free(b.node_features);
         b.nodes.deinit(gpa);
+        b.cat_masks.deinit(gpa);
         b.queue.deinit(gpa);
         b.leaves.deinit(gpa);
         b.* = undefined;
@@ -292,6 +307,13 @@ pub const Builder = struct {
             .min_child_weight = b.cfg.min_child_weight,
             .min_child_samples = b.cfg.min_child_samples,
             .max_delta_step = b.cfg.max_delta_step,
+            .cat_optimal = b.cfg.cat_split == .optimal,
+            .cat_smooth = b.cfg.cat_smooth,
+            .cat_l2 = b.cfg.cat_l2,
+            // 0 means "whatever the rest of the tree uses", so there is one
+            // sample floor in play rather than two unrelated ones.
+            .cat_min_group = if (b.cfg.cat_min_group != 0) b.cfg.cat_min_group else b.cfg.min_child_samples,
+            .max_cat_threshold = b.cfg.max_cat_threshold,
         };
     }
 
@@ -310,6 +332,7 @@ pub const Builder = struct {
     const parallel_partition_min: usize = 2048;
 
     inline fn goesLeft(bin: u8, sp: hist.Split) bool {
+        if (sp.is_cat) return hist.maskGet(&sp.cat_mask, bin);
         return if (bin == 0) sp.missing_left else bin <= sp.threshold;
     }
 
@@ -510,6 +533,7 @@ pub const Builder = struct {
         subset: ?[]const u32,
     ) !Tree {
         b.nodes.clearRetainingCapacity();
+        b.cat_masks.clearRetainingCapacity();
         b.queue.clearRetainingCapacity();
         b.leaves.clearRetainingCapacity();
         b.level_depth = -1;
@@ -586,10 +610,17 @@ pub const Builder = struct {
             try b.nodes.append(b.gpa, .{});
             const ri: u32 = @intCast(b.nodes.items.len);
             try b.nodes.append(b.gpa, .{});
+            var cat_ofs: u32 = 0;
+            if (w.split.is_cat) {
+                cat_ofs = @intCast(b.cat_masks.items.len);
+                try b.cat_masks.appendSlice(b.gpa, &w.split.cat_mask);
+            }
             b.nodes.items[w.node] = .{
                 .feature = w.split.feature,
                 .threshold = w.split.threshold,
                 .missing_left = w.split.missing_left,
+                .is_cat = w.split.is_cat,
+                .cat_ofs = cat_ofs,
                 .is_leaf = false,
                 .left = li,
                 .right = ri,
@@ -682,7 +713,13 @@ pub const Builder = struct {
             });
         }
 
-        return .{ .nodes = try b.gpa.dupe(Node, b.nodes.items) };
+        const nodes = try b.gpa.dupe(Node, b.nodes.items);
+        errdefer b.gpa.free(nodes);
+        const masks: []u64 = if (b.cat_masks.items.len == 0)
+            &.{}
+        else
+            try b.gpa.dupe(u64, b.cat_masks.items);
+        return .{ .nodes = nodes, .cat_masks = masks };
     }
 
     /// Depthwise takes the oldest pending node (breadth-first); lossguide takes

@@ -16,7 +16,7 @@ def main():
     only = os.environ.get("ONLY")
     for name, label, obj, ds_extra in GRID:
         if only and name not in only.split(","): continue
-        for seed in (0,1,2):
+        for seed in [int(x) for x in os.environ.get("SEEDS","0,1,2").split(",")]:
             cmd = [binary,"cv",f"{ROOT}/bench/data/{name}.csv",f"--label={label}",
                    "--folds=5",f"--fold-seed={seed}",f"--objective={obj}",
                    *FIXED,*ds_extra,*extra,"--quiet=1"]
