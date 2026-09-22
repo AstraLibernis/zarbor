@@ -574,9 +574,26 @@ pub const Builder = struct {
                 for (j..n) |k| a[j][k] += @as(f64, gp.h) * x[j] * x[k];
             }
         }
-        for (0..n) |j| a[j][j] += b.cfg.lin_leaf_lambda;
+        // Standardise before the ridge. `a[j][j]` is `sum_h * var_j`, so a
+        // flat additive lambda means something different on a column measured
+        // in dollars than on one measured in people -- it is not a ridge at
+        // all, it is an arbitrary per-column shrinkage. Scaling each axis by
+        // its own weighted sd makes lambda comparable across columns, which
+        // is what `linear.zig` does to its design matrix for the same reason.
+        var sd: [max_path]f64 = undefined;
+        for (0..n) |j| {
+            const v = a[j][j] / sum_h;
+            sd[j] = if (v > 1e-30) @sqrt(v) else 0;
+        }
+        for (0..n) |j| {
+            if (sd[j] == 0) return 0; // constant within the leaf: no slope to fit
+            rhs[j] /= sd[j];
+            for (j..n) |k| a[j][k] /= (sd[j] * sd[k]);
+        }
+        for (0..n) |j| a[j][j] += b.cfg.lin_leaf_lambda * sum_h;
 
         if (!choleskySolve(&a, &rhs, n)) return 0;
+        for (0..n) |j| rhs[j] /= sd[j];
 
         var kept: u8 = 0;
         for (0..n) |j| {

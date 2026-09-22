@@ -498,6 +498,125 @@ test "a model carrying categorical subset splits round trips exactly" {
     for (before, after) |x, y| try testing.expectEqual(x, y);
 }
 
+fn countLinLeaves(b: *const model_mod.Bundle) usize {
+    var n: usize = 0;
+    for (b.trees) |t| for (t.nodes) |nd| {
+        if (nd.is_leaf and nd.n_lin != 0) n += 1;
+    };
+    return n;
+}
+
+test "linear leaves fire, stay off by default, and round trip exactly" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try synth(gpa, 3000, 13);
+    defer ds.deinit();
+
+    // Off by default: not one leaf carries a slope.
+    {
+        var schema = try data.Schema.fromDataset(gpa, &ds);
+        errdefer schema.deinit();
+        var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }, null);
+        defer res.model.deinit();
+        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        defer bundle.deinit();
+        try testing.expectEqual(@as(usize, 0), countLinLeaves(&bundle));
+    }
+
+    var schema = try data.Schema.fromDataset(gpa, &ds);
+    errdefer schema.deinit();
+    var res = try booster.train(gpa, pool, &ds, null, .{
+        .n_rounds = 20,
+        .max_depth = 4,
+        .linear_leaves = true,
+        .verbose_eval = 0,
+    }, null);
+    defer res.model.deinit();
+    var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+    defer bundle.deinit();
+    // Without this the round trip below would pass vacuously.
+    try testing.expect(countLinLeaves(&bundle) > 0);
+
+    const before = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(before);
+    bundle.predict(pool, &ds, before);
+
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+    var loaded = try model_mod.deserialise(gpa, bytes);
+    defer loaded.deinit();
+    try testing.expectEqual(countLinLeaves(&bundle), countLinLeaves(&loaded));
+
+    const after = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(after);
+    loaded.predict(pool, &ds, after);
+    for (before, after) |x, y| try testing.expectEqual(x, y);
+}
+
+test "a linear leaf beats its own constant leaf on the training objective" {
+    // The affine fit contains the constant fit as beta = 0, so it can only
+    // reduce training loss. If it does not, the solve is returning something
+    // that is not the optimum.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try synth(gpa, 4000, 17);
+    defer ds.deinit();
+
+    var loss: [2]f64 = undefined;
+    for ([2]bool{ false, true }, 0..) |lin, i| {
+        var res = try booster.train(gpa, pool, &ds, null, .{
+            .n_rounds = 40,
+            .max_depth = 4,
+            .linear_leaves = lin,
+            .verbose_eval = 0,
+        }, null);
+        defer res.model.deinit();
+        const out = try gpa.alloc(f32, ds.n_rows);
+        defer gpa.free(out);
+        res.model.predict(pool, &ds, out);
+        var acc: f64 = 0;
+        for (out, ds.labels) |p, y| {
+            const q = @min(@max(p, 1e-7), 1 - 1e-7);
+            acc -= @as(f64, y) * @log(q) + (1 - @as(f64, y)) * @log(1 - q);
+        }
+        loss[i] = acc / @as(f64, @floatFromInt(ds.n_rows));
+    }
+    try testing.expect(loss[1] < loss[0]);
+}
+
+test "a linear leaf is invariant to rescaling a column" {
+    // Multiplying a numeric column by 1000 changes no bin -- binning is by
+    // rank -- so the model must not move. It is the sharpest available check
+    // that the ridge is applied to standardised axes and the coefficients are
+    // brought back out of them: skip either step and the fitted slopes come
+    // out scaled by 1000 and the predictions change.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+
+    var out: [2][]f32 = undefined;
+    for ([2]f32{ 1.0, 1000.0 }, 0..) |scale, i| {
+        var ds = try synth(gpa, 3000, 23);
+        defer ds.deinit();
+        for (ds.edges[0]) |*e| e.* *= scale;
+
+        var res = try booster.train(gpa, pool, &ds, null, .{
+            .n_rounds = 30,
+            .max_depth = 4,
+            .linear_leaves = true,
+            .verbose_eval = 0,
+        }, null);
+        defer res.model.deinit();
+        out[i] = try gpa.alloc(f32, ds.n_rows);
+        res.model.predict(pool, &ds, out[i]);
+    }
+    defer for (out) |o| gpa.free(o);
+
+    for (out[0], out[1]) |x, y| try testing.expectApproxEqAbs(x, y, 1e-4);
+}
+
 test "gbdt survives a save/load round trip exactly" {
     try roundTrip(.gbdt);
 }

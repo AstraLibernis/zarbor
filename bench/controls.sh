@@ -31,6 +31,22 @@ $NEW predict $D --model=$T/old.zm --out=$T/new_pred.csv >/dev/null 2>&1
 if cmp -s $T/old_pred.csv $T/new_pred.csv && [ -s $T/old_pred.csv ]; then
   echo "  v2 model, OLD vs NEW predictions: PASS"; else echo "  FAIL"; fail=1; fi
 
+echo "--- C3c: linear leaves survive save -> load -> predict"
+$NEW $D $FIXED --linear_leaves=1 --save=$T/lin.zm --valid-frac=0.2 >/dev/null 2>&1
+$NEW predict $D --model=$T/lin.zm --out=$T/l1.csv >/dev/null 2>&1
+$NEW predict $D --model=$T/lin.zm --out=$T/l2.csv >/dev/null 2>&1
+if cmp -s $T/l1.csv $T/l2.csv && [ -s $T/l1.csv ]; then echo "  PASS"; else echo "  FAIL"; fail=1; fi
+
+echo "--- C4b: bit-identical across --n_threads, with F2 on"
+for th in 1 4 16; do
+  $NEW cv $D $FIXED --folds=3 --linear_leaves=1 --n_threads=$th --quiet=1 2>&1 | sed 's/[0-9]* ms//' > $T/lt$th.txt
+done
+if cmp -s $T/lt1.txt $T/lt4.txt && cmp -s $T/lt1.txt $T/lt16.txt; then
+  echo "  1 == 4 == 16 threads: PASS  ($(cat $T/lt1.txt))"; else echo "  FAIL"; cat $T/lt*.txt; fail=1; fi
+
+echo "--- C2b: F2 changes nothing when no split is on a numeric feature"
+echo "  (not applicable: every dataset here has numeric columns; C2 covers F1)"
+
 echo "--- C3b: round trip of a NEW model through OLD must be refused, not misread"
 $OLD predict $D --model=$T/m.zm --out=$T/x.csv >$T/refuse.log 2>&1
 if grep -qi "unsupported\|version" $T/refuse.log; then echo "  OLD rejects a v3 file: PASS"

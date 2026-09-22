@@ -1,0 +1,15 @@
+F2-SCALED	california	0	    3.08	oof     0.450405   mean 0.450342   sd 0.007505   3068 ms
+F2-SCALED	california	1	    2.87	oof     0.448594   mean 0.448581   sd 0.003477   2863 ms
+F2-SCALED	california	2	    2.86	oof     0.446677   mean 0.446531   sd 0.011415   2856 ms
+F2-SCALED	adult	0	    2.30	oof     0.922841   mean 0.922909   sd 0.004295   2275 ms
+F2-SCALED	adult	1	    2.29	oof     0.923211   mean 0.923250   sd 0.001824   2262 ms
+F2-SCALED	adult	2	    2.27	oof     0.922707   mean 0.922746   sd 0.001848   2250 ms
+F2-SCALED	bank	0	    2.66	oof     0.935111   mean 0.935196   sd 0.004899   2638 ms
+F2-SCALED	bank	1	    2.64	oof     0.934825   mean 0.934850   sd 0.003035   2618 ms
+F2-SCALED	bank	2	    2.64	oof     0.934518   mean 0.934557   sd 0.002761   2615 ms
+F2-SCALED	ames	0	    1.15	oof     29334.760785   mean 29157.351626   sd 3221.340786   1141 ms
+F2-SCALED	ames	1	    1.16	oof     30639.521037   mean 30574.295951   sd 1998.168280   1154 ms
+F2-SCALED	ames	2	    1.14	oof     28060.756652   mean 27904.088609   sd 2961.064471   1130 ms
+F2-SCALED	housing	0	    2.09	oof     14.214448   mean 14.210761   sd 0.323731   2083 ms
+F2-SCALED	housing	1	    2.31	oof     14.368725   mean 14.363598   sd 0.383802   2302 ms
+F2-SCALED	housing	2	    2.27	oof     14.330382   mean 14.328126   sd 0.254277   2261 ms
