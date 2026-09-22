@@ -156,25 +156,22 @@ test "packed offsets never truncate a feature and stay cache-line aligned" {
     try testing.expect(rb.slotLen() * 3 < uniform);
 }
 
-test "gbdt learns the signal" {
+test "gbdt and random forest both learn the signal" {
+    // Against the shared fixture rather than two fresh fits. The assertion is
+    // that the model found the structure `synth` put there, and that does not
+    // need a model nobody else has looked at.
     const gpa = testing.allocator;
-    const pool = try Pool.init(gpa, 2);
-    defer pool.deinit();
-
-    var ds = try synth(gpa, 4000, 7);
-    defer ds.deinit();
-
-    var res = try booster.train(gpa, pool, &ds, null, .{
-        .n_rounds = 60,
-        .max_depth = 4,
-        .verbose_eval = 0,
-    }, null);
-    defer res.model.deinit();
-
-    const pred = try gpa.alloc(f32, ds.n_rows);
+    const f = try shared();
+    const pred = try gpa.alloc(f32, f.ds.n_rows);
     defer gpa.free(pred);
-    res.model.predictRaw(pool, &ds, pred);
-    try testing.expect(try aucOf(gpa, pred, ds.labels) > 0.90);
+
+    f.gbdt.predict(f.pool, &f.ds, pred);
+    try testing.expect(try aucOf(gpa, pred, f.ds.labels) > 0.90);
+
+    f.forest.predict(f.pool, &f.ds, pred);
+    try testing.expect(try aucOf(gpa, pred, f.ds.labels) > 0.90);
+    // A forest averages votes, so its output is already a probability.
+    for (pred) |p| try testing.expect(p >= 0.0 and p <= 1.0);
 }
 
 test "per-node feature sampling does not corrupt sibling subtraction" {
@@ -230,28 +227,16 @@ test "goss trains and keeps the raw scores of unsampled rows current" {
     try testing.expect(try aucOf(gpa, pred, ds.labels) > 0.90);
 }
 
-test "random forest learns the signal and predicts probabilities" {
-    const gpa = testing.allocator;
-    const pool = try Pool.init(gpa, 2);
-    defer pool.deinit();
-
-    var ds = try synth(gpa, 4000, 17);
-    defer ds.deinit();
-
+test "the forest defaults pick sqrt(p) features and the fixture honours them" {
+    // What this uniquely covered was `applyForestFeatureDefault`, not that a
+    // forest can learn -- the fixture asserts that. Keeping the defaults check
+    // and dropping the second fit of the same thing.
     var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 40, .verbose_eval = 0 };
     cfg.applyAlgoDefaults(&.{});
-    cfg.applyForestFeatureDefault(ds.n_features, &.{});
-
-    var res = try forest.train(gpa, pool, &ds, null, cfg, null);
-    defer res.model.deinit();
-
-    const pred = try gpa.alloc(f32, ds.n_rows);
-    defer gpa.free(pred);
-    res.model.predict(pool, &ds, pred);
-
-    try testing.expect(try aucOf(gpa, pred, ds.labels) > 0.88);
-    // A forest averages leaf means, so its output is already a probability.
-    for (pred) |v| try testing.expect(v >= 0.0 and v <= 1.0);
+    cfg.applyForestFeatureDefault(9, &.{});
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), cfg.colsample_bynode, 1e-6);
+    // A forest averages unshrunk trees, so shrinkage must be off.
+    try testing.expectEqual(@as(f32, 1.0), cfg.learning_rate);
 }
 
 test "linear model learns the signal and L1 drives coefficients to zero" {
@@ -291,6 +276,23 @@ const model_mod = @import("model.zig");
 
 /// Builds a Frame by hand so a test can control the dictionary order, which is
 /// the whole point of the schema.
+/// A two-column numeric frame: the column under test and a label.
+fn numericFrame(gpa: std.mem.Allocator, col: []const f32, lab: []const f32) !data.Frame {
+    const names = try gpa.alloc([]u8, 2);
+    names[0] = try gpa.dupe(u8, "x");
+    names[1] = try gpa.dupe(u8, "y");
+    const kinds = try gpa.alloc(data.ColumnKind, 2);
+    kinds[0] = .numeric;
+    kinds[1] = .numeric;
+    const values = try gpa.alloc([]f32, 2);
+    values[0] = try gpa.dupe(f32, col);
+    values[1] = try gpa.dupe(f32, lab);
+    const levels = try gpa.alloc([][]u8, 2);
+    levels[0] = &.{};
+    levels[1] = &.{};
+    return .{ .gpa = gpa, .n_rows = col.len, .names = names, .kinds = kinds, .values = values, .levels = levels };
+}
+
 fn frameWith(gpa: std.mem.Allocator, colours: []const []const u8, nums: []const f32) !data.Frame {
     const n = colours.len;
     var levels_list: std.ArrayList([]u8) = .empty;
@@ -365,56 +367,82 @@ test "applySchema maps categories by string, not by the new file's own ids" {
     try testing.expectEqual(@as(u8, 0), cat[3]); // mauve
 }
 
+
+// ---------------------------------------------------------------- fixtures
+//
+// One dataset and one model of each kind, trained once for the whole file.
+//
+// Every test used to build its own pool, its own data and its own model: 22
+// trainings across 25 tests, in a Debug build, which is where nearly all of
+// the suite's wall clock went. Most of those tests do not care how the model
+// was fitted -- they serialise it, blend it, corrupt its bytes, or read its
+// nodes. Those want *a* model, not a fresh one.
+//
+// Held in `std.heap.page_allocator` rather than `testing.allocator` on
+// purpose: the fixture outlives every test, and `testing.allocator` would
+// correctly report that as a leak. Nothing here is ever freed, which is what
+// a process-lifetime fixture is.
+const Fixture = struct {
+    pool: *Pool,
+    ds: data.Dataset,
+    gbdt: model_mod.Bundle,
+    forest: model_mod.Bundle,
+    linear: model_mod.Bundle,
+    lin_raw: linear.Linear,
+};
+
+var fixture: ?Fixture = null;
+
+fn shared() !*const Fixture {
+    if (fixture) |*f| return f;
+    const gpa = std.heap.page_allocator;
+    const pool = try Pool.init(gpa, 2);
+    var ds = try synth(gpa, 3000, 31);
+
+    var gb = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 25, .max_depth = 4, .verbose_eval = 0 }, null);
+    const a = try model_mod.fromBooster(gpa, &gb.model, try data.Schema.fromDataset(gpa, &ds));
+    gb.model.deinit();
+
+    var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
+    cfg.applyAlgoDefaults(&.{});
+    var rf = try forest.train(gpa, pool, &ds, null, cfg, null);
+    const b = try model_mod.fromForest(gpa, &rf.model, try data.Schema.fromDataset(gpa, &ds));
+    rf.model.deinit();
+
+    const lr = try linear.train(gpa, pool, &ds, null, .{ .algo = .linear, .lin_epochs = 60, .verbose_eval = 0 }, null);
+    const c = model_mod.Bundle{
+        .gpa = gpa,
+        .kind = .linear,
+        .schema = try data.Schema.fromDataset(gpa, &ds),
+        .objective = .logistic,
+        .lin = lr.model,
+    };
+
+    fixture = .{ .pool = pool, .ds = ds, .gbdt = a, .forest = b, .linear = c, .lin_raw = lr.model };
+    return &fixture.?;
+}
+
 fn roundTrip(kind: config.Algo) !void {
     const gpa = testing.allocator;
-    const pool = try Pool.init(gpa, 2);
-    defer pool.deinit();
+    const f = try shared();
+    const bundle: *const model_mod.Bundle = switch (kind) {
+        .gbdt => &f.gbdt,
+        .random_forest => &f.forest,
+        .linear => &f.linear,
+    };
 
-    var ds = try synth(gpa, 3000, 31);
-    defer ds.deinit();
-    var schema = try data.Schema.fromDataset(gpa, &ds);
-    errdefer schema.deinit();
-
-    var bundle: model_mod.Bundle = undefined;
-    var keep_linear: ?linear.Linear = null;
-    switch (kind) {
-        .gbdt => {
-            var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 25, .max_depth = 4, .verbose_eval = 0 }, null);
-            defer res.model.deinit();
-            bundle = try model_mod.fromBooster(gpa, &res.model, schema);
-        },
-        .random_forest => {
-            var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
-            cfg.applyAlgoDefaults(&.{});
-            var res = try forest.train(gpa, pool, &ds, null, cfg, null);
-            defer res.model.deinit();
-            bundle = try model_mod.fromForest(gpa, &res.model, schema);
-        },
-        .linear => {
-            const res = try linear.train(gpa, pool, &ds, null, .{ .algo = .linear, .lin_epochs = 60, .verbose_eval = 0 }, null);
-            keep_linear = res.model;
-            bundle = .{ .gpa = gpa, .kind = .linear, .schema = schema, .objective = .logistic, .lin = res.model };
-        },
-    }
-    defer {
-        if (keep_linear) |*l| {
-            l.deinit();
-            bundle.schema.deinit();
-        } else bundle.deinit();
-    }
-
-    const before = try gpa.alloc(f32, ds.n_rows);
+    const before = try gpa.alloc(f32, f.ds.n_rows);
     defer gpa.free(before);
-    bundle.predict(pool, &ds, before);
+    bundle.predict(f.pool, &f.ds, before);
 
-    const bytes = try model_mod.serialise(gpa, &bundle);
+    const bytes = try model_mod.serialise(gpa, bundle);
     defer gpa.free(bytes);
     var loaded = try model_mod.deserialise(gpa, bytes);
     defer loaded.deinit();
 
-    const after = try gpa.alloc(f32, ds.n_rows);
+    const after = try gpa.alloc(f32, f.ds.n_rows);
     defer gpa.free(after);
-    loaded.predict(pool, &ds, after);
+    loaded.predict(f.pool, &f.ds, after);
 
     // Bit-identical, not approximately equal: a saved model that drifts is a
     // model whose submitted predictions do not match the ones you validated.
@@ -438,6 +466,114 @@ fn countCatNodes(b: *const model_mod.Bundle) usize {
         if (!nd.is_leaf and nd.is_cat) n += 1;
     };
     return n;
+}
+
+test "cat_l2 penalises the children and not the parent" {
+    // The asymmetry is the whole point and it is easy to get wrong: adding
+    // cat_l2 to the parent score as well reads as the self-consistent choice,
+    // and cost 36% of the gain the categorical columns carry until LightGBM's
+    // source settled it. See docs/vs-lightgbm.md.
+    //
+    // Pinned by consequence rather than by a magic number. With the penalty on
+    // the children alone, a huge cat_l2 drives every categorical child score
+    // to nothing while the parent's stays put, so no categorical split can
+    // ever show a gain. Applied to both, the two move together and splits
+    // survive.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try synthWithCats(gpa, 3000, 29);
+    defer ds.deinit();
+
+    var counts: [2]usize = undefined;
+    for ([2]f32{ 0.0, 1e9 }, 0..) |l2, i| {
+        var schema = try data.Schema.fromDataset(gpa, &ds);
+        errdefer schema.deinit();
+        var res = try booster.train(gpa, pool, &ds, null, .{
+            .n_rounds = 15,
+            .max_depth = 4,
+            .cat_split = .optimal,
+            .cat_l2 = l2,
+            .verbose_eval = 0,
+        }, null);
+        defer res.model.deinit();
+        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        defer bundle.deinit();
+        counts[i] = countCatNodes(&bundle);
+    }
+    try testing.expect(counts[0] > 0);
+    try testing.expectEqual(@as(usize, 0), counts[1]);
+}
+
+test "catContains agrees with a linear scan, on every set it can hold" {
+    // The binary search a categorical split uses at prediction time. Nothing
+    // else in the suite could see it: making it return false unconditionally
+    // left every test passing, because a round trip compares a broken model
+    // against itself and a trained model simply routes every row right.
+    var prng: std.Random.DefaultPrng = .init(5);
+    const r = prng.random();
+    var ids: [hist.max_cat_ids]data.BinIdx = undefined;
+    for (0..200) |_| {
+        var present = [_]bool{false} ** 512;
+        const n = r.uintLessThan(usize, hist.max_cat_ids) + 1;
+        var k: usize = 0;
+        while (k < n) : (k += 1) present[r.uintLessThan(u32, 512)] = true;
+        var m: usize = 0;
+        for (present, 0..) |p, v| {
+            if (!p or m == hist.max_cat_ids) continue;
+            ids[m] = @intCast(v);
+            m += 1;
+        }
+        if (m == 0) continue;
+        for (0..512) |v| {
+            const bin: data.BinIdx = @intCast(v);
+            var want = false;
+            for (ids[0..m]) |x| want = want or x == bin;
+            try testing.expectEqual(want, hist.catContains(ids[0..m], bin));
+        }
+    }
+}
+
+test "greedy binning gives a dominant value its own bin; quantile does not" {
+    // The failure this guards is silent and expensive: on a column that is
+    // mostly one value a quantile rule spends its budget inside that mass and
+    // leaves the tail a handful of bins. On adult's capital-gain that was
+    // 0.0136 AUC against LightGBM, and no test could see it.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+
+    const n = 4000;
+    const vals = try gpa.alloc(f32, n);
+    defer gpa.free(vals);
+    const lab = try gpa.alloc(f32, n);
+    defer gpa.free(lab);
+    var prng: std.Random.DefaultPrng = .init(9);
+    const r = prng.random();
+    for (vals, lab) |*v, *l| {
+        v.* = if (r.float(f32) < 0.9) 0.0 else r.float(f32) * 1000.0;
+        l.* = if (v.* > 500) 1.0 else 0.0;
+    }
+
+    var used: [2]usize = undefined;
+    for ([2]config.BinPolicy{ .quantile, .greedy }, 0..) |policy, i| {
+        var f = try numericFrame(gpa, vals, lab);
+        defer f.deinit();
+        var ds = try data.quantise(gpa, pool, &f, .{ .bin_policy = policy, .max_bin = 256 }, null, &.{});
+        defer ds.deinit();
+        var seen = [_]bool{false} ** 300;
+        var c: usize = 0;
+        for (ds.columnNarrow(0), vals) |b, v| {
+            if (v > 0 and !seen[b]) {
+                seen[b] = true;
+                c += 1;
+            }
+        }
+        used[i] = c;
+    }
+    // Quantile collapses the tail onto a few bins; greedy spends the budget there.
+    try testing.expect(used[1] > used[0] * 4);
+    try testing.expect(used[1] > 100);
 }
 
 test "optimal categorical splits actually fire, and ordinal ones never do" {
@@ -635,53 +771,40 @@ test "linear survives a save/load round trip exactly" {
 
 test "blend weights behave, and mixing model kinds works" {
     const gpa = testing.allocator;
-    const pool = try Pool.init(gpa, 2);
-    defer pool.deinit();
+    const f = try shared();
+    const a = &f.gbdt;
+    const b = &f.forest;
+    const n = f.ds.n_rows;
 
-    var ds = try synth(gpa, 2500, 37);
-    defer ds.deinit();
-
-    var gb = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }, null);
-    defer gb.model.deinit();
-    var a = try model_mod.fromBooster(gpa, &gb.model, try data.Schema.fromDataset(gpa, &ds));
-    defer a.deinit();
-
-    var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
-    cfg.applyAlgoDefaults(&.{});
-    var rf = try forest.train(gpa, pool, &ds, null, cfg, null);
-    defer rf.model.deinit();
-    var b = try model_mod.fromForest(gpa, &rf.model, try data.Schema.fromDataset(gpa, &ds));
-    defer b.deinit();
-
-    const pa = try gpa.alloc(f32, ds.n_rows);
+    const pa = try gpa.alloc(f32, n);
     defer gpa.free(pa);
-    const pb = try gpa.alloc(f32, ds.n_rows);
+    const pb = try gpa.alloc(f32, n);
     defer gpa.free(pb);
-    const mix = try gpa.alloc(f32, ds.n_rows);
+    const mix = try gpa.alloc(f32, n);
     defer gpa.free(mix);
-    a.predict(pool, &ds, pa);
-    b.predict(pool, &ds, pb);
+    a.predict(f.pool, &f.ds, pa);
+    b.predict(f.pool, &f.ds, pb);
 
-    const refs = [_]*const model_mod.Bundle{ &a, &b };
+    const refs = [_]*const model_mod.Bundle{ a, b };
 
     // All the weight on one model reproduces that model.
-    try model_mod.blend(gpa, pool, &refs, &.{ 1, 0 }, &ds, mix);
+    try model_mod.blend(gpa, f.pool, &refs, &.{ 1, 0 }, &f.ds, mix);
     for (pa, mix) |x, y| try testing.expectApproxEqAbs(x, y, 1e-6);
 
     // Equal weights give the mean of a booster's probabilities and a forest's
     // — different kinds, one scale, which is the point of the interface.
-    try model_mod.blend(gpa, pool, &refs, &.{ 1, 1 }, &ds, mix);
+    try model_mod.blend(gpa, f.pool, &refs, &.{ 1, 1 }, &f.ds, mix);
     for (pa, pb, mix) |x, y, m| try testing.expectApproxEqAbs((x + y) / 2.0, m, 1e-6);
 
     // Weights are normalised, so 3:1 and 30:10 agree.
-    const m2 = try gpa.alloc(f32, ds.n_rows);
+    const m2 = try gpa.alloc(f32, n);
     defer gpa.free(m2);
-    try model_mod.blend(gpa, pool, &refs, &.{ 3, 1 }, &ds, mix);
-    try model_mod.blend(gpa, pool, &refs, &.{ 30, 10 }, &ds, m2);
+    try model_mod.blend(gpa, f.pool, &refs, &.{ 3, 1 }, &f.ds, mix);
+    try model_mod.blend(gpa, f.pool, &refs, &.{ 30, 10 }, &f.ds, m2);
     for (mix, m2) |x, y| try testing.expectApproxEqAbs(x, y, 1e-6);
 
-    try testing.expectError(error.WeightCountMismatch, model_mod.blend(gpa, pool, &refs, &.{1}, &ds, mix));
-    try testing.expectError(error.WeightsSumToZero, model_mod.blend(gpa, pool, &refs, &.{ 0, 0 }, &ds, mix));
+    try testing.expectError(error.WeightCountMismatch, model_mod.blend(gpa, f.pool, &refs, &.{1}, &f.ds, mix));
+    try testing.expectError(error.WeightsSumToZero, model_mod.blend(gpa, f.pool, &refs, &.{ 0, 0 }, &f.ds, mix));
 }
 
 test "a corrupt or truncated model file is rejected, not read past" {
