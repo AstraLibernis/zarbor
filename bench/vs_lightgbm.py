@@ -149,7 +149,8 @@ def main():
             lg_ref = lg[-1]                     # max_bin=255, the matched setting
             envelope = float(max(lg) - min(lg))  # what a binning choice is worth
 
-            extra = ["--cat_split=optimal", "--max_cat_levels=4096"]
+            extra = ["--cat_split=optimal", "--max_cat_levels=4096",
+                     "--bin_policy=greedy", "--min_data_in_bin=3"]
             if not keep_cats:
                 extra += drop_flags(df, label)
             za, err = run_zarbor(df, label, objective, extra)
@@ -164,7 +165,8 @@ def main():
 
             # Negative control, only where there are categoricals to get wrong.
             if keep_cats and cats == "auto":
-                zo, _ = run_zarbor(df, label, objective, ["--cat_split=ordinal"])
+                zo, _ = run_zarbor(df, label, objective,
+                                   ["--cat_split=ordinal", "--bin_policy=greedy"])
                 if zo is not None:
                     g2 = abs(zo - lg_ref)
                     detect = "detects it" if g2 > gap else "NO SIGNAL"

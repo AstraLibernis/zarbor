@@ -54,6 +54,11 @@ pub const BinPolicy = enum {
     quantile,
     /// Equal-width bins between min and max. Cheaper, worse on skewed data.
     uniform,
+    /// LightGBM's `GreedyFindBin`. Any distinct value carrying at least a
+    /// bin's worth of rows gets a bin to itself, and the remaining budget is
+    /// spread over what is left -- so a column that is 92% one value spends
+    /// its cuts on the other 8% instead of collapsing them all onto the mode.
+    greedy,
 };
 
 /// How rows are chosen for each tree.
@@ -219,6 +224,9 @@ pub const Config = struct {
 
     // ---- binning -----------------------------------------------------
     bin_policy: BinPolicy = .quantile,
+    /// Rows a bin must hold under `greedy` before a cut is placed after it.
+    /// LightGBM's `min_data_in_bin`.
+    min_data_in_bin: u32 = 3,
     /// Bins per feature. Capped at 256 because bins are stored as u8, which
     /// is what keeps the feature matrix inside L3.
     max_bin: u16 = 256,

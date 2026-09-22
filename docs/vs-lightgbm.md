@@ -30,7 +30,7 @@ gap that opens only when categoricals are present is in the categorical path.
 against LightGBM's optimal ones. If that does not widen the gap, the harness
 cannot detect a disagreement and its passes mean nothing.
 
-## Result
+## Result, before the parity work
 
 | dataset | metric | LightGBM | zarbor | gap | binning envelope | gap/envelope | |
 |---|---|---:|---:|---:|---:|---:|---|
@@ -113,3 +113,65 @@ be wrong.
 But `--algo=lightgbm` should not ship claiming parity until (1) is closed. A
 model named after another implementation that recovers two thirds of that
 implementation's gain is a misleading name.
+
+
+---
+
+# Result after fixing both
+
+`--cat_split=optimal --bin_policy=greedy`, same harness, same split:
+
+| dataset | metric | LightGBM | zarbor | gap | envelope | gap/env | |
+|---|---|---:|---:|---:|---:|---:|---|
+| california | rmse | 0.453516 | 0.454602 | 0.00109 | 0.00703 | 0.15 | agrees |
+| adult | auc | 0.928398 | 0.928496 | 0.00010 | 0.00016 | 0.63 | agrees |
+| adult, numeric only | auc | 0.874439 | 0.874262 | 0.00018 | 0.00045 | 0.39 | agrees |
+| bank | auc | 0.937388 | 0.937907 | 0.00052 | 0.00081 | 0.64 | agrees |
+| bank, numeric only | auc | 0.889693 | 0.889812 | 0.00012 | 0.00093 | 0.13 | agrees |
+| ames | rmse | 23936.1 | 23273.5 | 662.6 | 1063.8 | 0.62 | agrees |
+| ames, numeric only | rmse | 25996.9 | 26170.3 | 173.3 | 1467.1 | 0.12 | agrees |
+| housing | rmse | 13.1652 | 13.1644 | 0.00089 | 0.03104 | 0.03 | agrees |
+| housing, numeric only | rmse | 14.5347 | 14.5890 | 0.05429 | 0.36409 | 0.15 | agrees |
+
+Every row inside the envelope, and the ordinal control still widens the gap on
+all three categorical sets, so the harness has not simply gone blind.
+
+housing went from 18.7 envelopes to 0.03. adult, which disagreed with no
+categoricals in play at all, went from 29.7 to 0.39.
+
+## The second failure was binning, and the bisection found it in one step
+
+Splitting `adult` column by column:
+
+| column | LightGBM | zarbor quantile | zarbor greedy |
+|---|---:|---:|---:|
+| education-num | 0.71288 | 0.71288 | 0.71288 |
+| age | 0.70339 | 0.70379 | 0.70337 |
+| hours-per-week | 0.68601 | 0.68722 | 0.68577 |
+| fnlwgt | 0.51917 | 0.52994 | 0.53420 |
+| capital-loss | 0.56313 | 0.55014 | 0.56234 |
+| capital-gain | 0.62242 | 0.60882 | 0.62223 |
+| **all six** | **0.87444** | **0.86114** | **0.87426** |
+
+`education-num` matching to the digit was the clue: sixteen distinct values, so
+every value gets its own bin under any rule and there is nothing to disagree
+about. The damage was in `capital-gain` and `capital-loss`, both ~92% zeros.
+
+A quantile rule puts its cuts at fixed rank positions, so on such a column
+almost every cut lands inside the mode, dedups against its neighbour, and the
+budget collapses onto the few bins covering the 8% that carries the signal.
+LightGBM's `GreedyFindBin` gives any value holding at least a bin's worth of
+rows a bin to itself and recomputes the remaining budget over what is left.
+
+`fnlwgt` is the one column greedy binning does *not* improve (0.0108 → 0.0150
+against LightGBM). It is a census sampling weight with an AUC of 0.52 — noise —
+and zarbor sits above LightGBM there, which is fitting a little more of that
+noise. Recorded rather than explained away; it does not move the six-column
+result.
+
+## What stays off by default
+
+Both fixes are opt-in. `--cat_split=optimal` and `--bin_policy=greedy` change
+results, so making either the default would break the bit-identity that every
+earlier protocol in this repo checks against. They are what `--algo=lightgbm`
+will select.

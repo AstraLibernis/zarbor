@@ -447,6 +447,103 @@ pub fn binMidpoint(edges: []const f32, real_bin: usize) f32 {
     return 0.5 * (edges[real_bin - 1] + edges[real_bin]);
 }
 
+/// LightGBM's `GreedyFindBin` (v4.7.0, src/io/bin.cpp), which is the only
+/// part of the binning that a plain quantile rule gets badly wrong.
+///
+/// A quantile rule places its cuts at fixed rank positions. On a column that
+/// is 92% zeros -- `capital-gain` in the adult census set, say -- almost every
+/// cut lands inside that mass, dedups against its neighbour, and the whole
+/// budget collapses onto a handful of usable bins covering the 8% that
+/// carries the signal. Measured: 0.6088 AUC against LightGBM's 0.6224 on that
+/// column alone.
+///
+/// The fix is to notice the mode. Any distinct value holding at least a bin's
+/// worth of rows takes a bin to itself; the remaining budget is then recomputed
+/// over what is left, repeatedly, so the tail gets the resolution.
+///
+/// `present` must be sorted ascending. Cuts are inclusive upper bounds, which
+/// is what `lowerBound` below expects -- LightGBM stores midpoints between
+/// neighbouring distinct values, and the two assign every row to the same bin.
+fn greedyBins(
+    gpa: std.mem.Allocator,
+    present: []f32,
+    max_bin: usize,
+    min_data_in_bin: u32,
+    cuts: *std.ArrayList(f32),
+) !void {
+    std.sort.pdq(f32, present, {}, lessF32);
+    const total: usize = present.len;
+    if (total == 0 or max_bin < 2) return;
+
+    // Run-length encode into distinct values and their counts.
+    var distinct: std.ArrayList(f32) = .empty;
+    defer distinct.deinit(gpa);
+    var counts: std.ArrayList(usize) = .empty;
+    defer counts.deinit(gpa);
+    for (present) |v| {
+        if (distinct.items.len != 0 and distinct.items[distinct.items.len - 1] == v) {
+            counts.items[counts.items.len - 1] += 1;
+        } else {
+            try distinct.append(gpa, v);
+            try counts.append(gpa, 1);
+        }
+    }
+    const nd = distinct.items.len;
+    if (nd <= 1) return;
+
+    if (nd <= max_bin) {
+        // Every distinct value can have its own bin, subject to the floor.
+        var cur: usize = 0;
+        for (0..nd - 1) |i| {
+            cur += counts.items[i];
+            if (cur < min_data_in_bin) continue;
+            const val = distinct.items[i];
+            if (cuts.items.len != 0 and cuts.items[cuts.items.len - 1] >= val) continue;
+            try cuts.append(gpa, val);
+            cur = 0;
+        }
+        return;
+    }
+
+    var budget = max_bin;
+    if (min_data_in_bin > 0) budget = @max(1, @min(budget, total / min_data_in_bin));
+    var mean_bin_size = @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(budget));
+
+    var rest_bins: i64 = @intCast(budget);
+    var rest_rows: i64 = @intCast(total);
+    const big = try gpa.alloc(bool, nd);
+    defer gpa.free(big);
+    for (0..nd) |i| {
+        big[i] = @as(f64, @floatFromInt(counts.items[i])) >= mean_bin_size;
+        if (big[i]) {
+            rest_bins -= 1;
+            rest_rows -= @intCast(counts.items[i]);
+        }
+    }
+    if (rest_bins > 0) mean_bin_size = @as(f64, @floatFromInt(rest_rows)) / @as(f64, @floatFromInt(rest_bins));
+
+    var n_bins: usize = 0;
+    var cur: usize = 0;
+    for (0..nd - 1) |i| {
+        if (!big[i]) rest_rows -= @intCast(counts.items[i]);
+        cur += counts.items[i];
+        const c: f64 = @floatFromInt(cur);
+        const close = big[i] or c >= mean_bin_size or
+            (big[i + 1] and c >= @max(1.0, mean_bin_size * 0.5));
+        if (!close) continue;
+        const val = distinct.items[i];
+        if (cuts.items.len == 0 or cuts.items[cuts.items.len - 1] < val) try cuts.append(gpa, val);
+        n_bins += 1;
+        if (n_bins >= budget - 1) break;
+        cur = 0;
+        if (!big[i]) {
+            rest_bins -= 1;
+            if (rest_bins > 0)
+                mean_bin_size = @as(f64, @floatFromInt(rest_rows)) / @as(f64, @floatFromInt(rest_bins));
+        }
+    }
+}
+
 fn lowerBound(edges: []const f32, v: f32) usize {
     var lo: usize = 0;
     var hi: usize = edges.len;
@@ -471,6 +568,7 @@ const BinCtx = struct {
     means: [][]f32,
     n_rows: usize,
     max_bin: u16,
+    min_data_in_bin: u32,
     /// Cardinality above which a categorical column is refused. Not a limit of
     /// the index type -- it stops a free-text column becoming a 50,000-bin
     /// histogram that would be legal and unusable.
@@ -544,6 +642,7 @@ const BinCtx = struct {
                     try cuts.append(self.gpa, c);
                 }
             },
+            .greedy => try greedyBins(self.gpa, present, budget, self.min_data_in_bin, &cuts),
             .uniform => {
                 var lo = present[0];
                 var hi = present[0];
@@ -892,6 +991,7 @@ pub fn quantise(
         .means = means,
         .n_rows = src.n_rows,
         .max_cat_levels = cfg.max_cat_levels,
+        .min_data_in_bin = cfg.min_data_in_bin,
         .max_bin = cfg.max_bin,
         .policy = cfg.bin_policy,
         .failed = .init(false),
