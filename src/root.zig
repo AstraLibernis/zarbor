@@ -1,6 +1,7 @@
 //! zmodels — gradient-boosted decision trees for binned tabular data.
 
 pub const config = @import("config.zig");
+pub const csv = @import("csv.zig");
 pub const data = @import("data.zig");
 pub const hist = @import("hist.zig");
 pub const metric = @import("metric.zig");

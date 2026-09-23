@@ -526,8 +526,10 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
     }
 
     // --- bin the new data under the first model's schema ---
+    const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     defer frame.deinit();
+    const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     // Decode the holdout's target with the *model's* class order. This file
     // built its own dictionary by first appearance, so reading its raw ids
@@ -556,6 +558,7 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
         return err;
     };
     defer ds.deinit();
+    const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     // Blending models trained on different schemas would silently score the
     // same column against different bin edges.
@@ -578,8 +581,18 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
         for (bundles.items, refs) |*b, *r| r.* = b;
         try model_mod.blend(gpa, pool, refs, weights, &ds, preds);
     }
+    const t_pred = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
-    try out.print("rows    {d}\nmodels  {d}\n", .{ ds.n_rows, bundles.items.len });
+    // Broken out because scoring an implementation against another one means
+    // knowing which phase a difference is in. Reading the CSV is not the
+    // model's work and should not be charged to it; see docs/arena.md.
+    try out.print("rows    {d}\nmodels  {d}\nread    {d} ms\nbin     {d} ms\npredict {d} ms\n", .{
+        ds.n_rows,
+        bundles.items.len,
+        @divTrunc(t_read - t0, 1_000_000),
+        @divTrunc(t_bin - t_read, 1_000_000),
+        @divTrunc(t_pred - t_bin, 1_000_000),
+    });
 
     if (ds.labels.len == ds.n_rows and ds.labels.len != 0) {
         switch (bundles.items[0].objective) {
