@@ -68,7 +68,7 @@ figures in ms.
 | **C** zarbor | 137 | 45 | 582 | 33 | **660** | **797** |
 | lightgbm-goss | 177 | 0 | 633 | 52 | 685 | 861 |
 | | | | | | *1.04x* | *1.08x* |
-| **D** zarbor | 135 | 45 | 5022 | 279 | **5346** | **5481** |
+| **D** zarbor | 135 | 45 | 5022 | 279* | **5346** | **5481** |
 | sklearn capped | 177 | 178 | 6193 | 87 | 6459 | 6635 |
 | | | | | | *1.21x* | *1.21x* |
 | sklearn uncapped | 177 | 178 | 8955 | 410 | 9543 | 9720 |
@@ -92,13 +92,17 @@ Against XGBoost it is 1.08x; against LightGBM it is behind. Against sklearn's
 logistic regression it is 5.93x on model work, and against sklearn's forest
 1.21x capped, 1.79x uncapped.
 
-**Prediction is where the forest lags.** 279 ms against sklearn's 87 ms with
-the leaf cap matched — the one phase where zarbor is beaten more than
-threefold. 300 trees of up to 1024 leaves is a large model to walk, and
-zarbor's traversal is not doing it as well as sklearn's. Against the uncapped
-sklearn forest zarbor wins (279 against 410), but that model is much bigger,
-so it is not the same comparison. This is the clearest single lead for
-optimisation work in the repo.
+**Prediction is where the forest lagged.** \* 279 ms against sklearn's 87 ms
+with the leaf cap matched — the one phase where zarbor was beaten more than
+threefold, and the clearest optimisation lead the phase breakdown produced.
+
+It was loop order, not traversal cost. Every predict loop walked all trees for
+one row before moving to the next; a 300 x 1024-leaf forest is ~19.7 MB of
+nodes, so each row scattered across 300 arrays that never stayed cached.
+Trees-outer brings it to **109 ms** (1.25x behind sklearn rather than 3.2x),
+bit-identically, and took the gbdt path from 38 to 27 ms. Fixed in `38ea68f`;
+the table above is the pre-fix measurement, kept because the rest of the row
+was measured with it.
 
 **Binning is cheap and steady.** 44-47 ms across every model, against pandas'
 178-224 ms for the one-hot and scaling sklearn needs. The prepare column is
@@ -171,6 +175,65 @@ resolution is 1.6e-5 AUC. That is the strongest evidence here for the shared
 data path: the binning built for the trees costs the linear model essentially
 nothing and saves it the 224 ms sklearn spends on one-hot and scaling.
 
+## F2: linear leaves against LightGBM's `linear_tree`
+
+`docs/RESULTS.md` measured linear leaves against zarbor's own constant-leaf
+baseline. This is the check that was missing: against the other
+implementation of the same idea. `bench/arena/linear_leaves.py`, california,
+leafwise, 200 rounds.
+
+Both sides are swept over their leaf-ridge constant rather than compared at
+one value, because the two constants are not on a known common scale and
+fixing one for the reference would be handicapping it.
+
+| leaf ridge | zarbor | fit | lightgbm | fit |
+|---|---:|---:|---:|---:|
+| *constant leaves* | *0.463863* | *150 ms* | *0.463146* | *55 ms* |
+| 0.0 | 0.461969 | 198 | 0.865378 | 72 |
+| 0.01 | 0.459636 | 203 | 0.465859 | 69 |
+| 0.1 | **0.457560** | 208 | **1.233684** | 71 |
+| 1.0 | 0.458140 | 203 | 0.530663 | 73 |
+| 10.0 | 0.464866 | 210 | 0.525743 | 75 |
+| 100.0 | 0.466649 | 224 | 0.463984 | 73 |
+| 1000.0 | 0.464295 | 223 | 0.461242 | 73 |
+
+**Both help, zarbor by more.** zarbor's best beats its own constant-leaf
+baseline by 0.006303; LightGBM's beats its own by 0.001904, and only at
+`linear_lambda=1000` where the linear terms are shrunk nearly away.
+
+**The response to the constant is the more interesting result.** zarbor's is
+smooth and unimodal with an optimum at 0.1, spanning 0.009 RMSE across four
+orders of magnitude of the ridge. LightGBM's spans 0.772 -- **85x wider** --
+and is not monotonic in either direction: 0.01 gives 0.4659, 0.1 gives
+1.2337, 1.0 gives 0.5307. Its worst cell is 2.66x its own baseline where
+zarbor's is 1.01x.
+
+That spike is reproducible, not noise: identical to six decimals across
+`random_state` 0, 1 and 2, which is expected since neither side samples rows
+or features here.
+
+A regularisation constant should not behave like that, and this repo has
+argued the same thing in the opposite direction before -- `docs/vs-lightgbm.md`
+treated a non-monotonic response to `cat_min_group` as evidence that zarbor's
+*mechanism* was wrong rather than its constant, and that reading turned out to
+be right. The same reasoning points at conditioning in LightGBM's leaf solve
+here. `docs/linear-leaves.md` records that zarbor centres each feature on its
+within-leaf mean before the Cholesky precisely because the raw system "has a
+condition number in the billions and the Cholesky is meaningless in f32", and
+`db7dde7` made the ridge scale-invariant and tested that it is.
+
+**Stated as what it is:** one dataset, one parameter swept, and no inspection
+of LightGBM's source. It is evidence that zarbor's leaf solve is better
+conditioned than LightGBM's on this data, not a general claim about the two
+implementations. What it does settle is that linear leaves are not merely
+"zarbor helping itself on california" -- the feature reaches a better optimum
+than the reference implementation of the same idea, and reaches it without
+the reference's instability.
+
+**Cost, unchanged from RESULTS.md:** 1.32-1.49x the fit time (150 -> 198-224
+ms), against LightGBM's 1.25-1.36x (55 -> 69-75 ms). Similar relative
+overhead; zarbor is simply slower overall on a set this small.
+
 ## Summary
 
 - Two parity rows inside their noise floor, one family row agreeing to 1.6e-5,
@@ -180,5 +243,8 @@ nothing and saves it the 224 ms sklearn spends on one-hot and scaling.
   leads sklearn's forest by 1.21x and its logistic regression by 5.93x.
 - The parser is 1.31x faster than pandas and is the reason the LightGBM
   comparison is level end-to-end despite the fit being behind.
-- Forest prediction, at 279 ms against sklearn's 87, is the largest single
-  deficit measured and the clearest place to optimise next.
+- Forest prediction was 279 ms against sklearn's 87. Fixed in `38ea68f` by
+  reversing the predict loop to trees-outer: **109 ms**, bit-identical
+  output. The gbdt path went 38 -> 27 ms with it.
+- Linear leaves reach a better optimum than LightGBM's `linear_tree` (0.4576
+  against 0.4612) and, unlike it, respond smoothly to their ridge constant.
