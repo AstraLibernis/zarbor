@@ -20,10 +20,31 @@ pub const Algo = enum {
 
 /// Loss function. Dispatched at comptime so the boosting loop inlines the
 /// exact gradient/hessian pair with no indirect call in the hot path.
+///
+/// With `--algo=linear` this choice *is* the choice of model, and the two it
+/// selects are the two standard simple models every library ships:
+///
+///     --objective=logistic        LOGISTIC REGRESSION   (binary classifier)
+///     --objective=squared_error   LINEAR REGRESSION     (ordinary least squares)
+///
+/// They are the same machinery -- a weighted sum of features -- differing in
+/// the loss and in whether a sigmoid link is applied to the output. See
+/// `Config.modelName`, which prints the name at train time, and
+/// docs/linear-solvers.md.
 pub const Objective = enum {
-    /// Binary logistic. Raw scores are log-odds; predictions are sigmoid(raw).
+    /// Binary logistic / cross-entropy. Raw scores are log-odds; predictions
+    /// are sigmoid(raw).
+    ///
+    /// With `--algo=linear`: **logistic regression**, i.e. scikit-learn's
+    /// `LogisticRegression`.
     logistic,
-    /// Squared error for regression. Hessian is constant 1.
+    /// Squared error for regression. Hessian is constant 1, which is why
+    /// `adam` converges on it in a few hundred epochs where logistic needs
+    /// tens of thousands.
+    ///
+    /// With `--algo=linear`: **linear regression** (ordinary least squares),
+    /// i.e. scikit-learn's `LinearRegression` -- becoming `Ridge` once
+    /// `lambda > 0`, `Lasso` once `alpha > 0`, and elastic net with both.
     squared_error,
 };
 
@@ -71,15 +92,19 @@ pub const Sampling = enum {
     goss,
 };
 
-/// How the linear model's coefficients are fitted.
+/// How the linear model's coefficients are fitted. Both minimise the *same*
+/// convex objective, so wherever both arrive they must agree -- measured, and
+/// the places they do not are in docs/linear-solvers.md.
 pub const LinSolver = enum {
-    /// Limited-memory BFGS, with OWL-QN's orthant handling when `alpha` > 0.
+    /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), with
+    /// **OWL-QN** (orthant-wise limited-memory quasi-Newton) when `alpha` > 0.
     /// Builds a curvature estimate from recent steps, so it reaches the
     /// optimum in tens of passes where a first-order method needs thousands.
     /// This is also what scikit-learn's LogisticRegression defaults to, which
     /// makes the two directly comparable.
     lbfgs,
-    /// Full-batch Adam with an L1 proximal step. Needs no objective
+    /// **Adam** (adaptive moment estimation), full batch, with an L1
+    /// proximal step. Needs no objective
     /// evaluation and so no line search, which makes each pass cheaper — but
     /// it takes far more of them to reach the same coefficients.
     adam,
@@ -267,6 +292,38 @@ pub const Config = struct {
 
     /// Apply the defaults that define each algorithm, for any field the user
     /// left at the shared default. Call once, before `validate`.
+    /// The standard name of the model this configuration fits, so the run
+    /// says what it is instead of making the reader reassemble it from
+    /// flags. `linear` is the case that needed it: `--objective` silently
+    /// switches between the two textbook simple models.
+    pub fn modelName(c: Config) []const u8 {
+        return switch (c.algo) {
+            .gbdt => switch (c.grow_policy) {
+                .depthwise => "gradient-boosted trees (depthwise, XGBoost-style)",
+                .lossguide => "gradient-boosted trees (leafwise, LightGBM-style)",
+            },
+            .random_forest => "random forest (bagged unshrunk trees)",
+            .linear => switch (c.objective) {
+                .logistic => if (c.alpha > 0 and c.lambda > 0)
+                    "logistic regression (elastic net)"
+                else if (c.alpha > 0)
+                    "logistic regression (L1 / lasso)"
+                else if (c.lambda > 0)
+                    "logistic regression (L2 / ridge)"
+                else
+                    "logistic regression (unpenalised)",
+                .squared_error => if (c.alpha > 0 and c.lambda > 0)
+                    "linear regression (elastic net)"
+                else if (c.alpha > 0)
+                    "linear regression (L1 / lasso)"
+                else if (c.lambda > 0)
+                    "linear regression (L2 / ridge)"
+                else
+                    "linear regression (ordinary least squares)",
+            },
+        };
+    }
+
     pub fn applyAlgoDefaults(c: *Config, explicit: []const []const u8) void {
         const set = struct {
             fn has(ex: []const []const u8, name: []const u8) bool {

@@ -205,6 +205,7 @@ pub fn main(init: std.process.Init) !void {
         \\data    {s}
         \\rows    {d}
         \\feats   {d}  (label "{s}")
+        \\model   {s}
         \\threads {d}
         \\build   {s}
         \\read    {d} ms
@@ -215,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
         full.n_rows,
         full.n_features,
         target,
+        cfg.modelName(),
         pool.workerCount(),
         // `zig build` defaults to Debug, and a Debug binary is ~8x slower
         // here. Printing the mode means a benchmark can never quietly measure
