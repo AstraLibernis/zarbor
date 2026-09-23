@@ -54,11 +54,12 @@ const PredictCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *PredictCtx = @ptrCast(@alignCast(ctx));
-        var r = begin;
-        while (r < end) : (r += 1) {
-            var acc: f32 = self.m.base_score;
-            for (self.m.trees.items) |t| acc += t.predictBinned(self.ds, r);
-            self.out[r] = acc;
+        const out = self.out[begin..end];
+        // Trees outer, rows inner; see the note in `model.zig`'s TreeCtx.
+        // Bit-exact: same trees, same order, same f32 rounding per row.
+        @memset(out, self.m.base_score);
+        for (self.m.trees.items) |t| {
+            for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
     }
 };

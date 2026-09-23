@@ -117,15 +117,24 @@ const TreeCtx = struct {
         const self: *TreeCtx = @ptrCast(@alignCast(ctx));
         const b = self.b;
         const inv: f32 = if (b.trees.len == 0) 0 else 1.0 / @as(f32, @floatFromInt(b.trees.len));
-        var r = begin;
-        while (r < end) : (r += 1) {
-            var acc: f32 = if (b.kind == .gbdt) b.base_score else 0;
-            for (b.trees) |t| acc += t.predictBinned(self.ds, r);
-            self.out[r] = switch (b.kind) {
-                .gbdt => if (b.objective == .logistic) booster.sigmoid(acc) else acc,
-                .forest => acc * inv,
-                .linear => unreachable,
-            };
+        const out = self.out[begin..end];
+
+        // Trees outer, rows inner, and the per-row `switch (b.kind)` hoisted
+        // out of the hot loop entirely. Bit-exact with the row-major order:
+        // every `out[r]` accumulates the same trees in the same sequence,
+        // rounding to f32 at each step exactly as a register accumulator did.
+        @memset(out, if (b.kind == .gbdt) b.base_score else 0);
+        for (b.trees) |t| {
+            for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
+        }
+        switch (b.kind) {
+            .gbdt => if (b.objective == .logistic) {
+                for (out) |*o| o.* = booster.sigmoid(o.*);
+            },
+            .forest => for (out) |*o| {
+                o.* *= inv;
+            },
+            .linear => unreachable,
         }
     }
 };

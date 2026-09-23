@@ -54,12 +54,22 @@ const PredictCtx = struct {
         const self: *PredictCtx = @ptrCast(@alignCast(ctx));
         const n = self.m.trees.items.len;
         const inv: f32 = if (n == 0) 0 else 1.0 / @as(f32, @floatFromInt(n));
-        var r = begin;
-        while (r < end) : (r += 1) {
-            var acc: f32 = 0;
-            for (self.m.trees.items) |t| acc += t.predictBinned(self.ds, r);
-            self.out[r] = acc * inv;
+        const out = self.out[begin..end];
+
+        // Trees outer, rows inner. The other order walks every tree for one
+        // row before moving on, and a 300 x 1024-leaf forest is ~19.7 MB of
+        // nodes -- so each row scattered across 300 separate arrays, none of
+        // which stayed cached. This way one tree's nodes (~65 KB) and the
+        // chunk's bins stay in L2 for the whole pass.
+        //
+        // Bit-exact with the row-major order: each `out[r]` still accumulates
+        // the same trees in the same sequence, rounding to f32 at each step
+        // exactly as the register accumulator did.
+        @memset(out, 0);
+        for (self.m.trees.items) |t| {
+            for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
+        for (out) |*o| o.* *= inv;
     }
 };
 
