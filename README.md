@@ -28,6 +28,14 @@ wrong: pandas' default converts 14 of that file's columns from a documented
 category to "unknown", while treating every marker as a level makes
 `MasVnrArea` a 328-level categorical and the file will not load at all.
 
+**The schema outranks the file at prediction time.** `predict` used to
+re-sniff column kinds from the file it was handed, even though the model had
+stored them. A slice can carry no usable evidence about a column while being
+valid data -- a 298-row holdout of House Prices where every `PoolQC` happened
+to be `NA` sniffed numeric where training had it categorical, and failed with
+`FeatureKindMismatch`. `readCsvHinted` pins the kinds the model names and
+sniffs the rest.
+
 `zgbdt profile <data.csv>` reports what is in a file without training on it --
 per column the kind, missing count, distinct values, min/median/max and a
 count past the Tukey outer fence; then a footer naming values that failed to
@@ -45,6 +53,20 @@ the linear design. Naming that state costs and buys nothing. The change is a
 **loading fix, not an accuracy fix**. See `docs/parsing.md`.
 
 ## Models
+
+**A missing value with no training examples goes to the larger child.** Bin 0
+holds missing and `bestSplit` scans each feature twice, once each way, so the
+direction is learned per split. Where a feature has no missing rows at a node
+both scans score identically, so the winner used to fall out of loop order
+(`missing_left = true`, always) -- and that flag is what routes a missing value
+at *prediction* time, where a column complete in training routinely has holes.
+Sending it to the larger child instead is the smaller bet. Measured on House
+Prices by blanking holdout cells only, in columns complete in training, 60
+seeds: at the competition's own rate the new build holds 0.13580 where the old
+drifts to 0.13596 (p = 0.005); at 5% blanked, 0.14381 against 0.16722; at 20%,
+0.17470 against 0.29577. The chosen thresholds are unchanged, so a file with
+no missing values scores bit-identically -- and skipping the redundant scan is
+12.3% faster on california, 10.1% on House Prices, 5.5% on adult.
 
 One core — histogram binning, categorical dictionaries, NaN-as-missing,
 L1+L2, row and feature sampling, a thread pool — because XGBoost and LightGBM

@@ -114,3 +114,74 @@ outside the inner one, and a flag that fires on a tenth of the data is not a
 flag.
 
 It is reported and not acted on. On house prices the tail is the data.
+
+## Where the parser and the model meet
+
+Two places they were deciding the same thing separately, found by testing the
+competition's own situation rather than by reading the code.
+
+### The schema outranks the file
+
+`predict` re-sniffed column kinds from the file it was given, even though the
+model had stored them at training time. A column's kind is inferred from
+evidence, and a slice of a file can carry no usable evidence about a column
+while being perfectly valid data.
+
+The case that found it: a 298-row holdout of House Prices in which every
+`PoolQC` happened to be `NA`. A column of nothing but missing markers is
+numeric-compatible, so it sniffed numeric where training had it categorical,
+and the prediction died with `FeatureKindMismatch`. Nothing was wrong with the
+data. Note that this became possible only once markers were recognised at all
+-- before, `NA` was an ordinary level and the column stayed categorical by
+accident.
+
+`readCsvHinted` takes the model's `names`/`kinds` and pins any column it
+names; the rest are sniffed as usual, because a prediction file may carry
+extras the model never saw and dropping those is the caller's job.
+
+### A default direction learned from nothing
+
+Bin 0 holds missing, and `bestSplit` scans each feature twice -- once sending
+missing left, once right -- so the direction is learned per split. Where a
+feature has **no** missing rows at a node, both scans score identically, so
+the second was recomputing the first and the winner fell out of `consider`
+keeping the first strictly-better candidate. `missing_left = true` won every
+time, by loop order.
+
+That flag is not inert: it is what routes a missing value at *prediction*
+time, and a column can be complete in training and have holes later. On House
+Prices fifteen columns are missing in test and never in train, so fifteen
+default directions were set by loop order.
+
+With no evidence the defensible choice is the larger child -- the side holding
+more of the node's distribution, so the smaller bet. Measured by training on
+80% of House Prices, blanking cells in the holdout only, and in only those
+columns complete in the training half (60 seeds, paired on both the split and
+the model):
+
+| share of cells blanked | old | new | diff | new wins | p |
+|---|---|---|---|---|---|
+| 0 (the holdout's own, ~0.00002) | 0.13579 | 0.13580 | +0.00001 | 18/60 | 0.33 |
+| **0.00025 (the competition's own rate)** | 0.13596 | **0.13580** | **-0.00016** | 33/60 | **0.005** |
+| 0.01 | 0.14201 | 0.13746 | -0.00455 | 59/60 | <0.001 |
+| 0.05 | 0.16722 | 0.14381 | -0.02341 | 60/60 | <0.001 |
+| 0.20 | 0.29577 | 0.17470 | -0.12107 | 60/60 | <0.001 |
+
+Read the second row against the first: at the competition's rate the new build
+scores **0.13580, the same as with no injected missingness at all**, while the
+old one has already drifted to 0.13596. The arbitrary direction starts costing
+immediately; the principled one does not. By 20% blanked the gap is 0.296
+against 0.175, which is the difference between a broken model and a working
+one.
+
+The win count is lower than the p-value suggests because at 0.00025 most seeds
+blank nothing at all and tie; 33 seeds improve, and essentially none regress.
+
+The gains are unchanged, so the chosen threshold is bit-identical; only the
+flag nothing could inform is decided differently. `california.csv` has no
+missing values at all and scores 0.449542 on both builds, which is the exact
+control.
+
+It is also **faster**, because the redundant second scan is skipped: 12.3% on
+california, 10.1% on House Prices, 5.5% on adult, at identical or
+near-identical scores.

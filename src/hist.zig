@@ -669,9 +669,26 @@ fn bestCatSplit(
 
 /// Best split for one node over `features`.
 ///
-/// Bin 0 holds the missing mass and is never itself a threshold. Each feature
-/// is scanned twice — once sending missing left, once right — which is how the
-/// default direction is learned per split rather than fixed in advance.
+/// Bin 0 holds the missing mass and is never itself a threshold. A feature
+/// with missing rows at this node is scanned twice — once sending missing
+/// left, once right — which is how the default direction is learned per split
+/// rather than fixed in advance.
+///
+/// A feature with **no** missing rows at this node is scanned once. Both
+/// directions score identically there (the missing bin contributes nothing to
+/// either side), so the second scan recomputes the same gains and the winner
+/// falls out of a tie-break: `consider` keeps the first strictly-better
+/// candidate, so `missing_left = true` won every time, chosen by loop order
+/// and not by evidence.
+///
+/// That flag is not inert. It is what routes a missing value at *prediction*
+/// time, and a column can be complete in training and have holes later --
+/// which is the normal case, not a corner one. On Kaggle's House Prices,
+/// fifteen columns are missing in the test half and never in the training
+/// half, so fifteen default directions were being set by loop order.
+///
+/// With no evidence, the defensible choice is the larger child: it is the
+/// side holding more of the node's distribution, so it is the smaller bet.
 pub fn bestSplit(
     bank: *const Bank,
     hist: []const Bin,
@@ -695,6 +712,21 @@ pub fn bestSplit(
         }
 
         const missing = h[0];
+
+        if (missing.n == 0) {
+            // One scan, and the direction comes from the split rather than
+            // from which loop ran first. The gains are unchanged, so the
+            // chosen threshold is bit-identical to before -- only the flag
+            // that nothing in training could inform is decided differently.
+            var acc: Bin = .{};
+            var b: usize = 1;
+            while (b + 1 < nb) : (b += 1) {
+                acc = acc.add(h[b]);
+                const right = total.sub(acc);
+                consider(&best, fid, @intCast(b), acc.n >= right.n, acc, right, parent_score, p);
+            }
+            continue;
+        }
 
         // missing -> left
         var acc = missing;

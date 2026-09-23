@@ -218,12 +218,52 @@ const ParseCtx = struct {
 /// is `max_bins`, checked in `binOne` after drops are applied.
 const max_levels: usize = 1 << 20;
 
+/// Column kinds that are already known, keyed by name.
+///
+/// The parser decides a column's kind by looking at the file, which is all it
+/// can do when nobody knows better. At prediction time somebody does: the
+/// model was trained on a schema and stored it. Letting the parser re-decide
+/// lets a file disagree with the model for reasons that have nothing to do
+/// with the column.
+///
+/// The case that found this: a 298-row holdout slice of House Prices in which
+/// every `PoolQC` happened to be `NA`. A column of nothing but missing markers
+/// is numeric-compatible, so it sniffed numeric where training had it
+/// categorical, and the prediction died with `FeatureKindMismatch` on data
+/// that was perfectly well formed. The column had not changed; the evidence
+/// available about it had.
+pub const KindHint = struct {
+    names: []const []const u8,
+    kinds: []const ColumnKind,
+
+    fn get(h: KindHint, name: []const u8) ?ColumnKind {
+        for (h.names, h.kinds) |n, k| {
+            if (std.mem.eql(u8, n, name)) return k;
+        }
+        return null;
+    }
+};
+
 pub fn readCsv(
     gpa: std.mem.Allocator,
     io: std.Io,
     pool: *Pool,
     path: []const u8,
     max_bytes: usize,
+) !Frame {
+    return readCsvHinted(gpa, io, pool, path, max_bytes, null);
+}
+
+/// `hint` pins the kind of any column it names; the rest are sniffed as usual.
+/// A column the hint does not mention is not an error -- the new file may
+/// carry extras the model never saw, and dropping them is the caller's job.
+pub fn readCsvHinted(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    pool: *Pool,
+    path: []const u8,
+    max_bytes: usize,
+    hint: ?KindHint,
 ) !Frame {
     const text = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -258,6 +298,20 @@ pub fn readCsv(
     errdefer gpa.free(kinds);
     @memset(kinds, .numeric);
     {
+        // A pinned column is not sniffed at all: the hint is evidence from
+        // the whole training set, and this file's prefix cannot outvote it.
+        const pinned = try gpa.alloc(bool, n_cols);
+        defer gpa.free(pinned);
+        @memset(pinned, false);
+        if (hint) |hh| {
+            for (0..n_cols) |c| {
+                if (hh.get(names[c])) |k| {
+                    kinds[c] = k;
+                    pinned[c] = true;
+                }
+            }
+        }
+
         var fields_buf: [512][]const u8 = undefined;
         const fields = fields_buf[0..n_cols];
         const limit = @min(n_rows, sniff_rows);
@@ -265,6 +319,7 @@ pub fn readCsv(
             const line = trimField(text[offs[i + 1]..offs[i + 2]]);
             const got = splitRow(line, fields);
             for (0..@min(got, n_cols)) |c| {
+                if (pinned[c]) continue;
                 if (kinds[c] == .numeric and !looksNumeric(fields[c])) kinds[c] = .categorical;
             }
         }
@@ -777,4 +832,67 @@ test "profile: quantiles, the outer fence, and degenerate columns" {
             else => unreachable,
         }
     }
+}
+
+// A slice of a file can carry no usable evidence about a column while being
+// perfectly valid data. Found on a 298-row holdout of House Prices where every
+// `PoolQC` was `NA`: markers are numeric-compatible, so the column sniffed
+// numeric where training had it categorical, and predicting on it failed with
+// `FeatureKindMismatch`. The fix is not to sniff harder -- it is to stop
+// sniffing a column somebody already knows the answer for.
+test "a schema hint outranks the evidence in the file" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Every value in `poolqc` is a missing marker, and `grade` holds digits --
+    // both read as numeric with nothing to say otherwise.
+    try tmp.dir.writeFile(io, .{ .sub_path = "hold.csv", .data =
+        \\poolqc,grade
+        \\NA,3
+        \\NA,1
+        \\NA,2
+        \\
+    });
+
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/hold.csv", .{tmp.sub_path});
+
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+
+    {
+        var unhinted = try readCsv(gpa, io, pool, path, 1 << 20);
+        defer unhinted.deinit();
+        try testing.expectEqual(ColumnKind.numeric, unhinted.kinds[0]);
+    }
+
+    const names = [_][]const u8{ "poolqc", "grade" };
+    const kinds = [_]ColumnKind{ .categorical, .numeric };
+    var hinted = try readCsvHinted(gpa, io, pool, path, 1 << 20, .{
+        .names = &names,
+        .kinds = &kinds,
+    });
+    defer hinted.deinit();
+
+    try testing.expectEqual(ColumnKind.categorical, hinted.kinds[0]);
+    try testing.expectEqual(ColumnKind.numeric, hinted.kinds[1]);
+    // Pinned categorical, so `NA` is interned as a level rather than dropped,
+    // which is what lets it match the level the model learned.
+    try testing.expectEqual(@as(usize, 1), hinted.levels[0].len);
+    try testing.expectEqualStrings("NA", hinted.levels[0][0]);
+
+    // A name the hint does not mention is still sniffed; extras in a
+    // prediction file are the caller's to drop, not the parser's to reject.
+    const partial = [_][]const u8{"poolqc"};
+    const partial_kinds = [_]ColumnKind{.categorical};
+    var mixed = try readCsvHinted(gpa, io, pool, path, 1 << 20, .{
+        .names = &partial,
+        .kinds = &partial_kinds,
+    });
+    defer mixed.deinit();
+    try testing.expectEqual(ColumnKind.categorical, mixed.kinds[0]);
+    try testing.expectEqual(ColumnKind.numeric, mixed.kinds[1]);
 }

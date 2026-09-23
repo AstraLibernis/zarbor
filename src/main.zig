@@ -550,8 +550,16 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
     }
 
     // --- bin the new data under the first model's schema ---
+    // The schema pins column kinds through the parse as well as the binning.
+    // Sniffing them again from this file lets a slice that happens to hold no
+    // usable values for a column -- every entry missing, say -- disagree with
+    // the model about what the column is.
+    const sch = &bundles.items[0].schema;
     const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
+    var frame = try csv.readCsvHinted(gpa, io, pool, path, max_bytes, .{
+        .names = sch.names,
+        .kinds = sch.kinds,
+    });
     defer frame.deinit();
     const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
