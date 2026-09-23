@@ -686,12 +686,19 @@ fn fitAdam(
     pr: *Problem,
     cfg: config.Config,
     log: ?*std.Io.Writer,
-) !u32 {
+) !Fit {
     const n = pr.theta.len;
     const np = n - 1;
 
     const g = try gpa.alloc(f64, n);
     defer gpa.free(g);
+    // Same quantity `fitLbfgs` records, so the 1e-3 ratio in `Fit.stalled()`
+    // is calibrated for both. Adam takes a proximal step rather than using
+    // the pseudo-gradient to move, but "how far did the gradient fall" is a
+    // question about the problem, not about the step rule.
+    const pg = try gpa.alloc(f64, n);
+    defer gpa.free(pg);
+    var fit: Fit = .{ .iters = 0 };
     const m1 = try gpa.alloc(f64, np);
     defer gpa.free(m1);
     const v1 = try gpa.alloc(f64, np);
@@ -708,6 +715,12 @@ fn fitAdam(
     while (epoch < cfg.lin_epochs) : (epoch += 1) {
         _ = pr.value(pr.theta, false);
         pr.grad(pr.theta, g);
+
+        pseudoGrad(pr, g, pg);
+        var gmax: f64 = 0;
+        for (pg) |v| gmax = @max(gmax, @abs(v));
+        if (epoch == 0) fit.g_first = gmax;
+        fit.g_last = gmax;
 
         const t: f64 = @floatFromInt(epoch + 1);
         const bc1 = 1.0 - std.math.pow(f64, beta1, t);
@@ -729,7 +742,7 @@ fn fitAdam(
             if (cfg.verbose_eval != 0 and
                 (epoch % (cfg.verbose_eval * 10) == 0 or epoch + 1 == cfg.lin_epochs))
             {
-                try wr.print("[{d:>4}] |dw|max={e:.3}\n", .{ epoch, max_delta });
+                try wr.print("[{d:>4}] |dw|max={e:.3}  |g|max={e:.3}\n", .{ epoch, max_delta, gmax });
                 try wr.flush();
             }
         }
@@ -738,7 +751,8 @@ fn fitAdam(
             break;
         }
     }
-    return epoch;
+    fit.iters = epoch;
+    return fit;
 }
 
 // ---------------------------------------------------------------- driver
@@ -823,9 +837,12 @@ pub fn train(
 
     const fit: Fit = switch (cfg.lin_solver) {
         .lbfgs => try fitLbfgs(gpa, &pr, cfg, log),
-        // Adam runs a fixed schedule with no line search, so it has no
-        // comparable notion of arriving; report the epochs and nothing more.
-        .adam => .{ .iters = try fitAdam(gpa, &pr, cfg, log) },
+        // Adam has no line search and so no "the search could not move"
+        // failure, which is why `converged` stays true for it. But "did the
+        // gradient actually come down" is answerable for any solver, and
+        // leaving it unanswered meant adam reported success while returning
+        // a coin-flip model on a badly scaled design.
+        .adam => try fitAdam(gpa, &pr, cfg, log),
     };
     const epochs = fit.iters;
 

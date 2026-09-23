@@ -325,7 +325,7 @@ pub fn main(init: std.process.Init) !void {
             defer res.model.deinit();
             try printTiming(out, io, t_train0, "epoch", res.epochs, res.valid_ns);
             try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
-            if (cfg.lin_solver == .lbfgs) {
+            {
                 if (res.fit.stalled()) {
                     // Silence here used to mean "fitted". It did not: with
                     // `--lin_standardize=false` on a column reaching 188,000,
@@ -342,6 +342,16 @@ pub fn main(init: std.process.Init) !void {
                         try out.writeAll(
                             \\        The usual cause is unscaled columns. Try
                             \\        --lin_standardize=true.
+                            \\
+                        );
+                    // Adam has no line search, so it cannot report "could not
+                    // move"; it just runs out of schedule. A gradient still
+                    // this large after the budget is as likely to mean the
+                    // budget was short as that the problem is ill-scaled.
+                    if (cfg.lin_solver == .adam)
+                        try out.writeAll(
+                            \\        adam needs far more epochs than lbfgs. Try
+                            \\        --lin_epochs=30000, or --lin_solver=lbfgs.
                             \\
                         );
                 } else {

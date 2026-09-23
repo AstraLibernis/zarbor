@@ -716,3 +716,37 @@ test "a solver stalled by bad scaling is not reported as converged" {
     defer good.model.deinit();
     try testing.expect(!good.fit.stalled());
 }
+
+test "adam reports a stall too, and does not cry wolf on a good design" {
+    // `fitAdam` used to return only an epoch count, so `Fit` kept its
+    // defaults: converged = true, g_first = g_last = 0. `stalled()` is
+    // `!converged or g_last > 1e-3 * g_first`, which for 0 > 0 is false --
+    // so adam could not be reported as stalled by construction, whatever it
+    // did. On the badly scaled design it diverges and returns a model at
+    // roughly AUC 0.5, silently.
+    const gpa = testing.allocator;
+    var f = try Fix.init(gpa, 3000, 31);
+    defer f.deinit();
+    for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
+
+    var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
+        .algo = .linear, .lin_solver = .adam, .lin_standardize = false,
+        .lin_epochs = 300, .verbose_eval = 0,
+    }, null);
+    defer bad.model.deinit();
+    try testing.expect(bad.fit.stalled());
+    // Gradients must actually be recorded now; the old code left them zero,
+    // and 0 > 1e-3 * 0 is false, which is how the silence happened.
+    try testing.expect(bad.fit.g_first > 0);
+    try testing.expect(bad.fit.g_last > 1e-3 * bad.fit.g_first);
+
+    // The other half: the same data, standardised, must not trip the check.
+    // Without this the test would pass against a `stalled()` that always
+    // returns true, which is the mutation that kills the lbfgs test above.
+    var good = try linear.train(gpa, f.pool, &f.ds, null, .{
+        .algo = .linear, .lin_solver = .adam, .lin_standardize = true,
+        .lin_epochs = 20_000, .verbose_eval = 0,
+    }, null);
+    defer good.model.deinit();
+    try testing.expect(!good.fit.stalled());
+}
