@@ -128,21 +128,29 @@ reference implementation means running it.
 `bench/arena/arena.py` asks the same question on one large, clean dataset
 (Kaggle S6E9, 668,665 x 13, zero nulls) and adds what a one-shot comparison
 cannot give: a noise floor per row, a referee that rescores the reloaded `.zm`
-rather than trusting either side's metric, and end-to-end as well as fit time.
-Protocol in `docs/PROTOCOL-arena.md`, results in `docs/arena.md`. Headline:
+rather than trusting either side's metric, and a per-phase time breakdown.
+Protocol in `docs/PROTOCOL-arena.md`, results in `docs/arena.md`.
 
-| model | reference | AUC gap | zarbor fit |
+Binning is charged to whoever does it: XGBoost and LightGBM bin inside
+`fit()`, zarbor bins before it, so the speed column is prepare + fit +
+predict on both sides. Parsing belongs to no model and is measured on its own.
+
+| model | reference | AUC gap | zarbor model work |
 |---|---|---:|---:|
-| gbdt depthwise | xgboost | 0.000118 (0.13 envelopes) | 1.21x faster |
-| gbdt leafwise | lightgbm | 0.000068 (0.06 envelopes) | 1.06x faster |
-| gbdt + GOSS | lightgbm | 0.001050 (**1.39 envelopes**) | 1.05x faster |
-| random_forest | sklearn | 0.004275 ahead | 1.23x faster |
-| linear | sklearn | 0.000014 | 4.67x faster |
+| gbdt depthwise | xgboost | 0.000046 (0.05 envelopes) | 1.08x faster |
+| gbdt leafwise | lightgbm | 0.000056 (0.05 envelopes) | **1.07x slower** |
+| gbdt + GOSS | lightgbm | 0.001074 (**1.42 envelopes**) | 1.04x faster |
+| random_forest | sklearn | 0.004197 ahead | 1.21x faster |
+| linear | sklearn | 0.000016 | 5.93x faster |
 
-Two findings worth the reading: GOSS is the one row outside its noise floor,
-characterised but not diagnosed; and zarbor's *fit* is faster than every
-reference while its *end-to-end* is not, because CSV parsing and binning
-consume the advantage on the models that fit in half a second.
+| | zarbor | reference |
+|---|---:|---:|
+| CSV parse, 40 MB | 135 ms | pandas 177 ms |
+
+Three findings worth the reading: GOSS is the one row outside its noise floor,
+characterised but not diagnosed; LightGBM's leafwise fit is genuinely faster
+than zarbor's once binning is charged symmetrically; and forest *prediction*
+(279 ms against sklearn's 87) is the largest single deficit measured.
 
 The two harnesses overlap and should be consolidated.
 

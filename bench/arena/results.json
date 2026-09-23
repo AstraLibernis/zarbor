@@ -2,187 +2,156 @@
   "A gbdt-depthwise": {
     "kind": "parity",
     "reference": "xgboost",
-    "zarbor_auc": 0.9413233550259406,
-    "zarbor_self_auc": 0.941323,
+    "zarbor_auc": 0.9413951087094808,
+    "zarbor_self_auc": 0.941395,
     "ref_auc": 0.9414411004084566,
-    "gap": 0.0001177453825160768,
+    "gap": 4.599169897578914e-05,
     "envelope": 0.0009177292187604325,
-    "zarbor_fit_ms": 498,
-    "ref_fit_ms": 633.7268860002041,
-    "zarbor_fit_range": [
-      489,
-      501
-    ],
-    "ref_fit_range": [
-      600.4019340002742,
-      687.7295459999004
-    ],
-    "zarbor_wall_s": 0.9929681949997757,
-    "zarbor_wall_range": [
-      0.9821008879998772,
-      0.9960480079998888
-    ],
-    "ref_work_s": 0.6723865110002407,
-    "ref_work_range": [
-      0.6380237140001555,
-      0.7333044699998936
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 1.0245233090004149
+    "zarbor": {
+      "read": 135,
+      "prepare": 44,
+      "fit": 518,
+      "predict": 39,
+      "model_total": 601,
+      "total": 736
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 0.0009699997463030741,
+      "fit": 612.5954099998125,
+      "predict": 37.72297000068647,
+      "model_total": 650.3193500002453,
+      "total": 827.0971620004275
+    }
   },
   "B gbdt-leafwise": {
     "kind": "parity",
     "reference": "lightgbm",
-    "zarbor_auc": 0.9413583384305186,
-    "zarbor_self_auc": 0.941358,
+    "zarbor_auc": 0.9413708011665753,
+    "zarbor_self_auc": 0.941371,
     "ref_auc": 0.9414266993219612,
-    "gap": 6.836089144257596e-05,
+    "gap": 5.589815538586951e-05,
     "envelope": 0.0011025856698022585,
-    "zarbor_fit_ms": 446,
-    "ref_fit_ms": 476.5288270000383,
-    "zarbor_fit_range": [
-      440,
-      453
-    ],
-    "ref_fit_range": [
-      470.3365909999775,
-      483.4371470001315
-    ],
-    "zarbor_wall_s": 0.9280348380002579,
-    "zarbor_wall_range": [
-      0.9187378890001128,
-      0.9328858180001589
-    ],
-    "ref_work_s": 0.525981487000081,
-    "ref_work_range": [
-      0.5193702589999702,
-      0.5323181050002859
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 0.8781182850002551
+    "zarbor": {
+      "read": 135,
+      "prepare": 47,
+      "fit": 492,
+      "predict": 31,
+      "model_total": 570,
+      "total": 705
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 0.0011299998732283711,
+      "fit": 483.31201700057136,
+      "predict": 48.82616600025358,
+      "model_total": 532.1393130006982,
+      "total": 708.9171250008803
+    }
   },
   "C gbdt-goss": {
     "kind": "parity",
     "reference": "lightgbm-goss",
-    "zarbor_auc": 0.9412964952763684,
-    "zarbor_self_auc": 0.941296,
+    "zarbor_auc": 0.9413207940914604,
+    "zarbor_self_auc": 0.941321,
     "ref_auc": 0.9402465819620223,
-    "gap": 0.0010499133143461181,
+    "gap": 0.0010742121294381457,
     "envelope": 0.0007572617702182871,
-    "zarbor_fit_ms": 593,
-    "ref_fit_ms": 627.0488680002018,
-    "zarbor_fit_range": [
-      592,
-      607
-    ],
-    "ref_fit_range": [
-      624.738676999641,
-      629.9936999998863
-    ],
-    "zarbor_wall_s": 1.0787226289999126,
-    "zarbor_wall_range": [
-      1.0762183890001324,
-      1.0930636899997808
-    ],
-    "ref_work_s": 0.678526796999904,
-    "ref_work_range": [
-      0.6762071959997229,
-      0.6819327609996435
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 1.0306635950000782
+    "zarbor": {
+      "read": 137,
+      "prepare": 45,
+      "fit": 582,
+      "predict": 33,
+      "model_total": 660,
+      "total": 797
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 0.001100000190490391,
+      "fit": 632.5677149998228,
+      "predict": 51.93869100003212,
+      "model_total": 684.5075060000454,
+      "total": 861.2853180002276
+    }
   },
   "D forest (1024-leaf cap)": {
     "kind": "family",
     "reference": "sklearn-rf-capped",
-    "zarbor_auc": 0.9391035923335027,
-    "zarbor_self_auc": 0.939104,
+    "zarbor_auc": 0.9390253981053334,
+    "zarbor_self_auc": 0.939025,
     "ref_auc": 0.9348288507859043,
-    "gap": 0.004274741547598437,
+    "gap": 0.004196547319429089,
     "envelope": null,
-    "zarbor_fit_ms": 4991,
-    "ref_fit_ms": 6228.911645999688,
-    "zarbor_fit_range": [
-      4823,
-      5058
-    ],
-    "ref_fit_range": [
-      6190.403891000187,
-      6248.925649999819
-    ],
-    "zarbor_wall_s": 5.955317932000071,
-    "zarbor_wall_range": [
-      5.799588474000302,
-      6.019002346999969
-    ],
-    "ref_work_s": 6.315301801999794,
-    "ref_work_range": [
-      6.277376511000057,
-      6.336210870999821
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 6.667438599999969
+    "zarbor": {
+      "read": 135,
+      "prepare": 45,
+      "fit": 5022,
+      "predict": 279,
+      "model_total": 5346,
+      "total": 5481
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 178.29532099949574,
+      "fit": 6193.033535999348,
+      "predict": 87.33296300033544,
+      "model_total": 6458.661819999179,
+      "total": 6635.439631999361
+    }
   },
   "D forest (uncapped ref)": {
     "kind": "family",
     "reference": "sklearn-rf-default",
-    "zarbor_auc": 0.9391035923335027,
-    "zarbor_self_auc": 0.939104,
+    "zarbor_auc": 0.9390253981053334,
+    "zarbor_self_auc": 0.939025,
     "ref_auc": 0.9335154860887239,
-    "gap": 0.00558810624477879,
+    "gap": 0.005509912016609442,
     "envelope": null,
-    "zarbor_fit_ms": 4991,
-    "ref_fit_ms": 9002.455487999669,
-    "zarbor_fit_range": [
-      4823,
-      5058
-    ],
-    "ref_fit_range": [
-      8882.505609999953,
-      9098.58450799993
-    ],
-    "zarbor_wall_s": 5.955317932000071,
-    "zarbor_wall_range": [
-      5.799588474000302,
-      6.019002346999969
-    ],
-    "ref_work_s": 9.411089703000016,
-    "ref_work_range": [
-      9.290100331999838,
-      9.507334894999985
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 9.76322650100019
+    "zarbor": {
+      "read": 135,
+      "prepare": 45,
+      "fit": 5022,
+      "predict": 279,
+      "model_total": 5346,
+      "total": 5481
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 177.7168319995326,
+      "fit": 8955.370093000056,
+      "predict": 409.7118359995875,
+      "model_total": 9542.798760999176,
+      "total": 9719.576572999358
+    }
   },
-  "E linear (raw scaled)": {
+  "E linear": {
     "kind": "family",
-    "reference": "sklearn-logreg-raw",
-    "zarbor_auc": 0.9377150111442234,
-    "zarbor_self_auc": 0.937715,
+    "reference": "sklearn-logreg",
+    "zarbor_auc": 0.9377134676788648,
+    "zarbor_self_auc": 0.937713,
     "ref_auc": 0.9377290894955645,
-    "gap": 1.4078351341151318e-05,
+    "gap": 1.5621816699784574e-05,
     "envelope": null,
-    "zarbor_fit_ms": 205,
-    "ref_fit_ms": 890.4237310002827,
-    "zarbor_fit_range": [
-      204,
-      209
-    ],
-    "ref_fit_range": [
-      794.0248499999143,
-      1080.972125000244
-    ],
-    "zarbor_wall_s": 0.44805848299984063,
-    "zarbor_wall_range": [
-      0.44606236399977206,
-      0.4555811549998907
-    ],
-    "ref_work_s": 0.8965877570003613,
-    "ref_work_range": [
-      0.7995760039998459,
-      1.0871266010003637
-    ],
-    "python_load_s": 0.35213679800017417,
-    "ref_end_to_end_s": 1.2487245550005355
+    "zarbor": {
+      "read": 135,
+      "prepare": 44,
+      "fit": 158,
+      "predict": 1,
+      "model_total": 203,
+      "total": 338
+    },
+    "ref": {
+      "read": 176.77781200018217,
+      "prepare": 223.73494699968433,
+      "fit": 974.6058089995131,
+      "predict": 5.517944000530406,
+      "model_total": 1203.8586999997278,
+      "total": 1380.63651199991
+    }
+  },
+  "_parser": {
+    "zarbor_ms": 135,
+    "pandas_ms": 176.77781200018217,
+    "ratio": 1.3094652740754233
   }
 }

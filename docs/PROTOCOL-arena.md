@@ -81,10 +81,17 @@ reimplementation to compare against rather than the original.
 
 ## Honest split
 
-One 80/20 stratified split, seed 20260923, materialised as a `__split` column
-in a single CSV that both sides read. zarbor takes `--split-col=__split`;
-Python masks on the same column. Neither side chooses its own split, and the
-column is dropped as a feature on both.
+One 80/20 stratified split, seed 20260923, written out as two files --
+`ev_train.csv` and `ev_valid_only.csv` -- that both sides read. Neither side
+chooses its own split.
+
+**Two files, not one file with a `__split` column.** The column version was
+used first and was wrong in a way worth recording: `--split-col` makes zarbor
+read the whole CSV and quantise it *before* splitting, so the bin edges are
+derived partly from validation rows. XGBoost and LightGBM bin inside `fit()`
+and therefore see training rows only. That is a real asymmetry -- small, but
+in zarbor's favour and invisible in the output. Separate files remove it.
+Measured cost of the fix: A moved 0.941323 -> 0.941395.
 
 ## Accuracy
 
@@ -106,23 +113,53 @@ deterministic without sampling.
 No envelope is claimed for D and E: the two constructions differ by design,
 so there is no "same computation" whose variation could bound a gap.
 
-## Speed
+## Speed, and the accounting that makes it fair
 
-Two numbers per cell, because they answer different questions.
+Timing is measured per phase, because a single number cannot say *where* an
+implementation leads or lags, and because the phase boundaries do not fall in
+the same place on both sides. Four phases:
 
-- **fit** — the training call alone. zarbor reports its own `fit` line, which
-  excludes CSV parsing, binning and validation scoring; Python times `.fit()`
-  on an already-loaded frame. This is the algorithm.
-- **end-to-end** — process wall clock for zarbor, and load + encode + fit +
-  predict for Python. This is what a user waits for, and it is where zarbor's
-  single-process design either pays or does not.
+| phase | zarbor | reference |
+|---|---|---|
+| **read** | `csv.zig`, reported as `read` | `pd.read_csv` |
+| **prepare** | `quantise`, reported as `bin` | nil for xgb/lgb; one-hot + scale for sklearn |
+| **fit** | reported as `train` | `.fit()` |
+| **predict** | reported as `predict` | `.predict_proba()` |
 
-Reporting only one of these would be a choice about which side wins.
+Two rules follow, and the first version of this benchmark broke both.
+
+**1. Binning is paid by whoever does it, whenever they do it.** XGBoost and
+LightGBM bin *inside* `fit()`. zarbor bins before it and reports the two
+separately. Comparing zarbor's `fit` against their `fit` therefore charges
+them for work zarbor is not charged for. The headline comparison is
+**prepare + fit + predict**, which contains the binning on both sides wherever
+it happens. Quoting zarbor's bare `fit` against a reference `fit` overstated
+its advantage by roughly 10 percentage points and reversed the sign on one
+row.
+
+**2. Categorical dictionary building is part of parsing, on both sides.**
+zarbor's parser builds level dictionaries during the parse. pandas is
+therefore read with `dtype=category` rather than a plain read followed by
+`.astype("category")` -- otherwise that work lands in `prepare` on one side
+and `read` on the other. It is also faster that way (136 ms against 180 ms),
+so this is not a handicap applied to make a point.
+
+**Neither side is charged for work the other is not doing.** zarbor trains
+with `--valid-frac=0 --verbose_eval=0`, so it performs no per-round
+validation prediction and no per-round metric; the reference side is fitted
+with no `eval_set`. The earlier version left zarbor's per-round validation
+running and then subtracted an estimate of it, which is a correction rather
+than a measurement.
+
+**Parsing is reported separately and belongs to no model.** Every model pays
+it before it sees a bin. It is measured once, zarbor's `csv.zig` against
+`pandas.read_csv`, and is never folded into a model's time. This is also why
+parsing now lives in its own module.
 
 Conditions: `--n_threads=16` and `n_jobs=16` / `num_threads=16`, matching the
-16 hardware threads. **n=5 repeats, reporting the median and the full range.**
-A single timing is not a measurement; this repo has already recorded that a
-seeded, temperature-0 run is not reproducible here, and wall clock is worse.
+16 hardware threads. **n=5 repeats, medians reported.** A single timing is not
+a measurement; this repo has already recorded that a seeded, temperature-0 run
+is not reproducible here, and wall clock is worse.
 
 ## Matched hyperparameters
 
