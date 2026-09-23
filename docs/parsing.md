@@ -1,5 +1,50 @@
 # Reading a file, and saying what is in it
 
+## In plain terms
+
+Four changes, in the order they were found. Each one was found by trying to
+read a real competition file rather than by reading the code.
+
+**1. The file would not open.** `NA` is how this dataset writes "no value."
+zarbor did not recognise it, so it read `NA` as an ordinary word. One column of
+house measurements then looked like 328 different words instead of numbers,
+which is more than a bin can hold, and the read failed outright.
+
+**2. But `NA` does not always mean "no value."** In the pool-quality column
+the dataset's own dictionary defines `NA` as **"No Pool"** -- a real fact about
+the house. So neither blanket rule works: treat every `NA` as missing and you
+throw away 14 columns of real information; treat none of them as missing and
+the file will not load. The rule now is **the column decides**: in a column of
+numbers, `NA` is a hole; in a column of words, it is another word.
+
+**3. Reading a file now says what is in it.** `zgbdt profile <data.csv>` prints
+each column's type, how much is missing, how many distinct values, the range,
+and how many values sit far outside it -- then names anything suspect. Every
+training run prints a one-line version. This is what catches a file that was
+read wrong before a bad score gets blamed on the model.
+
+**4. Two places the parser and the model were guessing separately.**
+
+  * When predicting, the parser worked out each column's type again from the
+    new file, ignoring what the model already knew. Hand it 300 houses that all
+    happen to have no pool and the pool column looks like numbers, disagrees
+    with the model, and the prediction fails on data that is perfectly fine.
+    The model's answer now wins.
+
+  * A tree has to decide which way to send a missing value. It learns that from
+    the training data -- except when a column has no missing values to learn
+    from, which happens constantly: 15 columns here are missing in the test
+    half and never in the training half. In that case the answer was whichever
+    branch the code happened to try first. It now goes to whichever side holds
+    more houses, which is the safer bet, and skipping the pointless second
+    attempt made training about 10% faster.
+
+**What it was worth.** Points 1 and 4 are real: the file opens, and predictions
+on unseen missing values stop degrading. Point 2 sounds important and measured
+as nothing -- see the numbers below -- because by the time a model sees the
+data, "the category NA" and "a hole" are already the same thing to it. That is
+worth knowing before anyone spends a week on clever missing-value handling.
+
 `src/csv.zig` is the parser. It is deliberately not part of any model: every
 algorithm in this library pays it before it sees a bin, so it has its own
 module, its own tests and its own timings. Two things live here that used to
