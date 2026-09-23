@@ -1,11 +1,11 @@
-{
-  "A gbdt-depthwise": {
+[
+  {
+    "key": "GBDT, depthwise",
+    "reference": "XGBoost",
     "kind": "parity",
-    "reference": "xgboost",
-    "zarbor_auc": 0.9413951087094808,
-    "zarbor_self_auc": 0.941395,
-    "ref_auc": 0.9414411004084566,
-    "gap": 4.599169897578914e-05,
+    "metric": "auc",
+    "zarbor_score": 0.9413951087094808,
+    "ref_score": 0.9414411004084566,
     "envelope": 0.0009177292187604325,
     "zarbor": {
       "read": 148,
@@ -24,13 +24,13 @@
       "total": 827.1660119971784
     }
   },
-  "B gbdt-leafwise": {
+  {
+    "key": "GBDT, leafwise",
+    "reference": "LightGBM",
     "kind": "parity",
-    "reference": "lightgbm",
-    "zarbor_auc": 0.9413708011665753,
-    "zarbor_self_auc": 0.941371,
-    "ref_auc": 0.9414266993219612,
-    "gap": 5.589815538586951e-05,
+    "metric": "auc",
+    "zarbor_score": 0.9413708011665753,
+    "ref_score": 0.9414266993219612,
     "envelope": 0.0011025856698022585,
     "zarbor": {
       "read": 148,
@@ -49,13 +49,13 @@
       "total": 700.5042099990533
     }
   },
-  "C gbdt-goss": {
+  {
+    "key": "GBDT + GOSS",
+    "reference": "LightGBM GOSS",
     "kind": "parity",
-    "reference": "lightgbm-goss",
-    "zarbor_auc": 0.9413207940914604,
-    "zarbor_self_auc": 0.941321,
-    "ref_auc": 0.9402465819620223,
-    "gap": 0.0010742121294381457,
+    "metric": "auc",
+    "zarbor_score": 0.9413207940914604,
+    "ref_score": 0.9402465819620223,
     "envelope": 0.0007572617702182871,
     "zarbor": {
       "read": 148,
@@ -74,13 +74,13 @@
       "total": 856.6444309981307
     }
   },
-  "D forest (1024-leaf cap)": {
+  {
+    "key": "Random forest",
+    "reference": "scikit-learn RF",
     "kind": "family",
-    "reference": "sklearn-rf-capped",
-    "zarbor_auc": 0.9390253981053334,
-    "zarbor_self_auc": 0.939025,
-    "ref_auc": 0.9348288507859043,
-    "gap": 0.004196547319429089,
+    "metric": "auc",
+    "zarbor_score": 0.9390253981053334,
+    "ref_score": 0.9348288507859043,
     "envelope": null,
     "zarbor": {
       "read": 149,
@@ -99,38 +99,13 @@
       "total": 6639.7707749983965
     }
   },
-  "D forest (uncapped ref)": {
+  {
+    "key": "Logistic regression",
+    "reference": "scikit-learn LogReg",
     "kind": "family",
-    "reference": "sklearn-rf-default",
-    "zarbor_auc": 0.9390253981053334,
-    "zarbor_self_auc": 0.939025,
-    "ref_auc": 0.9335154860887239,
-    "gap": 0.005509912016609442,
-    "envelope": null,
-    "zarbor": {
-      "read": 149,
-      "prepare": 46,
-      "fit": 4985,
-      "predict": 114,
-      "model_total": 5145,
-      "total": 5294
-    },
-    "ref": {
-      "read": 177.34230699898035,
-      "prepare": 183.73478099965723,
-      "fit": 9060.865985999044,
-      "predict": 408.964181000556,
-      "model_total": 9653.564947999257,
-      "total": 9830.907254998237
-    }
-  },
-  "E linear": {
-    "kind": "family",
-    "reference": "sklearn-logreg",
-    "zarbor_auc": 0.9377134676788648,
-    "zarbor_self_auc": 0.937713,
-    "ref_auc": 0.9377290894955645,
-    "gap": 1.5621816699784574e-05,
+    "metric": "auc",
+    "zarbor_score": 0.9377134676788648,
+    "ref_score": 0.9377290894955645,
     "envelope": null,
     "zarbor": {
       "read": 147,
@@ -149,9 +124,25 @@
       "total": 1199.2884779992892
     }
   },
-  "_parser": {
-    "zarbor_ms": 146,
-    "pandas_ms": 177.34230699898035,
-    "ratio": 1.2146733356094543
+  {
+    "key": "linear regression",
+    "reference": "sklearn LinearRegression",
+    "kind": "family",
+    "metric": "rmse",
+    "zarbor_score": 27922.13598645001,
+    "ref_score": 27922.154109274055,
+    "envelope": null,
+    "zarbor": {
+      "prepare": 17.0,
+      "fit": 198,
+      "predict": 0,
+      "model_total": 215.0
+    },
+    "ref": {
+      "prepare": 72.04150200050208,
+      "fit": 105.60990500016487,
+      "predict": 4.865656999754719,
+      "model_total": 182.51706400042167
+    }
   }
-}
+]

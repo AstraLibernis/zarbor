@@ -152,6 +152,15 @@ characterised but not diagnosed; LightGBM's leafwise fit is genuinely faster
 than zarbor's once binning is charged symmetrically; and forest *prediction*
 (279 ms against sklearn's 87) is the largest single deficit measured.
 
+`bench/arena/scoreboard.py` merges every model-vs-counterpart comparison onto
+one dataset and one machine, and `bench/arena/make_figure.py` renders it as a
+standalone interactive figure (`bench/arena/scoreboard.html`, previewed in
+`bench/arena/fig_light.png`) -- dumbbell for time on a log axis, a companion
+panel for the accuracy gap with the leading side named, a full table view and
+light/dark modes.
+
+![zarbor against the standard implementation of each model](bench/arena/fig_light.png)
+
 The two harnesses overlap and should be consolidated.
 
 ## License

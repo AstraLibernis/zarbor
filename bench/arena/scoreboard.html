@@ -1,0 +1,114 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>zarbor vs standard implementations</title>
+<body data-palette="#2a78d6,#eb6834">
+<style>
+  .viz-root { color-scheme: light;
+    --surface-1:#fcfcfb; --text-primary:#0b0b0b; --text-secondary:#52514e;
+    --text-muted:#7a7873; --grid:#e8e7e3;
+    --series-1:#2a78d6; --series-2:#eb6834; --neutral:#b9b7b1; }
+  @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+    --text-muted:#8e8d84; --grid:#2e2e2c;
+    --series-1:#3987e5; --series-2:#d95926; --neutral:#5a5954; } }
+  :root[data-theme="dark"] .viz-root { color-scheme: dark;
+    --surface-1:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+    --text-muted:#8e8d84; --grid:#2e2e2c;
+    --series-1:#3987e5; --series-2:#d95926; --neutral:#5a5954; }
+  body { margin:0; background:var(--surface-1,#fcfcfb); }
+  .viz-root { background:var(--surface-1); color:var(--text-primary);
+    font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    padding:28px 32px 36px; max-width:1124px; margin:0 auto; }
+  h1 { font-size:19px; margin:0 0 4px; letter-spacing:-.01em; }
+  .sub { color:var(--text-secondary); margin:0 0 4px; font-size:13px; }
+  .meta { color:var(--text-muted); margin:0 0 18px; font-size:12px; }
+  .legend { display:flex; gap:20px; align-items:center; margin:0 0 6px; font-size:13px;
+    color:var(--text-secondary); }
+  .legend i { width:11px; height:11px; border-radius:50%; display:inline-block;
+    margin-right:7px; vertical-align:-1px; }
+  svg { display:block; overflow:visible; }
+  .rl { fill:var(--text-primary); font-size:13.5px; font-weight:600; text-anchor:end; }
+  .rs { fill:var(--text-muted); font-size:11.5px; text-anchor:end; }
+  .conn { stroke:var(--neutral); stroke-width:2; stroke-linecap:round; }
+  .dot { stroke:var(--surface-1); stroke-width:2; }
+  .zar { fill:var(--series-1); } .ref { fill:var(--series-2); }
+  .ratio { font-size:12.5px; font-weight:600; fill:var(--text-secondary); }
+  .ratio.loss { fill:var(--text-muted); }
+  .gline { stroke:var(--grid); stroke-width:2; stroke-linecap:round; }
+  .gdot { stroke:var(--surface-1); stroke-width:2; }
+  .gdot.zar { fill:var(--series-1); } .gdot.ref { fill:var(--series-2); }
+  .gl { font-size:11.5px; fill:var(--text-secondary); }
+  .gw { font-size:10.5px; fill:var(--text-muted); }
+  .grid { stroke:var(--grid); stroke-width:1; }
+  .tick { fill:var(--text-muted); font-size:11px; text-anchor:middle; }
+  .ptitle { fill:var(--text-secondary); font-size:11.5px; font-weight:600;
+    letter-spacing:.04em; text-transform:uppercase; }
+  .hit { fill:transparent; }
+  .row:hover .hit { fill:var(--grid); opacity:.45; }
+  table { border-collapse:collapse; margin-top:26px; font-size:12.5px; width:100%; }
+  th,td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid);
+    color:var(--text-secondary); white-space:nowrap; }
+  thead th { color:var(--text-muted); font-weight:600; font-size:11px;
+    text-transform:uppercase; letter-spacing:.04em; }
+  tbody th { text-align:left; color:var(--text-primary); font-weight:600; }
+  td:nth-child(2) { text-align:left; }
+  .foot { color:var(--text-muted); font-size:11.5px; margin:14px 0 0; max-width:1000px; line-height:1.55; }
+  .foot b { color:var(--text-secondary); font-weight:600; }
+  details { margin-top:8px; } summary { cursor:pointer; color:var(--text-muted);
+    font-size:12px; }
+  #tip { position:fixed; pointer-events:none; opacity:0; transition:opacity .08s;
+    background:var(--surface-1); color:var(--text-primary); border:1px solid var(--grid);
+    border-radius:7px; padding:9px 11px; font-size:12px; box-shadow:0 4px 14px #0002;
+    z-index:9; line-height:1.5; }
+  #tip b { font-weight:600; } #tip .k { color:var(--text-muted); }
+</style>
+<div class="viz-root">
+  <h1>zarbor against the standard implementation of each model</h1>
+  <p class="sub">Kaggle Playground S6E9 &mdash; 534,932 train / 133,733 validation rows, 13 features.
+     Time is <b>prepare + fit + predict</b>, so binning is charged to whichever side does it.</p>
+  <p class="meta">Ryzen 7 9800X3D, 16 threads &middot; median of 5 &middot;
+     XGBoost 3.4.1, LightGBM 4.7.0, scikit-learn 1.9.1 &middot; CSV parsing measured separately and charged to neither</p>
+  <div class="legend">
+    <span><i style="background:var(--series-1)"></i>zarbor</span>
+    <span><i style="background:var(--series-2)"></i>standard implementation</span>
+  </div>
+  <svg viewBox="0 0 1060 478" width="1060" height="478" role="img"
+       aria-label="Dumbbell chart comparing zarbor to XGBoost, LightGBM and scikit-learn on model time, with an accuracy gap panel">
+    <text class="ptitle" x="240" y="56">Model time (log scale)</text>
+    <text class="ptitle" x="782" y="56">Accuracy gap &mdash; and which side is ahead</text>
+    <line class="grid" x1="292.5" y1="88" x2="292.5" y2="452"/><text class="tick" x="292.5" y="80">200 ms</text><line class="grid" x1="404.1" y1="88" x2="404.1" y2="452"/><text class="tick" x="404.1" y="80">500 ms</text><line class="grid" x1="488.6" y1="88" x2="488.6" y2="452"/><text class="tick" x="488.6" y="80">1.00 s</text><line class="grid" x1="573.1" y1="88" x2="573.1" y2="452"/><text class="tick" x="573.1" y="80">2.00 s</text><line class="grid" x1="684.7" y1="88" x2="684.7" y2="452"/><text class="tick" x="684.7" y="80">5.00 s</text><line class="grid" x1="832.0" y1="88" x2="832.0" y2="452"/><text class="tick" x="832.0" y="80">0.0001%</text><line class="grid" x1="932.0" y1="88" x2="932.0" y2="452"/><text class="tick" x="932.0" y="80">0.01%</text><line class="grid" x1="1032.0" y1="88" x2="1032.0" y2="452"/><text class="tick" x="1032.0" y="80">1%</text>
+    <g class="row" data-i="0"><rect class="hit" x="0" y="104" width="1060" height="58"/><text class="rl" x="222" y="130">GBDT, depthwise</text><text class="rs" x="222" y="146">vs XGBoost</text><line class="conn" x1="423.3" y1="133" x2="436.1" y2="133"/><circle class="dot ref" cx="436.1" cy="133" r="6"/><circle class="dot zar" cx="423.3" cy="133" r="6"/><text class="ratio win" x="450.1" y="137" text-anchor="start">1.11× faster</text><line class="gline" x1="782" y1="133" x2="916.4" y2="133"/><circle class="gdot ref" cx="916.4" cy="133" r="5"/><text class="gl" x="928.4" y="134">0.0049%</text><text class="gw" x="928.4" y="146">reference ahead</text></g><g class="row" data-i="1"><rect class="hit" x="0" y="162" width="1060" height="58"/><text class="rl" x="222" y="188">GBDT, leafwise</text><text class="rs" x="222" y="204">vs LightGBM</text><line class="conn" x1="409.7" y1="191" x2="416.4" y2="191"/><circle class="dot ref" cx="409.7" cy="191" r="6"/><circle class="dot zar" cx="416.4" cy="191" r="6"/><text class="ratio loss" x="430.4" y="195" text-anchor="start">1.06× slower</text><line class="gline" x1="782" y1="191" x2="920.7" y2="191"/><circle class="gdot ref" cx="920.7" cy="191" r="5"/><text class="gl" x="932.7" y="192">0.0059%</text><text class="gw" x="932.7" y="204">reference ahead</text></g><g class="row" data-i="2"><rect class="hit" x="0" y="220" width="1060" height="58"/><text class="rl" x="222" y="246">GBDT + GOSS</text><text class="rs" x="222" y="262">vs LightGBM GOSS</text><line class="conn" x1="436.1" y1="249" x2="441.5" y2="249"/><circle class="dot ref" cx="441.5" cy="249" r="6"/><circle class="dot zar" cx="436.1" cy="249" r="6"/><text class="ratio win" x="455.5" y="253" text-anchor="start">1.05× faster</text><line class="gline" x1="782" y1="249" x2="984.9" y2="249"/><circle class="gdot zar" cx="984.9" cy="249" r="5"/><text class="gl" x="996.9" y="250">0.1142%</text><text class="gw" x="996.9" y="262">zarbor ahead</text></g><g class="row" data-i="3"><rect class="hit" x="0" y="278" width="1060" height="58"/><text class="rl" x="222" y="304">Random forest</text><text class="rs" x="222" y="320">vs scikit-learn RF</text><line class="conn" x1="688.2" y1="307" x2="716.0" y2="307"/><circle class="dot ref" cx="716.0" cy="307" r="6"/><circle class="dot zar" cx="688.2" cy="307" r="6"/><text class="ratio win" x="674.2" y="311" text-anchor="end">1.26× faster</text><line class="gline" x1="782" y1="307" x2="1014.6" y2="307"/><circle class="gdot zar" cx="1014.6" cy="307" r="5"/><text class="gl" x="1026.6" y="308">0.4489%</text><text class="gw" x="1026.6" y="320">zarbor ahead</text></g><g class="row" data-i="4"><rect class="hit" x="0" y="336" width="1060" height="58"/><text class="rl" x="222" y="362">Logistic regression</text><text class="rs" x="222" y="378">vs scikit-learn LogReg</text><line class="conn" x1="293.7" y1="365" x2="491.3" y2="365"/><circle class="dot ref" cx="491.3" cy="365" r="6"/><circle class="dot zar" cx="293.7" cy="365" r="6"/><text class="ratio win" x="505.3" y="369" text-anchor="start">5.06× faster</text><line class="gline" x1="782" y1="365" x2="893.1" y2="365"/><circle class="gdot ref" cx="893.1" cy="365" r="5"/><text class="gl" x="905.1" y="366">0.0017%</text><text class="gw" x="905.1" y="378">reference ahead</text></g><g class="row" data-i="5"><rect class="hit" x="0" y="394" width="1060" height="58"/><text class="rl" x="222" y="420">linear regression</text><text class="rs" x="222" y="436">vs sklearn LinearRegression</text><line class="conn" x1="281.3" y1="423" x2="301.3" y2="423"/><circle class="dot ref" cx="281.3" cy="423" r="6"/><circle class="dot zar" cx="301.3" cy="423" r="6"/><text class="ratio loss" x="315.3" y="427" text-anchor="start">1.18× slower</text><line class="gline" x1="782" y1="423" x2="822.6" y2="423"/><circle class="gdot zar" cx="822.6" cy="423" r="5"/><text class="gl" x="834.6" y="424">6.5e-05%</text><text class="gw" x="834.6" y="436">zarbor ahead</text></g>
+  </svg>
+  <p class="foot">Every row is the same dataset and machine, so the time column is comparable down the page.
+     <b>GBDT&nbsp;+&nbsp;GOSS is the one row where the gap exceeds its own noise floor</b> (1.42&times; the
+     reference's max_bin envelope) &mdash; zarbor scores higher, but that is an unexplained disagreement,
+     not a result. Random forest and linear regression compare deliberately different constructions,
+     so their gaps are design differences rather than defects. See docs/arena.md.</p>
+  <details open><summary>Table view &mdash; every number in the figure</summary>
+  <table><thead><tr><th>Model</th><th>Reference</th><th>zarbor</th><th>reference</th>
+  <th>Metric</th><th>Rel. gap</th><th>Closer to truth</th>
+  <th>zarbor time</th><th>ref time</th><th>Speed</th></tr></thead>
+  <tbody><tr><th>GBDT, depthwise</th><td>XGBoost</td><td>0.941395</td><td>0.941441</td><td>AUC</td><td>0.0049%</td><td>reference</td><td>585 ms</td><td>650 ms</td><td>1.11× faster</td></tr><tr><th>GBDT, leafwise</th><td>LightGBM</td><td>0.941371</td><td>0.941427</td><td>AUC</td><td>0.0059%</td><td>reference</td><td>553 ms</td><td>523 ms</td><td>1.06× slower</td></tr><tr><th>GBDT + GOSS</th><td>LightGBM GOSS</td><td>0.941321</td><td>0.940247</td><td>AUC</td><td>0.1142%</td><td>zarbor</td><td>650 ms</td><td>679 ms</td><td>1.05× faster</td></tr><tr><th>Random forest</th><td>scikit-learn RF</td><td>0.939025</td><td>0.934829</td><td>AUC</td><td>0.4489%</td><td>zarbor</td><td>5.14 s</td><td>6.46 s</td><td>1.26× faster</td></tr><tr><th>Logistic regression</th><td>scikit-learn LogReg</td><td>0.937713</td><td>0.937729</td><td>AUC</td><td>0.0017%</td><td>reference</td><td>202 ms</td><td>1.02 s</td><td>5.06× faster</td></tr><tr><th>linear regression</th><td>sklearn LinearRegression</td><td>27,922</td><td>27,922</td><td>RMSE</td><td>6.5e-05%</td><td>zarbor</td><td>215 ms</td><td>183 ms</td><td>1.18× slower</td></tr></tbody></table></details>
+</div>
+<div id="tip"></div>
+<script>
+const DATA = [{"k": "GBDT, depthwise", "r": "XGBoost", "zs": 0.9413951087094808, "ss": 0.9414411004084566, "m": "auc", "zp": 46, "zf": 512, "zd": 27, "rp": 0.0009300001693191007, "rf": 612.1577079993585, "rd": 37.66506699867023, "zt": 585, "rt": 649.8237049981981}, {"k": "GBDT, leafwise", "r": "LightGBM", "zs": 0.9413708011665753, "ss": 0.9414266993219612, "m": "auc", "zp": 45, "zf": 486, "zd": 22, "rp": 0.0011399988579796627, "rf": 473.9878390009835, "rd": 49.17292400023143, "zt": 553, "rt": 523.1619030000729}, {"k": "GBDT + GOSS", "r": "LightGBM GOSS", "zs": 0.9413207940914604, "ss": 0.9402465819620223, "m": "auc", "zp": 44, "zf": 583, "zd": 23, "rp": 0.0010900002962443978, "rf": 627.5560539997969, "rd": 51.74497999905725, "zt": 650, "rt": 679.3021239991504}, {"k": "Random forest", "r": "scikit-learn RF", "zs": 0.9390253981053334, "ss": 0.9348288507859043, "m": "auc", "zp": 46, "zf": 4985, "zd": 114, "rp": 182.94787800004997, "rf": 6193.5175109993, "rd": 85.9630790000665, "zt": 5145, "rt": 6462.428467999416}, {"k": "Logistic regression", "r": "scikit-learn LogReg", "zs": 0.9377134676788648, "ss": 0.9377290894955645, "m": "auc", "zp": 45, "zf": 156, "zd": 1, "rp": 227.72279899982095, "rf": 787.6648780002142, "rd": 6.55849400027364, "zt": 202, "rt": 1021.9461710003088}, {"k": "linear regression", "r": "sklearn LinearRegression", "zs": 27922.13598645001, "ss": 27922.154109274055, "m": "rmse", "zp": 17.0, "zf": 198, "zd": 0, "rp": 72.04150200050208, "rf": 105.60990500016487, "rd": 4.865656999754719, "zt": 215.0, "rt": 182.51706400042167}];
+const tip=document.getElementById('tip');
+const ms=v=>v>=1000?(v/1000).toFixed(2)+' s':Math.round(v)+' ms';
+const sc=(v,m)=>m==='rmse'&&v>100?v.toLocaleString(undefined,{maximumFractionDigits:2}):v.toFixed(6);
+document.querySelectorAll('.row').forEach(g=>{
+  g.addEventListener('pointermove',e=>{
+    const d=DATA[+g.dataset.i];
+    tip.innerHTML=`<b>${d.k}</b><br><span class="k">metric</span> ${d.m.toUpperCase()} &mdash; `+
+      `zarbor <b>${sc(d.zs,d.m)}</b> vs ${d.r} <b>${sc(d.ss,d.m)}</b>`+
+      `<br><span class="k">zarbor</span> prepare ${ms(d.zp)} + fit ${ms(d.zf)} + predict ${ms(d.zd)} = <b>${ms(d.zt)}</b>`+
+      `<br><span class="k">${d.r}</span> prepare ${ms(d.rp)} + fit ${ms(d.rf)} + predict ${ms(d.rd)} = <b>${ms(d.rt)}</b>`;
+    tip.style.opacity=1;
+    const r=tip.getBoundingClientRect();
+    tip.style.left=Math.min(e.clientX+16,innerWidth-r.width-12)+'px';
+    tip.style.top=Math.min(e.clientY+16,innerHeight-r.height-12)+'px';
+  });
+  g.addEventListener('pointerleave',()=>tip.style.opacity=0);
+});
+</script>
+</body></html>
