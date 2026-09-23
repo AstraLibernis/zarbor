@@ -83,10 +83,31 @@ that failed, and the four constants above are where to look.
 A numeric split is one `u8` threshold. A categorical split is a subset, so it
 needs a bitmask: `max_bin = 256` means four `u64` words, 32 bytes.
 
-`Node` grows a `kind` discriminant and a `u32` offset into a per-tree
-`cat_masks` array. Nodes go from 20 to 24 bytes. The mask has a bit per bin
-including bin 0, so *missing joins the left child exactly when its bit is set*
-and needs no separate flag — `missing_left` stays for numeric splits only.
+**Superseded by `fafa53b`, which replaced the mask with an id list.** The
+paragraph below described the design as first written; it is kept because the
+reasoning that follows it still applies, but it is not what the code does.
+
+> `Node` grows a `kind` discriminant and a `u32` offset into a per-tree
+> `cat_masks` array. Nodes go from 20 to 24 bytes. The mask has a bit per bin
+> including bin 0, so *missing joins the left child exactly when its bit is
+> set* and needs no separate flag — `missing_left` stays for numeric splits
+> only.
+
+As built: there is no `cat_masks` and no bitmask. `Node` carries `cat_ofs`
+and `n_cat` into a per-tree `cat_ids` list, and a split tests membership by
+binary search over the sorted ids. `Node` is **32 bytes**, not 24.
+
+The missing sentence above is wrong in both halves, and in a way worth being
+explicit about because it inverts the behaviour. Bin 0 never enters the
+candidate set — the participation loop starts at `b = 1` — and both routing
+paths (`tree.zig`'s `predictBinned` and the training-side partition) test
+`bin == 0` *before* consulting `cat_ids`, so the id list is never asked about
+missing at all. **A categorical split always sends missing right**, with
+`missing_left` hard-set to `false`.
+
+That is deliberate and matches LightGBM's `default_left = false`; the
+authority is the doc comment on `bestCatSplit` in `hist.zig`, which says so
+directly. Only this file was left behind.
 
 The model format goes to version 3. Version 2 files load unchanged: they
 simply contain no node with `kind = 1`, and the reader gives them an empty

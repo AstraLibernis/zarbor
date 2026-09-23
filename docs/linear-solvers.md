@@ -198,8 +198,21 @@ warn about. Named as a limit, not patched over.
 
 **What would actually close it** is a criterion adam does not currently have:
 a relative objective change across epochs, or a bound on the optimality gap.
-Both need the objective value, which `fitAdam` deliberately skips computing —
-that is what makes its epochs cheap. Not attempted.
+Both need the objective value, which `fitAdam` does not ask for: it calls
+`pr.value(theta, false)`, where the `false` gates the loss accumulation.
+
+An earlier version of this paragraph added "that is what makes its epochs
+cheap". That was wrong. `want_loss` gates only a per-row accumulation *inside
+a pass that already runs* -- scoring every row and forming the residuals
+happens either way, because `grad` reads the residuals `value` leaves behind.
+Measured on 2,000 logistic epochs over 534,932 rows, turning it on costs
+**26%** (5.47-5.56 s against 6.94-6.96 s); for squared error it gates a single
+multiply-add and is nearer free. What makes adam's epochs cheap is the absence
+of a line search, not the absence of the loss.
+
+The obstacle is therefore a real 26% on logistic rather than a structural one.
+Still not attempted, but for want of doing it rather than because it cannot be
+afforded.
 
 ## Practical guidance
 

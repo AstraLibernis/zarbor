@@ -551,7 +551,6 @@ fn bestCatSplit(
     scratch: *[data.max_bins]CatKey,
 ) void {
     const min_n: f64 = @floatFromInt(p.min_child_samples);
-    const missing = h[0];
 
     // A handful of levels: one against the rest, and without `cat_l2` -- in
     // LightGBM the extra penalty is added only on the sorted-partition path.
@@ -653,7 +652,6 @@ fn bestCatSplit(
         n_cat += 1;
         acc = acc.add(h[scratch[idx].bin]);
     }
-    _ = missing;
     // Gradient order on the way in, bin order on the way out: the search wants
     // the first, the binary search at prediction time wants the second.
     std.sort.insertion(data.BinIdx, ids[0..n_cat], {}, std.sort.asc(data.BinIdx));
