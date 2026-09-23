@@ -122,8 +122,29 @@ LightGBM's EFB and CatBoost's ordered boosting.
 
 `bench/compare.py` pits each model against its reference (xgboost, lightgbm,
 scikit-learn) on one shared split, both charged for binning and neither for
-validation. It is the only Python here, and it exists because comparing
-against a reference implementation means running it.
+validation. It takes any CSV, and it exists because comparing against a
+reference implementation means running it.
+
+`bench/arena/arena.py` asks the same question on one large, clean dataset
+(Kaggle S6E9, 668,665 x 13, zero nulls) and adds what a one-shot comparison
+cannot give: a noise floor per row, a referee that rescores the reloaded `.zm`
+rather than trusting either side's metric, and end-to-end as well as fit time.
+Protocol in `docs/PROTOCOL-arena.md`, results in `docs/arena.md`. Headline:
+
+| model | reference | AUC gap | zarbor fit |
+|---|---|---:|---:|
+| gbdt depthwise | xgboost | 0.000118 (0.13 envelopes) | 1.21x faster |
+| gbdt leafwise | lightgbm | 0.000068 (0.06 envelopes) | 1.06x faster |
+| gbdt + GOSS | lightgbm | 0.001050 (**1.39 envelopes**) | 1.05x faster |
+| random_forest | sklearn | 0.004275 ahead | 1.23x faster |
+| linear | sklearn | 0.000014 | 4.67x faster |
+
+Two findings worth the reading: GOSS is the one row outside its noise floor,
+characterised but not diagnosed; and zarbor's *fit* is faster than every
+reference while its *end-to-end* is not, because CSV parsing and binning
+consume the advantage on the models that fit in half a second.
+
+The two harnesses overlap and should be consolidated.
 
 ## License
 

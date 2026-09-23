@@ -2,3 +2,6 @@
 zig-out/
 *.zm
 bench/data/
+bench/arena/*.csv
+bench/arena/*.pred.csv
+bench/arena/run.log
