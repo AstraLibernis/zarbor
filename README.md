@@ -13,6 +13,15 @@ one process instead of a Python harness shelling out per fold.
     ./zig-out/bin/zgbdt tune train.csv --label=y --search=bayes --trials=60
     ./zig-out/bin/zgbdt profile train.csv
 
+## Is this worth using instead of LightGBM?
+
+Sometimes, and `docs/why.md` answers it with measurements rather than
+enthusiasm: where zarbor is at parity (the GBDT models), where it is genuinely
+ahead (random forest, linear), the one thing it does that no LightGBM setting
+can (an independent model in a blend, worth -0.00206 RMSE at 20/20 seeds), and
+what maintaining it actually costs. Short version: for the best tabular score
+with the least effort, use LightGBM; use both when the score matters most.
+
 ## Reading a file
 
 `src/csv.zig` is a module on its own because parsing is not a model: every
