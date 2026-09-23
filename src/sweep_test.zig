@@ -11,6 +11,7 @@ const std = @import("std");
 const data = @import("data.zig");
 const config = @import("config.zig");
 const booster = @import("booster.zig");
+const hist = @import("hist.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const tree = @import("tree.zig");
@@ -621,6 +622,69 @@ test "alpha under lbfgs lands on a genuine L1 optimum" {
     // Neither "all zero" nor "none zero" at every alpha would say anything
     // about how the zeros were arrived at.
     try testing.expect(saw_partial);
+}
+
+test "goss_rank: the two keys select different rows, and coincide when h is 1" {
+    // LightGBM's goss.hpp ranks by |g * h| where the paper -- and LightGBM's
+    // own `top_rate` docs -- say |g|. Worth 0.0012 AUC on the EV set, which
+    // is the whole of the one parity gap in docs/arena.md. See docs/goss.md.
+    //
+    // Asserted on the selector directly rather than through a fitted model:
+    // whether an end-to-end fit happens to diverge depends on how far the
+    // probabilities have spread by then, which is a property of the fixture,
+    // not of the mechanism under test.
+    const gpa = testing.allocator;
+    const counts = try gpa.alloc(u32, booster.n_radix);
+    defer gpa.free(counts);
+
+    // Row 0 is confidently wrong (p = 0.9, y = 0): large residual, tiny
+    // curvature. Row 1 is uncertain (p = 0.5, y = 1): smaller residual, the
+    // largest curvature there is. |g| ranks row 0 first; |g*h| ranks row 1
+    // first. That inversion is the entire disagreement with LightGBM.
+    const pairs = [_]hist.GradPair{
+        .{ .g = 0.9, .h = 0.09 }, // |g| = 0.90   |g*h| = 0.081
+        .{ .g = 0.5, .h = 0.25 }, // |g| = 0.50   |g*h| = 0.125
+        .{ .g = 0.1, .h = 0.09 }, // |g| = 0.10   |g*h| = 0.009
+    };
+    const c_grad = booster.gossCut(&pairs, counts, 1, .gradient);
+    const c_gh = booster.gossCut(&pairs, counts, 1, .gradient_hessian);
+
+    // The single kept row is row 0 under |g| and row 1 under |g*h|.
+    try testing.expect(c_grad.t == @as(u32, @bitCast(@as(f32, 0.9))));
+    try testing.expect(c_gh.t == @as(u32, @bitCast(@as(f32, 0.5 * 0.25))));
+    try testing.expect(c_grad.t != c_gh.t);
+}
+
+test "goss_rank makes no difference on squared error, where h is 1" {
+    // h is the constant 1 for squared error, so |g * h| IS |g|: the same rows
+    // are selected in the same order and the models must be bit-identical.
+    // Without this half the flag could be a no-op and the test above would
+    // still pass.
+    const gpa = testing.allocator;
+    var f = try Fix.init(gpa, 4000, 77);
+    defer f.deinit();
+    const cfg = config.Config{
+        .objective = .squared_error, .n_rounds = 60, .learning_rate = 0.1,
+        .max_depth = 5, .sampling = .goss, .top_rate = 0.2, .other_rate = 0.1,
+        .verbose_eval = 0,
+    };
+    var a = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds,
+        .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth,
+        .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate,
+        .goss_rank = .gradient });
+    defer a.model.deinit();
+    var b = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds,
+        .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth,
+        .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate,
+        .goss_rank = .gradient_hessian });
+    defer b.model.deinit();
+    const p1 = try gpa.alloc(f32, f.ds.n_rows);
+    defer gpa.free(p1);
+    const p2 = try gpa.alloc(f32, f.ds.n_rows);
+    defer gpa.free(p2);
+    a.model.predictRaw(f.pool, &f.ds, p1);
+    b.model.predictRaw(f.pool, &f.ds, p2);
+    try testing.expectEqualSlices(f32, p1, p2);
 }
 
 test "lin_standardize: both settings learn" {

@@ -139,7 +139,7 @@ predict on both sides. Parsing belongs to no model and is measured on its own.
 |---|---|---:|---:|
 | gbdt depthwise | xgboost | 0.000046 (0.05 envelopes) | 1.08x faster |
 | gbdt leafwise | lightgbm | 0.000056 (0.05 envelopes) | **1.07x slower** |
-| gbdt + GOSS | lightgbm | 0.001074 (**1.42 envelopes**) | 1.04x faster |
+| gbdt + GOSS | lightgbm | 0.001074 (1.42 env) &rarr; 0.000149 with `--goss_rank=gradient_hessian` | 1.04x faster |
 | random_forest | sklearn | 0.004197 ahead | 1.21x faster |
 | linear | sklearn | 0.000016 | 5.93x faster |
 
@@ -147,8 +147,8 @@ predict on both sides. Parsing belongs to no model and is measured on its own.
 |---|---:|---:|
 | CSV parse, 40 MB | 135 ms | pandas 177 ms |
 
-Three findings worth the reading: GOSS is the one row outside its noise floor,
-characterised but not diagnosed; LightGBM's leafwise fit is genuinely faster
+Three findings worth the reading: the GOSS row's gap turned out to be
+LightGBM ranking rows by `|g*h|` where the paper says `|g|` (`docs/goss.md`); LightGBM's leafwise fit is genuinely faster
 than zarbor's once binning is charged symmetrically; and forest *prediction*
 (279 ms against sklearn's 87) is the largest single deficit measured.
 

@@ -38,7 +38,8 @@ constructions and get no envelope.
 |---|---|---|---:|---:|---:|---:|---:|---|
 | A gbdt depthwise | parity | xgboost | 0.941395 | 0.941441 | 0.000046 | 0.000918 | 0.05 | agrees |
 | B gbdt leafwise | parity | lightgbm | 0.941371 | 0.941427 | 0.000056 | 0.001103 | 0.05 | agrees |
-| C gbdt + GOSS | parity | lightgbm-goss | 0.941321 | 0.940247 | 0.001074 | 0.000757 | **1.42** | **differs** |
+| C gbdt + GOSS | parity | lightgbm-goss | 0.941321 | 0.940247 | 0.001074 | 0.000757 | **1.42** | differs¹ |
+| C, `--goss_rank=gradient_hessian` | parity | lightgbm-goss | 0.940098 | 0.940247 | 0.000149 | 0.000757 | 0.20 | agrees |
 | D random forest | family | sklearn, 1024-leaf cap | 0.939025 | 0.934829 | 0.004197 | — | — | zarbor ahead |
 | D random forest | family | sklearn, uncapped default | 0.939025 | 0.933515 | 0.005510 | — | — | zarbor ahead |
 | E logistic | family | sklearn lbfgs | 0.937713 | 0.937729 | 0.000016 | — | — | agrees |
@@ -137,13 +138,19 @@ At 60% the gap is 0.000052 — indistinguishable from the no-sampling gap of
 0.000056. The two agree on the boosting and disagree only on **how much
 accuracy is lost per row discarded**, in proportion to how many are discarded.
 
-Scoring higher is not a pass. The protocol calls an out-of-envelope parity row
-a failure regardless of direction, and this one stays a failure until the
-mechanism is identified. **Not diagnosed** — that means reading LightGBM's
-`goss.hpp`. Suspects, named as suspects: whether the amplification factor
-`(1-top_rate)/other_rate` is applied to the hessian as well as the gradient on
-both sides, and whether the gradient threshold is an exact top-k (zarbor's is,
-pinned by the `gossCut` test in `booster.zig`) or an approximation.
+**Diagnosed — see `docs/goss.md`.** LightGBM's `goss.hpp` ranks rows by
+`|g * h|`, not `|g|`; the paper and LightGBM's own `top_rate` documentation
+say gradient. For logistic loss `h = p(1-p)`, so the hessian factor inverts
+the ordering between a confidently-wrong row and an uncertain one. Matching
+the key moves zarbor to 0.940098 — a gap of 0.000149, **0.20 envelopes,
+inside the noise floor**. On squared error, where `h` is 1 and the two keys
+coincide, the implementations agree as predicted.
+
+`--goss_rank=gradient_hessian` selects LightGBM's key. The default stays
+`gradient`, which is the paper's and scores 0.0012 better here.
+
+Neither of the suspects named in the earlier version of this paragraph was
+right: both implementations amplify `g` and `h`, and both cuts are exact.
 
 Separately, and not a defect in either: at 30% sampling GOSS is *slower* than
 no sampling in both (zarbor 582 against 492 ms in fit, LightGBM 633 against
@@ -237,8 +244,9 @@ overhead; zarbor is simply slower overall on a set this small.
 ## Summary
 
 - Two parity rows inside their noise floor, one family row agreeing to 1.6e-5,
-  one family row ahead of its reference, one parity row (GOSS) outside its
-  envelope by 1.42x and characterised but not diagnosed.
+  one family row ahead of its reference, and the GOSS row **diagnosed**: the
+  gap was LightGBM ranking by `|g*h|` where zarbor ranks by `|g|`. Matching
+  the key puts it at 0.20 envelopes. `docs/goss.md`.
 - On model work zarbor leads XGBoost by 1.08x, **trails LightGBM by 1.07x**,
   leads sklearn's forest by 1.21x and its logistic regression by 5.93x.
 - The parser is 1.31x faster than pandas and is the reason the LightGBM
@@ -248,3 +256,5 @@ overhead; zarbor is simply slower overall on a set this small.
   output. The gbdt path went 38 -> 27 ms with it.
 - Linear leaves reach a better optimum than LightGBM's `linear_tree` (0.4576
   against 0.4612) and, unlike it, respond smoothly to their ridge constant.
+
+¹ with the default `--goss_rank=gradient`. See `docs/goss.md`.

@@ -92,6 +92,25 @@ pub const Sampling = enum {
     goss,
 };
 
+/// Which magnitude GOSS ranks rows by when choosing the ones to keep in full.
+///
+/// This is the one place the GOSS paper and LightGBM's implementation part
+/// company, and it is worth 0.0012 AUC on a binary problem. Measured in
+/// docs/goss.md.
+pub const GossRank = enum {
+    /// `|g|`. What Ke et al. (NeurIPS 2017) specify, and what LightGBM's own
+    /// `top_rate` documentation describes. Keeps the rows with the largest
+    /// residual.
+    gradient,
+    /// `|g * h|`. What LightGBM actually computes in `goss.hpp`. The hessian
+    /// factor pulls confidently-wrong rows *out* of the kept set -- for
+    /// logistic loss `h = p(1-p)`, so a row at p = 0.99 is scored a hundred
+    /// times lower than one at p = 0.5 with the same residual. Select this
+    /// for parity with LightGBM; on squared error the two are identical,
+    /// because `h` is 1.
+    gradient_hessian,
+};
+
 /// How the linear model's coefficients are fitted. Both minimise the *same*
 /// convex objective, so wherever both arrive they must agree -- measured, and
 /// the places they do not are in docs/linear-solvers.md.
@@ -229,6 +248,10 @@ pub const Config = struct {
     // ---- sampling ----------------------------------------------------
     /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
     sampling: Sampling = .uniform,
+    /// Ranking key for GOSS. Defaults to the paper's `|g|`, which measures
+    /// better here; `gradient_hessian` is LightGBM's. Ignored unless
+    /// `sampling = .goss`.
+    goss_rank: GossRank = .gradient,
     /// Fraction of rows sampled per tree. Without replacement unless
     /// `bootstrap` is set. Ignored when `sampling = .goss`.
     subsample: f32 = 1.0,

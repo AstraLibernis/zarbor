@@ -238,6 +238,15 @@ inline fn magBits(g: f32) u32 {
     return @bitCast(@abs(g));
 }
 
+/// The value GOSS ranks a row by. `|g|` is the paper's; `|g*h|` is
+/// LightGBM's. See `config.GossRank`.
+inline fn rankKey(p: hist.GradPair, how: config.GossRank) u32 {
+    return switch (how) {
+        .gradient => magBits(p.g),
+        .gradient_hessian => magBits(p.g * p.h),
+    };
+}
+
 /// The cut separating the `k` largest magnitudes from the rest.
 pub const Cut = struct {
     /// Rows whose pattern is strictly greater are all in.
@@ -257,12 +266,12 @@ pub const Cut = struct {
 ///
 /// Exact, not approximate: afterwards every chosen row's magnitude is >= every
 /// unchosen row's, with exact bit-ties broken by row order.
-pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize) Cut {
+pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: config.GossRank) Cut {
     std.debug.assert(counts.len == n_radix);
     std.debug.assert(k >= 1 and k <= grads.len);
 
     @memset(counts, 0);
-    for (grads) |g| counts[magBits(g.g) >> radix_bits] += 1;
+    for (grads) |g| counts[rankKey(g, how) >> radix_bits] += 1;
 
     var above: usize = 0;
     var hi: u32 = n_radix - 1;
@@ -276,7 +285,7 @@ pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize) Cut {
     @memset(counts, 0);
     const lo_mask: u32 = n_radix - 1;
     for (grads) |g| {
-        const b = magBits(g.g);
+        const b = rankKey(g, how);
         if (b >> radix_bits == hi) counts[b & lo_mask] += 1;
     }
 
@@ -308,6 +317,7 @@ fn gossSelect(
     out: []u32,
     top_rate: f32,
     other_rate: f32,
+    how: config.GossRank,
     rng: std.Random,
 ) []u32 {
     const n = grads.len;
@@ -315,7 +325,7 @@ fn gossSelect(
     top = std.math.clamp(top, 1, n);
     const rest = n - top;
 
-    const cut = gossCut(grads, counts, top);
+    const cut = gossCut(grads, counts, top, how);
 
     // One ordered pass: mark the large-gradient rows and collect the rest, so
     // the random sample below has something contiguous to draw from.
@@ -324,7 +334,7 @@ fn gossSelect(
     var take = cut.take;
     var n_other: usize = 0;
     for (grads, 0..) |g, r| {
-        const b = magBits(g.g);
+        const b = rankKey(g, how);
         const keep = b > cut.t or (b == cut.t and take > 0);
         if (keep) {
             if (b == cut.t) take -= 1;
@@ -509,7 +519,7 @@ pub fn train(
             blk: {
                 const t_gs = prof.start();
                 defer prof.stop(.goss_select, t_gs);
-                break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, goss_rng.random());
+                break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
             }
         else
             null;
@@ -686,7 +696,7 @@ test "gossCut separates exactly the k largest |g|" {
 
             for ([_]usize{ 1, n / 3, n / 2, n - 1, n }) |k| {
                 if (k == 0 or k > n) continue;
-                const cut = gossCut(grads, counts, k);
+                const cut = gossCut(grads, counts, k, .gradient);
 
                 // Replay the selection rule the caller uses.
                 const chosen = try gpa.alloc(bool, n);
