@@ -1,0 +1,26 @@
+n=5, 16 threads. model time = prepare + fit + predict; parsing shown separately.
+
+### logistic regression  -- EV purchases, 534,932 x 13, binary
+    parse: zarbor 141 ms | pandas 225 ms
+                          auc  prepare      fit  predict    model  state
+    zarbor lbfgs     0.937713       45      154        1      200  ok
+    zarbor adam      0.937711       45    83225        1    83271  ok
+    sklearn          0.937729       76      885        8      969  ok
+    solvers meet: |lbfgs - adam| = 2.54e-06   vs sklearn: 1.56e-05
+
+### linear regression (standard set)  -- california housing, 16,512 x 8
+    parse: zarbor 3 ms | pandas 6 ms
+                         rmse  prepare      fit  predict    model  state
+    zarbor lbfgs     0.721291        1        1        0        2  ok
+    zarbor adam      0.721291        1        8        0        9  ok
+    sklearn          0.742607        1        1        0        2  ok
+    solvers meet: |lbfgs - adam| = 6.04e-08   vs sklearn: 2.13e-02
+
+### linear regression (at scale)  -- EV income, 534,932 x 13
+    parse: zarbor 140 ms | pandas 225 ms
+                         rmse  prepare      fit  predict    model  state
+    zarbor lbfgs   27922.135986       35      199        0      234  ok
+    zarbor adam    28536.595745       34    12118        0    12152  STALLED
+    sklearn        27922.154109       71      107        4      182  ok
+    solvers meet: |lbfgs - adam| = 6.14e+02   vs sklearn: 1.81e-02
+

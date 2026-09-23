@@ -24,7 +24,7 @@ a boosting tree fed `g = -y, h = 1` with shrinkage off.
 | `gbdt` (default) | XGBoost-style depthwise boosting |
 | `gbdt --grow_policy=lossguide --sampling=goss` | LightGBM-style |
 | `random_forest` | bagged unshrunk trees, `sqrt(p)` features per split |
-| `linear` | logistic/linear regression, L-BFGS with OWL-QN for L1 |
+| `linear` | the two standard simple models: **logistic regression** (`--objective=logistic`) and **linear regression / OLS** (`--objective=squared_error`). L-BFGS with OWL-QN for L1; `--lin_solver=adam` as a first-order fallback. See `docs/linear-solvers.md`. |
 
 Every `Config` field is exposed as `--field=value` by comptime reflection, so
 the flag surface and the struct cannot drift apart.
