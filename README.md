@@ -11,6 +11,38 @@ one process instead of a Python harness shelling out per fold.
     ./zig-out/bin/zgbdt predict test.csv --model=m.zm --out=p.csv
     ./zig-out/bin/zgbdt cv   train.csv --label=y --folds=5
     ./zig-out/bin/zgbdt tune train.csv --label=y --search=bayes --trials=60
+    ./zig-out/bin/zgbdt profile train.csv
+
+## Reading a file
+
+`src/csv.zig` is a module on its own because parsing is not a model: every
+algorithm here pays it before it sees a bin.
+
+**A missing marker only means "missing" in a column whose other values are
+numbers.** `NA`, `N/A`, `NaN`, `null`, `none`, `nil`, `?` and the empty field
+are recognised, and the column decides what they mean. In the Ames housing
+data `LotFrontage` holds numbers and `NA`, so the `NA` is an unrecorded
+frontage; `PoolQC` holds `Ex`/`Gd`/`TA` and `NA`, where the data dictionary
+defines `NA` as the level **"No Pool"**. Applying either reading globally is
+wrong: pandas' default converts 14 of that file's columns from a documented
+category to "unknown", while treating every marker as a level makes
+`MasVnrArea` a 328-level categorical and the file will not load at all.
+
+`zgbdt profile <data.csv>` reports what is in a file without training on it --
+per column the kind, missing count, distinct values, min/median/max and a
+count past the Tukey outer fence; then a footer naming values that failed to
+parse after the sniff window, columns that cannot inform a split, and
+categoricals too wide for a `u8` bin. Every train and `cv` run prints the
+one-line version beside its read timing, because that is what catches a file
+read wrong before a bad score gets blamed on the model.
+
+Measured honestly: on House Prices the per-column rule is worth nothing
+against blanking every marker -- `gbdt` -0.00023 (p = 0.27), `linear` -0.00004
+(p = 0.86), `random_forest` -0.00012 (p = 0.28), 20 paired fold seeds each.
+Everything here trains on the binned matrix, where a missing entry is already
+a distinguishable state -- bin 0 for a tree, the dropped reference level for
+the linear design. Naming that state costs and buys nothing. The change is a
+**loading fix, not an accuracy fix**. See `docs/parsing.md`.
 
 ## Models
 
@@ -32,6 +64,14 @@ the flag surface and the struct cannot drift apart.
 ## Cross-validation
 
 `zgbdt cv` reads and bins once, then loops folds over the binned matrix.
+**`--repeats=N` extends that across fold seeds** -- N consecutive assignments
+over the same binned matrix, reporting the spread. One fold assignment on a
+small table is mostly noise, and reconstructing the spread by relaunching the
+process per seed re-reads the CSV and re-quantises every column for a
+permutation that never touched either. The compute saving is honestly small
+(0.9% on a 1,460-row file, 2.5% on 49k x 15) because the parser is fast; the
+point is that the tool reports the spread instead of a shell loop stitching it
+together.
 It reports the **pooled** out-of-fold score — every row predicted by the one
 model that did not train on it — alongside the per-fold mean and sd, because
 those answer different questions and get conflated. Folds are stratified for a

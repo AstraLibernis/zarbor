@@ -14,6 +14,7 @@ const linear = @import("linear.zig");
 const metric = @import("metric.zig");
 const prof = @import("prof.zig");
 const model_mod = @import("model.zig");
+const csv = @import("csv.zig");
 const cv_mod = @import("cv.zig");
 const tune_mod = @import("tune.zig");
 
@@ -36,6 +37,7 @@ const usage =
     \\  zgbdt predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
     \\  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
     \\  zgbdt info    --model=M.zm
+    \\  zgbdt profile <data.csv>   what is in the file, before any model
     \\  zgbdt cv      <train.csv> --label=<column> [--folds=5]
     \\  zgbdt tune    <train.csv> --label=<column> [--search=random]
     \\
@@ -94,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, first, "predict")) return score(init, gpa, out, .predict);
             if (std.mem.eql(u8, first, "blend")) return score(init, gpa, out, .blend);
             if (std.mem.eql(u8, first, "info")) return info(init, gpa, out);
+            if (std.mem.eql(u8, first, "profile")) return profileCmd(init, gpa, out);
             if (std.mem.eql(u8, first, "cv")) return cv_mod.run(init, gpa, out);
             if (std.mem.eql(u8, first, "tune")) return tune_mod.run(init, gpa, out);
         }
@@ -165,6 +168,15 @@ pub fn main(init: std.process.Init) !void {
     defer frame.deinit();
     const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
+    {
+        // Cheap enough to do unconditionally, and it is the line that catches
+        // a file read wrong -- a column silently all-NaN, a categorical that
+        // was meant to be numeric -- before a score is blamed on the model.
+        const stats = try csv.profile(gpa, &frame);
+        defer gpa.free(stats);
+        try csv.writeSummary(out, &frame, stats);
+    }
+
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
 
     // An explicit split column assigns rows to train/validation by value
@@ -189,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
     defer enc.deinit();
 
     var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
-        if (err == error.CategoricalTooWide) try explainWidth(out, &frame, cfg.max_bin, drops.items);
+        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.max_bin, drops.items);
         try explainLabel(out, err, target);
         return err;
     };
@@ -673,38 +685,6 @@ fn writePredictions(
 }
 
 
-/// Name the columns that blew the bin cap, and how wide they are.
-///
-/// `error.CategoricalTooWide` on its own sends the reader back to count
-/// distinct values by hand across every column in the file. The frame already
-/// knows, so it may as well say.
-fn explainWidth(
-    out: *std.Io.Writer,
-    frame: *const data.Frame,
-    max_bin: u16,
-    dropped: []const []const u8,
-) !void {
-    try out.print(
-        \\error: a categorical column has more levels than a bin can address
-        \\       (limit {d}, set by --max_bin; a bin is stored as a u8)
-        \\
-    , .{max_bin});
-    outer: for (frame.names, frame.kinds, frame.levels) |name, kind, levels| {
-        if (kind != .categorical or levels.len < max_bin) continue;
-        // A column the caller already dropped is not their problem.
-        for (dropped) |d| if (std.mem.eql(u8, d, name)) continue :outer;
-        try out.print("  {s: <28} {d} levels\n", .{ name, levels.len });
-    }
-    try out.writeAll(
-        \\
-        \\Either --drop the column, or replace it with something numeric --
-        \\for a high-cardinality group, a statistic of that group (its mean
-        \\target, size, or rank) is usually more useful than its identity.
-        \\
-    );
-    try out.flush();
-}
-
 /// Show which class became which number, or that the target was already
 /// numeric and untouched.
 fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
@@ -824,4 +804,49 @@ fn info(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !vo
         });
     }
     try out.flush();
+}
+
+/// `zgbdt profile <data.csv>` -- describe a file without training on it.
+///
+/// This exists because the alternative is a throwaway pandas script per
+/// dataset, and that script is where the understanding then lives: outside
+/// the tool, unversioned, and different every time. The parser has already
+/// walked every byte, so it is the right place to answer what is in the file.
+fn profileCmd(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !void {
+    const io = init.io;
+    var path: ?[]const u8 = null;
+    var max_bytes: usize = 1 << 31;
+
+    var it = std.process.Args.Iterator.init(init.minimal.args);
+    _ = it.skip();
+    _ = it.skip();
+    while (it.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--max-bytes=")) {
+            max_bytes = try std.fmt.parseInt(usize, arg["--max-bytes=".len..], 10);
+        } else if (!std.mem.startsWith(u8, arg, "--")) {
+            path = arg;
+        }
+    }
+    const p = path orelse {
+        try out.writeAll("usage: zgbdt profile <data.csv> [--max-bytes=N]\n");
+        try out.flush();
+        return error.NoCsvPath;
+    };
+
+    const pool = try pool_mod.Pool.init(gpa, 0);
+    defer pool.deinit();
+
+    const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    var frame = try data.readCsv(gpa, io, pool, p, max_bytes);
+    defer frame.deinit();
+    const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+
+    const stats = try csv.profile(gpa, &frame);
+    defer gpa.free(stats);
+    const t_prof = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+
+    try out.print("file    {s}\nread    {d} ms\nprofile {d} ms\n", .{
+        p, @divTrunc(t_read - t0, 1_000_000), @divTrunc(t_prof - t_read, 1_000_000),
+    });
+    try csv.writeProfile(out, &frame, stats);
 }

@@ -19,6 +19,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("config.zig");
+const csv = @import("csv.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
 const booster = @import("booster.zig");
@@ -31,6 +32,10 @@ pub const usage =
     \\
     \\  --folds=N           number of folds (default 5)
     \\  --fold-seed=N       seed for the fold assignment (default 1)
+    \\  --repeats=N         re-run with N consecutive fold seeds and report
+    \\                      the spread (default 1). One fold assignment on a
+    \\                      small table is mostly noise; this is how you find
+    \\                      out whether a difference survives it.
     \\  --group-col=NAME    keep rows sharing this column's value in the
     \\                      same fold, and drop it as a feature. Required
     \\                      whenever a unit appears more than once (a panel,
@@ -349,6 +354,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var max_bytes: usize = 1 << 31;
     var n_folds: u32 = 5;
     var fold_seed: u64 = 1;
+    var repeats: u32 = 1;
     var group_col: ?[]const u8 = null;
     var quiet = false;
 
@@ -385,6 +391,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             oof_path = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
+        } else if (std.mem.eql(u8, key, "repeats")) {
+            repeats = try std.fmt.parseInt(u32, val, 10);
+            if (repeats == 0) return error.RepeatsMustBePositive;
         } else if (std.mem.eql(u8, key, "quiet")) {
             quiet = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
         } else if (try config.applyFlag(&cfg, key, val)) {
@@ -421,6 +430,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     defer frame.deinit();
 
+    if (!quiet) {
+        const stats = try csv.profile(gpa, &frame);
+        defer gpa.free(stats);
+        try csv.writeSummary(out, &frame, stats);
+    }
+
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
 
     // The grouping column is a label on the rows, never a feature: leaving a
@@ -437,7 +452,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // Bin once. Every fold is a `subset` of this matrix, which also means all
     // folds share one set of bin edges -- the edges are derived from feature
     // values only, never the label, so this leaks nothing.
-    var full = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items);
+    var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.max_bin, drops.items);
+        return err;
+    };
     defer full.deinit();
     try enc.validate(full.labels, cfg.objective);
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
@@ -465,31 +483,95 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try out.flush();
     }
 
-    const fold_of = if (group_idx) |gi|
-        try assignGroupFolds(gpa, frame.values[gi], n_folds, fold_seed)
-    else
-        try assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
-    defer gpa.free(fold_of);
-
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
 
-    const r = try crossValidate(gpa, io, pool, &full, cfg, fold_of, n_folds, .{
-        .oof = oof,
-        .progress = if (quiet) null else out,
-    });
+    // Repeats loop *outside* the read and the bin, which is the whole point:
+    // a fold assignment is a permutation of already-binned rows, so re-running
+    // one costs a fit and nothing else. Doing it by relaunching the process
+    // per seed -- which is what a shell loop does -- re-reads the CSV, rebuilds
+    // every dictionary and re-quantises every column, N times over, for a
+    // partition that never touched any of it.
+    var pooled_buf: std.ArrayList(f64) = .empty;
+    defer pooled_buf.deinit(gpa);
+    // `--oof` names one partition, so it has to be one repeat's, and the
+    // predictions and the fold ids must come from the *same* one. The `oof`
+    // buffer is overwritten by every repeat, so keeping only the fold
+    // assignment would silently pair the last repeat's predictions with the
+    // first repeat's folds.
+    var keep_fold: []u32 = &.{};
+    defer if (keep_fold.len != 0) gpa.free(keep_fold);
+    var keep_oof: []f32 = &.{};
+    defer if (keep_oof.len != 0) gpa.free(keep_oof);
+    var total_fit_ms: i64 = 0;
 
-    if (!quiet) try out.writeAll("\n");
-    try out.print("oof     {d:.6}   mean {d:.6}   sd {d:.6}   {d} ms\n", .{
-        r.pooled, r.mean, r.sd, r.fit_ms,
-    });
+    for (0..repeats) |rep| {
+        const seed = fold_seed + rep;
+        const fold_of = if (group_idx) |gi|
+            try assignGroupFolds(gpa, frame.values[gi], n_folds, seed)
+        else
+            try assignFolds(gpa, full.labels, n_folds, seed, cfg.objective == .logistic);
+        var keep_this = false;
+        defer if (!keep_this) gpa.free(fold_of);
+
+        const r = try crossValidate(gpa, io, pool, &full, cfg, fold_of, n_folds, .{
+            .oof = oof,
+            // Per-fold progress on every repeat is 5N lines nobody reads.
+            .progress = if (quiet or repeats > 1) null else out,
+        });
+        try pooled_buf.append(gpa, r.pooled);
+        total_fit_ms += r.fit_ms;
+
+        if (repeats == 1) {
+            if (!quiet) try out.writeAll("\n");
+            try out.print("oof     {d:.6}   mean {d:.6}   sd {d:.6}   {d} ms\n", .{
+                r.pooled, r.mean, r.sd, r.fit_ms,
+            });
+        } else if (!quiet) {
+            try out.print("seed {d: <4} oof {d:.6}   folds mean {d:.6} sd {d:.6}\n", .{
+                seed, r.pooled, r.mean, r.sd,
+            });
+        }
+
+        // `--oof` describes one partition, so it can only mean the first.
+        if (rep == 0 and oof_path != null) {
+            keep_fold = fold_of;
+            keep_this = true;
+            keep_oof = try gpa.dupe(f32, oof);
+        }
+    }
+
+    if (repeats > 1) {
+        const pooled = pooled_buf.items;
+        var sum: f64 = 0;
+        var lo = pooled[0];
+        var hi = pooled[0];
+        for (pooled) |v| {
+            sum += v;
+            lo = @min(lo, v);
+            hi = @max(hi, v);
+        }
+        const mean = sum / @as(f64, @floatFromInt(pooled.len));
+        var ss: f64 = 0;
+        for (pooled) |v| ss += (v - mean) * (v - mean);
+        const sd = @sqrt(ss / @as(f64, @floatFromInt(pooled.len)));
+        if (!quiet) try out.writeAll("\n");
+        try out.print(
+            "repeats {d}   oof {d:.6}   sd {d:.6}   best {d:.6}   worst {d:.6}   {d} ms\n",
+            .{ pooled.len, mean, sd, lo, hi, total_fit_ms },
+        );
+    }
 
     if (oof_path) |op| {
+        // Both are the first repeat's, snapshotted together above.
+        const fold_of = keep_fold;
+        const oof_w = keep_oof;
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
         try buf.appendSlice(gpa, "fold,label,prediction\n");
         var line: [128]u8 = undefined;
-        for (oof, full.labels, fold_of) |p, y, k|
+        if (repeats > 1) try out.writeAll("note    --oof is the first repeat only\n");
+        for (oof_w, full.labels, fold_of) |p, y, k|
             try buf.appendSlice(gpa, try std.fmt.bufPrint(
                 &line,
                 "{d},{d},{d:.8}\n",
