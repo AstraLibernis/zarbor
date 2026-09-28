@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Regression-tree construction over binned features.
 //!
 //! Rows belonging to a node are kept contiguous in `rows`. Gradients are

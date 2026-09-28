@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Random forest: bagged, unshrunk trees, averaged.
 //!
 //! This shares `tree.zig` with the booster rather than reimplementing tree

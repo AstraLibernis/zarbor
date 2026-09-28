@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Hyperparameter search, with the strategy selected the way the model is.
 //!
 //! `--search` picks between four families that differ in what they assume:

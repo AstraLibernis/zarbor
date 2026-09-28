@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Runs the pre-registered grid in docs/PROTOCOL.md. Emits TSV on stdout."""
 import subprocess, sys, time, os, re
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

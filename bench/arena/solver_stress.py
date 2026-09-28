@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Do zarbor's two linear solvers meet?
 
 L-BFGS/OWL-QN and Adam minimise the *same convex objective*. A convex problem

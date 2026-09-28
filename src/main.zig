@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! zgbdt — train a gradient-boosted tree ensemble on a CSV.
 //!
 //! Every field of `Config` is exposed as `--field=value` by comptime

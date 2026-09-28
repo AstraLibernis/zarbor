@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Does zarbor agree with LightGBM, or has it been fitted to one dataset?
 
 The question this answers is not "does zarbor score well". It is "does zarbor

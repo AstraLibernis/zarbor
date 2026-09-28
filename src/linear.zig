@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Regularised linear and logistic regression — the simple baseline.
 //!
 //! The design matrix is derived from the same binned dataset the trees use,

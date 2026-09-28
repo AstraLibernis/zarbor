@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 # Controls C2-C5 from docs/PROTOCOL.md.
 set -u
 cd "$(dirname "$0")/.."

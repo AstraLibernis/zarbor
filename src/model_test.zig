@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! End-to-end regression tests for the three models.
 //!
 //! These exist because two silent correctness bugs shipped: a histogram stride

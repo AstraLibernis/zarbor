@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! K-fold cross-validation in a single process.
 //!
 //! `train` fits one model against one split, so cross-validating it from

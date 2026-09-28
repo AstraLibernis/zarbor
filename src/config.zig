@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Hyperparameter surface for every model in zmodels.
 //!
 //! Names follow XGBoost where an equivalent exists, so published tunings

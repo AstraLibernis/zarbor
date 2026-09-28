@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! How expensive is `sigmoid`, and whose fault is it?
 //!
 //! Gradients were 15% of a boosting fit and almost all of it was `@exp`.

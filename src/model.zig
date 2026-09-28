@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Saving, loading, scoring and blending trained models.
 //!
 //! A trained model is useless if it cannot outlive the process that made it,

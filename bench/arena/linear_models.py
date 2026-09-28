@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """The two standard simple models, against their standard implementations.
 
   logistic regression   --algo=linear --objective=logistic         vs sklearn LogisticRegression

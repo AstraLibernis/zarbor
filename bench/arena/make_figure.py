@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Render bench/arena/scoreboard.json as a standalone HTML figure.
 
 Form: a dumbbell for time (two entities per row, values spanning ~35x, so a

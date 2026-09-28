@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! What does one wide categorical column cost?
 //!
 //! zarbor stores a bin in a `u8`, so a column with 256 or more levels is

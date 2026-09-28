@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Uniform stride vs packed per-feature offsets, including the reduce.
 //!
 //! The real dataset's features hold 47, 234, 202, 6, 17, 22, 7, 4, 4, 5, 3, 3

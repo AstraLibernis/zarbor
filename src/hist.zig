@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Histogram construction and split search.
 //!
 //! This is the whole cost of boosting. Two decisions carry the performance:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! What shape should a histogram bin be?
 //!
 //! `histbench.zig` answered "which loop order", but it models every feature as

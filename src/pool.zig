@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! A persistent parallel-for pool.
 //!
 //! Zig 0.16 removed `std.Thread.Pool`, `std.Thread.Mutex` and the futex layer;

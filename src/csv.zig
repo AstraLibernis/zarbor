@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! CSV parsing: bytes on disk to a column-major `Frame`.
 //!
 //! Split out of `data.zig` because parsing is not a model and not a

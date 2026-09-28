@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Pairs two TSV runs and reports mean delta vs sd across seeds."""
 import sys, re, collections
 def load(p):

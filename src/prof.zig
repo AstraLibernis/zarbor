@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Phase timers for tree building.
 //!
 //! Exists because `perf` cannot run in this sandbox (no CAP_PERFMON, and

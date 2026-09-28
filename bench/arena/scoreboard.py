@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Merge every model-vs-counterpart comparison into one scoreboard.
 
 Rows 1-5 come from bench/arena/results.json (written by arena.py). Row 6 --

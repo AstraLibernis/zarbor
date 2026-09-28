@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Min/max sweep: every config field, asserted against what it claims to do.
 //!
 //! Two silent correctness bugs shipped in this library before anything here

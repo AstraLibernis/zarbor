@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 AstraLibernis
+
 """Compare zmodels against the reference Python implementations, 1:1.
 
 Fairness rests on three things:

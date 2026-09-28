@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! The boosting loop.
 //!
 //! The objective is dispatched through `inline else`, so each loss compiles to

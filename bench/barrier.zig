@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! What does one parallel region cost?
 //!
 //! Tree building submits a `parallelFor` per node -- per histogram build, per

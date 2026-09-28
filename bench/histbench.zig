@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Standalone microbenchmark for the histogram accumulation kernel.
 //!
 //! hist_build is 45-63% of training, so this isolates it from tree building
