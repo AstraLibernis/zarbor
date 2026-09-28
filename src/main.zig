@@ -69,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     var out_buf: [16 * 1024]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(io, &out_buf);
+    var fw = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const out = &fw.interface;
 
     var cfg: config.Config = .{};

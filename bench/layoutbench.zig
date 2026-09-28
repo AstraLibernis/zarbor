@@ -42,7 +42,7 @@ fn roundUp(n: usize) usize {
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var buf: [8192]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(init.io, &buf);
+    var fw = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const o = &fw.interface;
 
     // --- the two layouts ---

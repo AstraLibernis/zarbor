@@ -38,7 +38,7 @@ const Ctx = struct {
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var buf: [4096]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(init.io, &buf);
+    var fw = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const out = &fw.interface;
 
     for ([_]u32{ 1, 2, 4, 8 }) |nt| {

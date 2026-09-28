@@ -59,7 +59,7 @@ inline fn sigmoid8(x: @Vector(8, f32)) @Vector(8, f32) {
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var buf: [4096]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(init.io, &buf);
+    var fw = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const out = &fw.interface;
 
     const xs = try gpa.alloc(f32, N);

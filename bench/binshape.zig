@@ -369,7 +369,7 @@ fn run(
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var buf: [8192]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(init.io, &buf);
+    var fw = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const out = &fw.interface;
 
     // Node sizes matter as much as the kernel: a depth-6 tree spends half its
