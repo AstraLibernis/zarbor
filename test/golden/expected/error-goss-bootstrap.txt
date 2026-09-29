@@ -1,0 +1,17 @@
+$ zarbor titanic3.csv --label=survived --sampling=goss --bootstrap=true --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 1
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+--- stderr
+error: BootstrapWithBoosting
+--- files

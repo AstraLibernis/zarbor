@@ -64,6 +64,15 @@ const cases = [_]Case{
     .{ .name = "error-info-no-model", .train_flags = false, .args = &.{ "info", "g.zm" } },
     .{ .name = "error-profile-no-path", .train_flags = false, .args = &.{"profile"} },
     .{ .name = "error-no-input", .train_flags = false, .args = &.{} },
+    .{ .name = "error-bad-max-bin", .args = &.{ data_file, "--label=survived", "--max_bin=300" } },
+    .{ .name = "error-bad-subsample", .args = &.{ data_file, "--label=survived", "--subsample=0" } },
+    .{ .name = "error-unbounded-tree", .args = &.{ data_file, "--label=survived", "--max_depth=0" } },
+    .{ .name = "error-goss-bootstrap", .args = &.{ data_file, "--label=survived", "--sampling=goss", "--bootstrap=true" } },
+    .{ .name = "error-boost-bootstrap", .args = &.{ data_file, "--label=survived", "--bootstrap=true" } },
+    .{ .name = "error-forest-no-rounds", .args = &.{ data_file, "--label=survived", "--algo=random_forest", "--n_rounds=0" } },
+    .{ .name = "error-linear-no-epochs", .args = &.{ data_file, "--label=survived", "--algo=linear", "--lin_epochs=0" } },
+    .{ .name = "error-linear-neg-lambda", .args = &.{ "cv", data_file, "--label=survived", "--algo=linear", "--lambda=-1" } },
+    .{ .name = "forest-explicit-overrides", .args = &.{ data_file, "--label=survived", "--algo=random_forest", "--n_rounds=20", "--max_depth=5", "--learning_rate=0.3", "--colsample_bynode=0.5", "--lambda=2" } },
 };
 
 pub fn main(init: std.process.Init) !void {

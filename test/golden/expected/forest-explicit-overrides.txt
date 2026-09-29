@@ -1,0 +1,23 @@
+$ zarbor titanic3.csv --label=survived --algo=random_forest --n_rounds=20 --max_depth=5 --learning_rate=0.3 --colsample_bynode=0.5 --lambda=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   random forest (bagged unshrunk trees)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] trees=1 valid=0.794505
+[  10] trees=11 valid=0.880204
+[  19] trees=20 valid=0.882899
+
+rounds  20
+train # ms  ( # ms/tree)
+valid   auc=0.882899  logloss=0.403257
+--- stderr
+--- files
