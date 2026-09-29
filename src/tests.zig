@@ -21,6 +21,7 @@ test {
     // Add a new module here as well as in root.zig. The CLI (src/cli/) is
     // compiled by `zig build` and `zig build check`.
     std.testing.refAllDecls(@import("bin_edges.zig"));
+    std.testing.refAllDecls(@import("builder.zig"));
     std.testing.refAllDecls(@import("booster.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("csv.zig"));
@@ -37,7 +38,9 @@ test {
     std.testing.refAllDecls(@import("lin_solve.zig"));
     std.testing.refAllDecls(@import("metric.zig"));
     std.testing.refAllDecls(@import("model.zig"));
+    std.testing.refAllDecls(@import("leaf_linear.zig"));
     std.testing.refAllDecls(@import("objective.zig"));
+    std.testing.refAllDecls(@import("partition.zig"));
     std.testing.refAllDecls(@import("pool.zig"));
     std.testing.refAllDecls(@import("prof.zig"));
     std.testing.refAllDecls(@import("root.zig"));
