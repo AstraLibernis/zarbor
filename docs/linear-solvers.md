@@ -60,7 +60,7 @@ least-squares solve. zarbor runs L-BFGS at it, iterating toward an answer that
 could be obtained in one factorisation. That is the right call for logistic,
 which has no closed form, and unnecessary work for squared error. Recorded as
 a lead, not fixed: the normal equations on the binned design are exactly what
-`tree.zig` already solves by Cholesky for linear leaves.
+`leaf_linear.zig` already solves by Cholesky for linear leaves.
 
 ## Binning is doing the work on california
 

@@ -29,6 +29,23 @@ After v0.5.0 the executable was renamed from `zgbdt` to `zarbor`.
     zig build golden    # CLI end to end on real data vs test/golden/expected
     zig build check     # compile every artifact, test and benchmark
 
+## Layout
+
+- `src/cli/`: the `zarbor` command, one file per subcommand. It sees the
+  library only through `src/root.zig`.
+- Data: `csv.zig` parses, `csv_profile.zig` describes, `data.zig` bins a
+  `Frame` into a `Dataset` (with `bin_edges.zig`, `label_encoder.zig`,
+  `schema.zig`).
+- Trees: `tree.zig` (types, `tree.Params`), `builder.zig`, `hist.zig`,
+  `split.zig`, `partition.zig`, `leaf_linear.zig`.
+- Models: `booster.zig` (+ `goss.zig`), `forest.zig`, `linear.zig`
+  (+ `lin_solve.zig`), each taking only its own `Params`. `fitted.zig` puts
+  them behind one interface; `model.zig` is the saved-model format.
+- Settings and evaluation: `config.zig` (every flag, grouped by model),
+  `objective.zig`, `metric.zig`, `cv.zig`, `tune.zig`.
+- Runtime: `pool.zig` (thread pool), `prof.zig` (`--profile=1`).
+- Tests: `src/test/` via `src/tests.zig`; end to end, `test/golden/`.
+
 ## Is this worth using instead of LightGBM?
 
 Sometimes, and `docs/why.md` answers it with measurements rather than

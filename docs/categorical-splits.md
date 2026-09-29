@@ -6,7 +6,7 @@ claim appears here. Numbers live in `RESULTS.md`, protocol in `PROTOCOL.md`.
 ## What is wrong today
 
 `data.zig` assigns a categorical level its dictionary id **in order of first
-appearance in the file**. `hist.zig:bestSplit` then treats that id like any
+appearance in the file**. `split.zig:bestSplit` then treats that id like any
 other bin index and searches cuts of the form `bin <= threshold`.
 
 So the partitions reachable for a 41-level column are the 40 prefixes of an
@@ -106,7 +106,7 @@ missing at all. **A categorical split always sends missing right**, with
 `missing_left` hard-set to `false`.
 
 That is deliberate and matches LightGBM's `default_left = false`; the
-authority is the doc comment on `bestCatSplit` in `hist.zig`, which says so
+authority is the doc comment on `bestCatSplit` in `split.zig`, which says so
 directly. Only this file was left behind.
 
 The model format goes to version 3. Version 2 files load unchanged: they
