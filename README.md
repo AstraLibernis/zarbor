@@ -25,7 +25,12 @@ with the least effort, use LightGBM; use both when the score matters most.
 ## Reading a file
 
 `src/csv.zig` is a module on its own because parsing is not a model: every
-algorithm here pays it before it sees a bin.
+algorithm here pays it before it sees a bin. Rows are split by
+[zsift](https://github.com/AstraLibernis/zsift), vendored under `src/vendor/zsift/`
+(so zarbor still has no dependencies): quoted fields may hold commas, newlines and
+escaped `""`, there is no column limit, and the rows are parsed on every pool
+thread. A file with a stray quote inside an unquoted field (say, `3" pipe`) is
+re-read by zsift's lenient parser, which keeps that quote as text.
 
 **A missing marker only means "missing" in a column whose other values are
 numbers.** `NA`, `N/A`, `NaN`, `null`, `none`, `nil`, `?` and the empty field

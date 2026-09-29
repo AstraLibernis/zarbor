@@ -50,6 +50,17 @@ algorithm in this library pays it before it sees a bin, so it has its own
 module, its own tests and its own timings. Two things live here that used to
 live in a throwaway script per dataset.
 
+**Splitting rows (2026-09-29).** Rows used to be cut at every `\n` before quotes
+were looked at, which split a quoted field holding a newline into two rows (and
+could turn a numeric column categorical), kept escaped `""` doubled in category
+levels, and silently dropped every column past 512. The split is now done by the
+vendored zsift parser, strict RFC 4180, on up to one range per pool thread (64 KiB
+of file per worker); each range keeps its own columns and dictionaries, merged in
+file order so level ids are still first appearance in the file. On 7 real files
+(0.7–45 MB) the tables are byte-identical to the old loader's and it is 1.52–1.70×
+faster than the old all-core load (worst round 1.29×); on the csv-spectrum and W3C
+CSVW public suites the 6 files that differ are exactly those three old bugs.
+
 ## `NA` means two different things, and the column says which
 
 The rule, in one line: **a missing marker only means "missing" in a column

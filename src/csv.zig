@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
+const zsift = @import("vendor/zsift/csv.zig");
 
 pub const ColumnKind = enum { numeric, categorical };
 
@@ -63,20 +64,6 @@ pub const Frame = struct {
 
 const sniff_rows = 1000;
 
-/// Offsets of each row's first byte, plus a terminating offset.
-fn rowOffsets(gpa: std.mem.Allocator, text: []const u8) ![]usize {
-    var offs: std.ArrayList(usize) = .empty;
-    errdefer offs.deinit(gpa);
-    try offs.append(gpa, 0);
-    var i: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, text, i, '\n')) |nl| {
-        i = nl + 1;
-        if (i < text.len) try offs.append(gpa, i);
-    }
-    try offs.append(gpa, text.len);
-    return offs.toOwnedSlice(gpa);
-}
-
 fn trimField(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r\n");
 }
@@ -125,96 +112,6 @@ fn looksNumeric(s: []const u8) bool {
     return true;
 }
 
-/// Split one CSV row into `out`, returning how many fields were written.
-/// Quoted fields are supported to the extent Kaggle emits them: a leading
-/// quote runs to the matching quote, with "" as an escaped quote.
-fn splitRow(line: []const u8, out: [][]const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (n < out.len) {
-        if (i < line.len and line[i] == '"') {
-            const start = i + 1;
-            var j = start;
-            while (j < line.len) : (j += 1) {
-                if (line[j] == '"') {
-                    if (j + 1 < line.len and line[j + 1] == '"') {
-                        j += 1;
-                    } else break;
-                }
-            }
-            out[n] = line[start..@min(j, line.len)];
-            n += 1;
-            i = j + 1;
-            if (i < line.len and line[i] == ',') i += 1 else break;
-        } else {
-            const comma = std.mem.indexOfScalarPos(u8, line, i, ',');
-            if (comma) |c| {
-                out[n] = line[i..c];
-                n += 1;
-                i = c + 1;
-            } else {
-                out[n] = line[i..];
-                n += 1;
-                break;
-            }
-        }
-    }
-    return n;
-}
-
-const ParseCtx = struct {
-    text: []const u8,
-    offs: []const usize,
-    kinds: []const ColumnKind,
-    values: [][]f32,
-    dicts: []const ?*const std.StringHashMapUnmanaged(u32),
-    /// Per column, failures to parse a field that was neither empty nor a
-    /// recognised missing marker. Written from every worker, so atomic; the
-    /// increment only runs on the failure path and costs nothing otherwise.
-    bad: []std.atomic.Value(u32),
-    n_cols: usize,
-    /// Set by any worker that meets a categorical level absent from the
-    /// dictionary. Only ever written to `true`, so a plain store is enough.
-    unseen: std.atomic.Value(bool),
-
-    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
-        const self: *ParseCtx = @ptrCast(@alignCast(ctx));
-        var fields_buf: [512][]const u8 = undefined;
-        const fields = fields_buf[0..@min(self.n_cols, fields_buf.len)];
-
-        var r = begin;
-        while (r < end) : (r += 1) {
-            const line = trimField(self.text[self.offs[r]..self.offs[r + 1]]);
-            const got = splitRow(line, fields);
-            for (0..self.n_cols) |c| {
-                var v: f32 = std.math.nan(f32);
-                if (c < got) {
-                    const t = trimField(fields[c]);
-                    if (t.len != 0) {
-                        switch (self.kinds[c]) {
-                            .numeric => v = std.fmt.parseFloat(f32, t) catch blk: {
-                                if (!isMissingToken(t)) _ = self.bad[c].fetchAdd(1, .monotonic);
-                                break :blk std.math.nan(f32);
-                            },
-                            .categorical => {
-                                if (self.dicts[c].?.get(t)) |id| {
-                                    v = @floatFromInt(id);
-                                } else {
-                                    self.unseen.store(true, .monotonic);
-                                }
-                            },
-                        }
-                    }
-                }
-                self.values[c][r] = v;
-            }
-        }
-    }
-};
-
-/// Read and parse a CSV. `pool` is used for the row-parsing pass, which is
-/// where essentially all the time goes.
 /// Ceiling on distinct values in one column while reading. Far above any
 /// usable categorical -- it exists so a free-text column cannot allocate a
 /// dictionary the size of the file. The bin-width limit that actually matters
@@ -247,6 +144,14 @@ pub const KindHint = struct {
     }
 };
 
+/// Read and parse a CSV with the vendored zsift parser (`vendor/zsift`): quoted fields
+/// may hold delimiters, newlines and escaped `""`, and there is no column limit. The
+/// data rows are parsed on up to `pool.workerCount()` workers through `io` (zsift picks
+/// fewer, or one, for small files); each worker keeps its own columns and category
+/// dictionaries, merged in file order so level ids are first-appearance order exactly
+/// as a serial read gives. A file with a stray quote inside an unquoted field (not
+/// RFC 4180, which zsift's strict path rejects) is re-read serially by zsift's lenient
+/// parser, which treats that quote as data.
 pub fn readCsv(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -275,67 +180,119 @@ pub fn readCsvHinted(
         std.Io.Limit.limited(max_bytes),
     );
     defer gpa.free(text);
+    const workers = @min(pool.workerCount(), zsift.parallel.max_workers);
+    return parseText(gpa, io, text, workers, hint, .strict) catch |e| switch (e) {
+        // Not RFC 4180 (a quote inside an unquoted field): read it leniently instead.
+        error.InvalidQuote => parseText(gpa, io, text, 1, hint, .lenient),
+        else => e,
+    };
+}
 
-    const offs = try rowOffsets(gpa, text);
-    defer gpa.free(offs);
-    if (offs.len < 3) return error.EmptyCsv;
+const Mode = enum { strict, lenient };
 
-    // ---- header ----
-    const header_line = trimField(text[offs[0]..offs[1]]);
-    var hdr_buf: [512][]const u8 = undefined;
-    const n_cols = splitRow(header_line, &hdr_buf);
-    if (n_cols == 0) return error.NoColumns;
+/// Bytes of CSV per worker. zsift's own size rule (`parallel.forEachField`, serial
+/// below 2 MiB) is tuned for a sink that does almost nothing per field; this one
+/// converts every field, so splitting pays far sooner. Swept 32–256 KiB against the
+/// previous all-core loader on 7 real files (0.7–45 MB): 64 KiB was the only size
+/// faster on every file in every round (medians 1.34–1.73×, worst round 1.08×).
+const bytes_per_worker: usize = 64 << 10;
 
-    const names = try gpa.alloc([]u8, n_cols);
-    errdefer gpa.free(names);
-    var named: usize = 0;
-    errdefer for (names[0..named]) |n| gpa.free(n);
-    while (named < n_cols) : (named += 1) {
-        names[named] = try gpa.dupe(u8, trimField(hdr_buf[named]));
+/// Scratch per worker for unescaping one quoted field with `""` in it; a longer
+/// escaped field is a `ScratchTooSmall` error, not a truncation.
+const field_scratch_max: usize = 16 << 20;
+
+fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usize, hint: ?KindHint, comptime mode: Mode) !Frame {
+    const P = if (mode == .strict) zsift.SimdParser else zsift.Parser;
+    const scratch_len = @min(text.len + 64, field_scratch_max);
+
+    // ---- header, then the column kinds from the first `sniff_rows` data rows ----
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
     }
-
-    const n_rows = offs.len - 2; // minus header, minus terminator
-
-    // ---- sniff column kinds from a prefix ----
-    const kinds = try gpa.alloc(ColumnKind, n_cols);
-    errdefer gpa.free(kinds);
-    @memset(kinds, .numeric);
+    var kinds: std.ArrayList(ColumnKind) = .empty;
+    errdefer kinds.deinit(gpa);
     {
-        // A pinned column is not sniffed at all: the hint is evidence from
-        // the whole training set, and this file's prefix cannot outvote it.
-        const pinned = try gpa.alloc(bool, n_cols);
+        const scratch = try gpa.alloc(u8, scratch_len);
+        defer gpa.free(scratch);
+        var it = try P.init(text, scratch, .{});
+        while (try it.next()) |f| {
+            try names.append(gpa, try gpa.dupe(u8, trimField(f.bytes)));
+            it.resetScratch();
+            if (f.last_in_record) break;
+        }
+        if (names.items.len == 0) return error.NoColumns;
+        try kinds.appendNTimes(gpa, .numeric, names.items.len);
+        // A pinned column is not sniffed at all: the hint is evidence from the whole
+        // training set, and this file's prefix cannot outvote it.
+        const pinned = try gpa.alloc(bool, names.items.len);
         defer gpa.free(pinned);
         @memset(pinned, false);
-        if (hint) |hh| {
-            for (0..n_cols) |c| {
-                if (hh.get(names[c])) |k| {
-                    kinds[c] = k;
-                    pinned[c] = true;
-                }
+        if (hint) |hh| for (names.items, kinds.items, pinned) |n, *k, *pin| {
+            if (hh.get(n)) |hk| {
+                k.* = hk;
+                pin.* = true;
             }
-        }
-
-        var fields_buf: [512][]const u8 = undefined;
-        const fields = fields_buf[0..n_cols];
-        const limit = @min(n_rows, sniff_rows);
-        for (0..limit) |i| {
-            const line = trimField(text[offs[i + 1]..offs[i + 2]]);
-            const got = splitRow(line, fields);
-            for (0..@min(got, n_cols)) |c| {
-                if (pinned[c]) continue;
-                if (kinds[c] == .numeric and !looksNumeric(fields[c])) kinds[c] = .categorical;
+        };
+        var rows: usize = 0;
+        var c: usize = 0;
+        while (rows < sniff_rows) {
+            const f = (try it.next()) orelse break;
+            if (c < names.items.len and !pinned[c] and kinds.items[c] == .numeric and !looksNumeric(f.bytes))
+                kinds.items[c] = .categorical;
+            it.resetScratch();
+            c += 1;
+            if (f.last_in_record) {
+                c = 0;
+                rows += 1;
             }
         }
     }
 
-    // ---- collect categorical levels ----
-    // Cardinalities here are small, so a single scan building one dictionary
-    // costs less than the cross-thread merge a parallel scan would need.
-    var dict_storage = try gpa.alloc(?std.StringHashMapUnmanaged(u32), n_cols);
-    defer gpa.free(dict_storage);
-    @memset(dict_storage, null);
-    defer for (dict_storage) |*d| if (d.*) |*m| m.deinit(gpa);
+    // ---- every row, on up to `workers` ranges; range 0 skips the header ----
+    const k: usize = switch (mode) {
+        .strict => @max(1, @min(workers, text.len / bytes_per_worker)),
+        .lenient => 1,
+    };
+    const sinks = try gpa.alloc(RangeSink, k);
+    defer gpa.free(sinks);
+    for (sinks, 0..) |*s, i| s.* = .{ .gpa = gpa, .kinds = kinds.items, .skip_header = i == 0 };
+    defer for (sinks) |*s| s.deinit();
+    for (sinks) |*s| try s.alloc();
+    const ptrs = try gpa.alloc(*RangeSink, k);
+    defer gpa.free(ptrs);
+    const scratches = try gpa.alloc([]u8, k);
+    defer gpa.free(scratches);
+    var n_scratch: usize = 0;
+    defer for (scratches[0..n_scratch]) |sc| gpa.free(sc);
+    for (ptrs, scratches, sinks) |*ptr, *sc, *s| {
+        ptr.* = s;
+        sc.* = try gpa.alloc(u8, scratch_len);
+        n_scratch += 1;
+    }
+    switch (mode) {
+        .strict => try zsift.parallel.forEachFieldExact(io, text, .{}, scratches, ptrs, RangeSink.on),
+        .lenient => {
+            var it = try zsift.Parser.init(text, scratches[0], .{});
+            while (try it.next()) |f| {
+                sinks[0].on(f.bytes, f.last_in_record);
+                it.resetScratch();
+            }
+        },
+    }
+    for (sinks) |*s| if (s.err) |e| return e;
 
+    // ---- merge the ranges in file order ----
+    var n_rows: usize = 0;
+    for (sinks) |*s| n_rows += s.rows;
+    if (n_rows == 0) return error.EmptyCsv;
+    const n_cols = names.items.len;
+
+    const values = try gpa.alloc([]f32, n_cols);
+    errdefer gpa.free(values);
+    var filled: usize = 0;
+    errdefer for (values[0..filled]) |v| gpa.free(v);
     const levels = try gpa.alloc([][]u8, n_cols);
     errdefer gpa.free(levels);
     var levelled: usize = 0;
@@ -343,96 +300,157 @@ pub fn readCsvHinted(
         for (ls) |l| gpa.free(l);
         gpa.free(ls);
     };
-
-    {
-        var lists = try gpa.alloc(std.ArrayList([]u8), n_cols);
-        defer gpa.free(lists);
-        for (lists) |*l| l.* = .empty;
-        defer for (lists) |*l| l.deinit(gpa);
-
-        var fields_buf: [512][]const u8 = undefined;
-        const fields = fields_buf[0..n_cols];
-        for (0..n_rows) |i| {
-            const line = trimField(text[offs[i + 1]..offs[i + 2]]);
-            const got = splitRow(line, fields);
-            for (0..@min(got, n_cols)) |c| {
-                if (kinds[c] != .categorical) continue;
-                const t = trimField(fields[c]);
-                // Only genuinely empty fields are skipped. A categorical
-                // column's "NA" is kept as a level on purpose -- see
-                // `isMissingToken` for why that is not an oversight.
-                if (t.len == 0) continue;
-                if (dict_storage[c] == null) dict_storage[c] = .empty;
-                const m = &dict_storage[c].?;
-                if (m.contains(t)) continue;
-                // The `u8` bin cap is NOT enforced here. It used to be, and
-                // that made `--drop` useless against a wide column: this pass
-                // runs over every column in the file, before `quantise` has
-                // seen the drop list, so a column the caller had explicitly
-                // excluded still killed the read. The cap belongs where the
-                // `u8` cast is, in `binOne`, which only runs for columns that
-                // survived the drops.
-                //
-                // What remains here is a memory guard: a free-text column in a
-                // large file would otherwise build a dictionary the size of
-                // the file before anyone objected.
-                if (lists[c].items.len >= max_levels) return error.TooManyLevels;
-                const owned = try gpa.dupe(u8, t);
-                errdefer gpa.free(owned);
-                try m.put(gpa, owned, @intCast(lists[c].items.len));
-                try lists[c].append(gpa, owned);
-            }
-        }
-        while (levelled < n_cols) : (levelled += 1) {
-            levels[levelled] = try lists[levelled].toOwnedSlice(gpa);
-        }
-    }
-
-    // ---- parse values in parallel ----
-    const values = try gpa.alloc([]f32, n_cols);
-    errdefer gpa.free(values);
-    var allocated: usize = 0;
-    errdefer for (values[0..allocated]) |v| gpa.free(v);
-    while (allocated < n_cols) : (allocated += 1) {
-        values[allocated] = try gpa.alloc(f32, n_rows);
-    }
-
-    const dict_ptrs = try gpa.alloc(?*const std.StringHashMapUnmanaged(u32), n_cols);
-    defer gpa.free(dict_ptrs);
-    for (0..n_cols) |c| {
-        dict_ptrs[c] = if (dict_storage[c]) |*m| m else null;
-    }
-
-    const bad = try gpa.alloc(std.atomic.Value(u32), n_cols);
-    defer gpa.free(bad);
-    for (bad) |*b| b.* = .init(0);
-
-    var ctx = ParseCtx{
-        .text = text,
-        .offs = offs[1..],
-        .kinds = kinds,
-        .values = values,
-        .dicts = dict_ptrs,
-        .bad = bad,
-        .n_cols = n_cols,
-        .unseen = .init(false),
-    };
-    pool.parallelFor(n_rows, &ctx, ParseCtx.run, 4096);
-
     const unparsed = try gpa.alloc(u32, n_cols);
     errdefer gpa.free(unparsed);
-    for (unparsed, bad) |*u, *b| u.* = b.load(.monotonic);
+
+    for (0..n_cols) |c| {
+        values[c] = try gpa.alloc(f32, n_rows);
+        filled += 1;
+        unparsed[c] = 0;
+        for (sinks) |*s| unparsed[c] += s.bad[c];
+        levels[c] = try mergeColumn(gpa, sinks, c, values[c]);
+        levelled += 1;
+    }
 
     return .{
         .gpa = gpa,
         .n_rows = n_rows,
-        .names = names,
-        .kinds = kinds,
+        .names = try names.toOwnedSlice(gpa),
+        .kinds = try kinds.toOwnedSlice(gpa),
         .values = values,
         .levels = levels,
         .unparsed = unparsed,
     };
 }
+
+/// Concatenate column `c` of every range into `out`. For a categorical column the
+/// ranges' local level ids are renumbered into one dictionary, walked in range order,
+/// so each level's id is its first appearance in the file. Returns the levels, owned.
+fn mergeColumn(gpa: std.mem.Allocator, sinks: []RangeSink, c: usize, out: []f32) ![][]u8 {
+    var at: usize = 0;
+    if (sinks[0].kinds[c] == .numeric) {
+        for (sinks) |*s| {
+            @memcpy(out[at..][0..s.cols[c].items.len], s.cols[c].items);
+            at += s.cols[c].items.len;
+        }
+        return &.{};
+    }
+    var global: std.StringHashMapUnmanaged(u32) = .empty;
+    defer global.deinit(gpa);
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |l| gpa.free(l);
+        list.deinit(gpa);
+    }
+    var remap: std.ArrayList(u32) = .empty;
+    defer remap.deinit(gpa);
+    for (sinks) |*s| {
+        remap.clearRetainingCapacity();
+        for (s.levels[c].items) |*lvl| {
+            const gop = try global.getOrPut(gpa, lvl.*);
+            if (!gop.found_existing) {
+                if (list.items.len >= max_levels) return error.TooManyLevels;
+                gop.value_ptr.* = @intCast(list.items.len);
+                try list.append(gpa, lvl.*);
+                lvl.* = &.{}; // ownership moved to `list`
+            }
+            try remap.append(gpa, gop.value_ptr.*);
+        }
+        for (s.cols[c].items) |v| {
+            out[at] = if (std.math.isNan(v)) v else @floatFromInt(remap.items[@intFromFloat(v)]);
+            at += 1;
+        }
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+/// One range's rows, column-major, with the range's own category dictionaries (local
+/// ids in first-appearance order within the range). Written by one worker only.
+const RangeSink = struct {
+    gpa: std.mem.Allocator,
+    kinds: []const ColumnKind,
+    /// Range 0 begins with the header record, which is not a data row.
+    skip_header: bool,
+    col: usize = 0,
+    rows: usize = 0,
+    cols: []std.ArrayList(f32) = &.{},
+    dicts: []std.StringHashMapUnmanaged(u32) = &.{},
+    levels: []std.ArrayList([]u8) = &.{},
+    bad: []u32 = &.{},
+    err: ?anyerror = null,
+
+    fn alloc(s: *RangeSink) !void {
+        const n = s.kinds.len;
+        s.cols = try s.gpa.alloc(std.ArrayList(f32), n);
+        for (s.cols) |*x| x.* = .empty;
+        s.dicts = try s.gpa.alloc(std.StringHashMapUnmanaged(u32), n);
+        for (s.dicts) |*x| x.* = .empty;
+        s.levels = try s.gpa.alloc(std.ArrayList([]u8), n);
+        for (s.levels) |*x| x.* = .empty;
+        s.bad = try s.gpa.alloc(u32, n);
+        @memset(s.bad, 0);
+    }
+
+    fn deinit(s: *RangeSink) void {
+        for (s.cols) |*x| x.deinit(s.gpa);
+        s.gpa.free(s.cols);
+        for (s.dicts) |*x| x.deinit(s.gpa);
+        s.gpa.free(s.dicts);
+        for (s.levels) |*x| {
+            for (x.items) |l| s.gpa.free(l); // levels merged away were emptied
+            x.deinit(s.gpa);
+        }
+        s.gpa.free(s.levels);
+        s.gpa.free(s.bad);
+    }
+
+    fn on(s: *RangeSink, bytes: []const u8, last: bool) void {
+        if (s.err != null) return;
+        if (s.skip_header) {
+            if (last) s.skip_header = false;
+            return;
+        }
+        if (s.col < s.kinds.len) s.put(s.col, bytes) catch |e| {
+            s.err = e;
+        };
+        s.col += 1;
+        if (last) {
+            // A short record: its missing columns are NaN. Extra fields were ignored.
+            while (s.col < s.kinds.len) : (s.col += 1) s.cols[s.col].append(s.gpa, std.math.nan(f32)) catch |e| {
+                s.err = e;
+            };
+            s.col = 0;
+            s.rows += 1;
+        }
+    }
+
+    fn put(s: *RangeSink, c: usize, bytes: []const u8) !void {
+        const t = trimField(bytes);
+        var v: f32 = std.math.nan(f32);
+        // Only a genuinely empty field is missing in a categorical column: its `NA`
+        // is a level (see `isMissingToken`).
+        if (t.len != 0) switch (s.kinds[c]) {
+            .numeric => v = std.fmt.parseFloat(f32, t) catch blk: {
+                if (!isMissingToken(t)) s.bad[c] += 1;
+                break :blk std.math.nan(f32);
+            },
+            .categorical => {
+                const gop = try s.dicts[c].getOrPut(s.gpa, t);
+                if (!gop.found_existing) {
+                    // A memory guard, not the bin cap (that is `binOne`'s): a free-text
+                    // column must not build a dictionary the size of the file.
+                    if (s.levels[c].items.len >= max_levels) return error.TooManyLevels;
+                    const owned = try s.gpa.dupe(u8, t);
+                    gop.key_ptr.* = owned;
+                    gop.value_ptr.* = @intCast(s.levels[c].items.len);
+                    try s.levels[c].append(s.gpa, owned);
+                }
+                v = @floatFromInt(gop.value_ptr.*);
+            },
+        };
+        try s.cols[c].append(s.gpa, v);
+    }
+};
 
 // ------------------------------------------------------------- profiling
 
@@ -898,4 +916,111 @@ test "a schema hint outranks the evidence in the file" {
     defer mixed.deinit();
     try testing.expectEqual(ColumnKind.categorical, mixed.kinds[0]);
     try testing.expectEqual(ColumnKind.numeric, mixed.kinds[1]);
+}
+
+// ---- the loader on zsift: the three row-splitting bugs it fixed, and its fallback ----
+
+fn readText(io: std.Io, gpa: std.mem.Allocator, pool: *Pool, text: []const u8) !Frame {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.csv", .data = text });
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/t.csv", .{tmp.sub_path});
+    return readCsv(gpa, io, pool, path, 1 << 28);
+}
+
+test "a newline inside a quoted field does not split the row" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    // The old splitter cut this into 5 rows and turned `id` categorical.
+    var f = try readText(testing.io, gpa, pool, "id,note,val\n1,plain,1.5\n2,\"two\nlines\",2.5\n3,x,3.5\n");
+    defer f.deinit();
+    try testing.expectEqual(@as(usize, 3), f.n_rows);
+    try testing.expectEqual(ColumnKind.numeric, f.kinds[0]);
+    try testing.expectEqualStrings("two\nlines", f.levels[1][1]);
+    try testing.expectEqual(@as(f32, 2.5), f.values[2][1]);
+}
+
+test "escaped quotes are unescaped in category levels" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    var f = try readText(testing.io, gpa, pool, "name\n\"say \"\"hi\"\"\"\nplain\n");
+    defer f.deinit();
+    try testing.expectEqualStrings("say \"hi\"", f.levels[0][0]);
+}
+
+test "more than 512 columns are all kept" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(gpa);
+    var buf: [16]u8 = undefined;
+    for (0..3) |r| {
+        for (0..600) |c| {
+            if (c > 0) try b.append(gpa, ',');
+            try b.appendSlice(gpa, if (r == 0) try std.fmt.bufPrint(&buf, "c{d}", .{c}) else try std.fmt.bufPrint(&buf, "{d}", .{c}));
+        }
+        try b.append(gpa, '\n');
+    }
+    var f = try readText(testing.io, gpa, pool, b.items);
+    defer f.deinit();
+    try testing.expectEqual(@as(usize, 600), f.names.len);
+    try testing.expectEqual(@as(f32, 599), f.values[599][1]);
+}
+
+test "a stray quote in an unquoted field falls back to the lenient parser" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 4);
+    defer pool.deinit();
+    var f = try readText(testing.io, gpa, pool, "item,v\n3\" pipe,1.5\nplain,2.5\n");
+    defer f.deinit();
+    try testing.expectEqual(@as(usize, 2), f.n_rows);
+    try testing.expectEqualStrings("3\" pipe", f.levels[0][0]);
+    try testing.expectEqual(@as(f32, 2.5), f.values[1][1]);
+}
+
+test "a file large enough to parse on many workers loads exactly as on one" {
+    const gpa = testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // > 2 MiB so zsift really splits it; categorical levels first seen late, quoted
+    // fields with newlines, NA in numeric and categorical columns, short rows.
+    var prng = std.Random.DefaultPrng.init(11);
+    const r = prng.random();
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(gpa);
+    try b.appendSlice(gpa, "x,cat,y,note\n");
+    var buf: [96]u8 = undefined;
+    for (0..150_000) |i| {
+        const cat = r.uintLessThan(u32, 40 + @as(u32, @intCast(i / 2000)));
+        const x = if (r.uintLessThan(u8, 20) == 0) "NA" else try std.fmt.bufPrint(buf[48..], "{d}", .{r.uintLessThan(u32, 1000)});
+        const line = if (r.uintLessThan(u8, 50) == 0)
+            try std.fmt.bufPrint(&buf, "{s},c{d}\n", .{ x, cat })
+        else
+            try std.fmt.bufPrint(&buf, "{s},c{d},{d},\"n\n{d}\"\n", .{ x, cat, r.uintLessThan(u32, 100), i % 7 });
+        try b.appendSlice(gpa, line);
+    }
+    try testing.expect(b.items.len > 2 << 20);
+
+    var one = try Pool.init(gpa, 1);
+    defer one.deinit();
+    var many = try Pool.init(gpa, 8);
+    defer many.deinit();
+    var a = try readText(io, gpa, one, b.items);
+    defer a.deinit();
+    var m = try readText(io, gpa, many, b.items);
+    defer m.deinit();
+
+    try testing.expectEqual(a.n_rows, m.n_rows);
+    for (0..a.names.len) |c| {
+        try testing.expectEqual(a.kinds[c], m.kinds[c]);
+        try testing.expectEqual(a.unparsed[c], m.unparsed[c]);
+        try testing.expectEqual(a.levels[c].len, m.levels[c].len);
+        for (a.levels[c], m.levels[c]) |x, y| try testing.expectEqualStrings(x, y);
+        for (a.values[c], m.values[c]) |x, y| try testing.expectEqual(@as(u32, @bitCast(x)), @as(u32, @bitCast(y)));
+    }
 }
