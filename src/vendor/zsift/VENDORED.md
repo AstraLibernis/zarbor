@@ -15,5 +15,7 @@ dependencies of any kind.
    `zig build verify` (both must pass).
 2. Replace `src/vendor/zsift/core/` with that checkout's `src/core/`, and
    `src/vendor/zsift/csv.zig` with its `src/csv.zig` minus the `test` block.
-3. Update the commit above, then run zarbor's `zig build test` and
-   `zig build loadcmp` (see `bench/loadcmp.zig`).
+3. Update the commit above and run zarbor's `zig build test`. Then load real
+   files with the previous and the refreshed zarbor and check the tables are
+   identical (same `Frame` names, kinds, levels, value bits, unparsed counts)
+   before trusting it.
