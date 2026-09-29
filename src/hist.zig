@@ -2,8 +2,8 @@
 // Copyright (C) 2026 AstraLibernis
 
 //! Histogram construction; the split search is in split.zig. This is the whole cost of boosting.
-//! 1. A node's gradients are gathered once, reused across all features: the gather is the costly
-//!    part and a node builds one histogram per feature, so this removes most random access.
+//! 1. Row-outer: each row's gradient is read once and added to every feature's histogram from the
+//!    row-major bins. The gradient read is the costly random access; per row, not per feature.
 //! 2. Per-worker private histograms (tens of KB, stay in L2), vectorised reduction: no atomics.
 //! Sums are f64 though gradients are f32: a root adds hundreds of thousands of terms into a few
 //! hundred accumulators, and f32 loses real precision over that many additions.
@@ -74,9 +74,10 @@ pub const Bank = struct {
     const stamp_stride: usize = @max(1, std.atomic.cache_line / @sizeOf(u64));
 
     /// Bins per alignment step, so `step * @sizeOf(Bin)` is whole cache lines. Not `cache_line /
-    /// @sizeOf(Bin)`: 24-byte `Bin` on Zen 5's 128-byte line gives 5, not the power of two
-    /// `alignForward` needs; Debug asserts, ReleaseFast silently overlaps feature slices and corrupts
-    /// every split search. gcd gives the smallest valid step: 128/gcd(24,128) = 16; 8 at 64 bytes.
+    /// @sizeOf(Bin)`: the 24-byte `Bin` this once was gave 128/24 = 5 on a 128-byte line, not the
+    /// power of two `alignForward` needs; Debug asserts, ReleaseFast silently overlaps feature slices
+    /// and corrupts every split search. gcd gives the smallest valid step for any size: 16 for 24
+    /// bytes, 4 for today's 32-byte `Bin`.
     const bin_step: usize = @max(1, std.atomic.cache_line / std.math.gcd(@sizeOf(Bin), std.atomic.cache_line));
 
     inline fn roundUp(n: usize) usize {
@@ -219,7 +220,7 @@ const ReduceCtx = struct {
 /// rising below 128 where chunks get too small for the barrier. Output identical at every setting.
 pub const parallel_threshold: usize = 512;
 
-/// Build one node's histogram into `out`, one slot's worth (`n_features * stride`). Only `features`
+/// Build one node's histogram into `out`, one slot's worth (`bank.slotLen()` bins). Only `features`
 /// are populated; the caller must not read the others.
 pub fn build(
     pool: *Pool,

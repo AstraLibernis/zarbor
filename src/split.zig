@@ -199,7 +199,8 @@ fn bestCatSplit(
     }
     if (n_ord < 2) return;
 
-    // Stable, allocation-free, at most 255 elements; far cheaper than the histogram behind them.
+    // Stable, allocation-free; one element per level present, so at most 255 at the default
+    // `max_cat_levels`, where it is far cheaper than the histogram. Quadratic above that.
     std.sort.insertion(CatKey, scratch[0..n_ord], {}, CatKey.lessThan);
 
     // Children carry the extra L2; the parent does not.

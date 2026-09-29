@@ -84,8 +84,8 @@ pub const Dataset = struct {
     wide_cols: [][]BinIdx,
     /// Row-major copy: `bins_rm[r * n_features + f]`. Histogram building gains
     /// 1.74x from a contiguous row; partition would touch 13x the cache lines
-    /// here. Cost: 13 bytes a row (8.7 MB on 668k rows vs a 93 MB peak) and
-    /// one transpose at load.
+    /// here. Cost: 2 bytes per feature per row (13 features: 17.4 MB on 668k
+    /// rows; the 93 MB peak was measured at 1 byte) and one transpose at load.
     bins_rm: []BinIdx,
     /// Bins actually in use per feature, including the missing bin.
     n_bins: []u16,
