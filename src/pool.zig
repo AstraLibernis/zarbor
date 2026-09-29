@@ -1,34 +1,24 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! A persistent parallel-for pool.
-//!
-//! Zig 0.16 removed `std.Thread.Pool`, `std.Thread.Mutex` and the futex layer;
-//! the replacement lives behind the new `std.Io` interface, which is built for
-//! blocking IO rather than for compute fan-out. A boosting round issues a few
-//! hundred barriers over work items that take tens of microseconds, so the
-//! cost that matters is wake-up latency, not scheduling generality. This pool
-//! therefore parks workers on a spin-then-yield loop over an epoch counter and
-//! never makes a syscall on the fast path.
-//!
-//! Work is handed out as a shared cursor rather than a static partition, so a
-//! thread descheduled by the host cannot stall the barrier behind it.
+//! A persistent parallel-for pool. Zig 0.16 dropped `std.Thread.Pool`/`Mutex`
+//! for `std.Io`, built for blocking IO. A round issues hundreds of barriers
+//! over tens-of-microsecond items, so wake latency rules: workers spin then
+//! yield on an epoch counter, no syscall on the fast path. A shared cursor, not
+//! a static partition, so a descheduled thread cannot stall the barrier.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 
-/// Parking needs a futex. Zig 0.16 has no portable one — `std.Thread.Mutex`,
-/// `Condition` and the futex layer are all gone — but the raw Linux syscall is
-/// right there, and this only ever runs on Linux. Anywhere else falls back to
-/// the yield loop, which is correct, merely wasteful.
+/// Zig 0.16 has no portable futex, so raw Linux syscall; elsewhere the yield
+/// loop, correct but wasteful.
 const can_park = builtin.os.tag == .linux;
 
 const wait_op: linux.FUTEX_OP = .{ .cmd = .WAIT, .private = true };
 const wake_op: linux.FUTEX_OP = .{ .cmd = .WAKE, .private = true };
 
-/// Sleeps until `v` differs from `expect`. Returns immediately if it already
-/// does, which is what closes the race against a concurrent publisher.
+/// Sleeps until `v` != `expect`; returns at once if already so (closes the publish race).
 fn park(v: *std.atomic.Value(u32), expect: u32) void {
     _ = linux.futex_4arg(&v.raw, wait_op, expect, null);
 }
@@ -39,14 +29,12 @@ fn unparkAll(v: *std.atomic.Value(u32)) void {
 
 pub const cache_line = std.atomic.cache_line;
 
-/// Called with a half-open row range and the id of the worker running it.
-/// The worker id lets a task index per-thread scratch without locking.
+/// Half-open range plus worker id, for lock-free per-thread scratch.
 pub const TaskFn = *const fn (ctx: *anyopaque, worker: usize, begin: usize, end: usize) void;
 
 pub const Pool = struct {
     gpa: std.mem.Allocator,
-    /// Spawned helpers. The submitting thread also participates, as worker 0,
-    /// so total concurrency is `threads.len + 1`.
+    /// Spawned helpers; the submitter is worker 0, so concurrency is `threads.len + 1`.
     threads: []std.Thread,
 
     // --- job description; published by the release store to `epoch` --------
@@ -55,23 +43,17 @@ pub const Pool = struct {
     total: usize = 0,
     chunk: usize = 1,
 
-    // Each of these is written by every worker on the hot path. Keeping them
-    // on separate cache lines is the difference between a shared counter and
-    // a contended one.
+    // Hot-path writes by every worker: separate cache lines avoid contention.
     cursor: std.atomic.Value(usize) align(cache_line) = .init(0),
     done: std.atomic.Value(usize) align(cache_line) = .init(0),
     epoch: std.atomic.Value(u32) align(cache_line) = .init(0),
     quit: std.atomic.Value(bool) align(cache_line) = .init(false),
-    /// Workers currently asleep on `epoch`. Lets the publisher skip the wake
-    /// syscall entirely in the common case, where a burst of back-to-back
-    /// `parallelFor` calls keeps every worker spinning and nobody parks.
+    /// Workers asleep on `epoch`; lets the publisher skip the wake syscall when
+    /// back-to-back `parallelFor` calls keep everyone spinning.
     parked: std.atomic.Value(u32) align(cache_line) = .init(0),
 
-    /// `n_threads` of 0 means one worker per logical core.
-    ///
-    /// Heap-allocated because every worker holds a `*Pool` for its whole life:
-    /// the pool's address must outlive this call, which a by-value return
-    /// cannot promise.
+    /// `n_threads` 0 = one per logical core. Heap-allocated: workers hold a
+    /// `*Pool` for life, so its address must be stable.
     pub fn init(gpa: std.mem.Allocator, n_threads: u32) !*Pool {
         const cores = std.Thread.getCpuCount() catch 1;
         const want = if (n_threads == 0) cores else n_threads;
@@ -113,11 +95,7 @@ pub const Pool = struct {
         return p.threads.len + 1;
     }
 
-    /// Run `task` over `[0, total)`, returning once every element is done.
-    ///
-    /// `min_chunk` is the smallest range worth handing to another core; below
-    /// it the barrier costs more than the work, so the caller's thread just
-    /// runs the whole range inline.
+    /// Run `task` over `[0, total)`. Under `min_chunk` the barrier costs more: run inline.
     pub fn parallelFor(
         p: *Pool,
         total: usize,
@@ -132,8 +110,8 @@ pub const Pool = struct {
             return;
         }
 
-        // Several chunks per worker so a slow core cannot hold the barrier,
-        // but few enough that the atomic cursor is not itself the bottleneck.
+        // Several chunks per worker so a slow core cannot hold the barrier;
+        // few enough that the cursor is not the bottleneck.
         var chunk = (total + workers * 4 - 1) / (workers * 4);
         if (chunk < min_chunk) chunk = min_chunk;
 
@@ -144,8 +122,7 @@ pub const Pool = struct {
         p.cursor.store(0, .monotonic);
         p.done.store(0, .monotonic);
 
-        // Release: everything above is visible to any worker that sees the
-        // new epoch with an acquire load.
+        // Release: visible to any worker acquiring the new epoch.
         _ = p.epoch.fetchAdd(1, .release);
         if (can_park and p.parked.load(.acquire) != 0) unparkAll(&p.epoch);
 
@@ -159,9 +136,7 @@ pub const Pool = struct {
     }
 };
 
-/// How long to spin before yielding. Tuned to comfortably cover a histogram
-/// chunk; past that the thread is waiting on something real and the
-/// scheduler should have the core back.
+/// Spin before yielding; covers a histogram chunk, past which the core goes back.
 pub const spin_budget: u32 = 8192;
 
 fn drain(p: *Pool, worker: usize) void {
@@ -194,15 +169,9 @@ fn workerMain(p: *Pool, id: usize) void {
                 continue;
             }
 
-            // Past the spin budget this thread is waiting on something real —
-            // usually a serial stretch of tree building — so give the core
-            // back instead of burning it.
-            //
-            // Announce the park *before* re-reading the epoch. A publisher
-            // that bumps the epoch after our re-check will see `parked` and
-            // wake us; one that bumps before it makes the futex compare fail,
-            // so the sleep returns immediately. Either order is safe, which is
-            // the whole point of doing it in this sequence.
+            // Past the spin budget (usually serial tree building): park.
+            // Announce *before* re-reading the epoch: a later bump sees
+            // `parked` and wakes us; an earlier one fails the futex compare.
             _ = p.parked.fetchAdd(1, .acq_rel);
             if (p.epoch.load(.acquire) == e and !p.quit.load(.acquire)) park(&p.epoch, e);
             _ = p.parked.fetchSub(1, .acq_rel);

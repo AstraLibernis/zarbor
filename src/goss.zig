@@ -12,11 +12,8 @@ const GossRank = booster.GossRank;
 pub const radix_bits = 16;
 pub const n_radix = 1 << radix_bits;
 
-/// `|g|` as a sortable integer.
-///
-/// For a non-negative float the IEEE-754 bit pattern is monotonic in the
-/// value, so the pattern can be bucketed directly with no conversion. NaN
-/// sorts above everything, which is where a blown-up gradient belongs.
+/// `|g|` as a sortable integer: non-negative IEEE-754 bits are monotonic in
+/// value. NaN sorts above all, where a blown-up gradient belongs.
 inline fn magBits(g: f32) u32 {
     return @bitCast(@abs(g));
 }
@@ -38,17 +35,10 @@ pub const Cut = struct {
     take: usize,
 };
 
-/// Find the cut with two counting passes over the magnitude bit patterns.
-///
-/// This replaced a quickselect that was 768 ms of a 1.57 s GOSS fit — 49% of
-/// the run, on a step that is not part of the model. The problem was not its
-/// O(n): Hoare's two scans branch on a comparison that is a coin flip by
-/// construction, so nearly every element cost a misprediction. Counting
-/// passes branch predictably and stream the input, and sixteen bits at a time
-/// means two of them pin the threshold exactly.
-///
-/// Exact, not approximate: afterwards every chosen row's magnitude is >= every
-/// unchosen row's, with exact bit-ties broken by row order.
+/// Two 16-bit counting passes over the bit patterns. Quickselect was 768 ms
+/// of a 1.57 s GOSS fit (49%): Hoare's scans branch on a coin flip, so nearly
+/// every element mispredicted; counting branches predictably and streams.
+/// Exact: every chosen magnitude >= every unchosen one, bit-ties by row order.
 pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: GossRank) Cut {
     std.debug.assert(counts.len == n_radix);
     std.debug.assert(k >= 1 and k <= grads.len);
@@ -83,15 +73,10 @@ pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: GossR
     return .{ .t = (hi << radix_bits) | lo, .take = k - above };
 }
 
-/// LightGBM's Gradient-based One-Side Sampling.
-///
-/// Rows with large |gradient| are the under-fitted ones and are kept in full;
-/// the well-fitted remainder is sampled. Dropping most small-gradient rows
-/// would bias the split gains, so the survivors are amplified by
-/// `(1 - top_rate) / other_rate` — the reciprocal of their sampling rate —
-/// which restores the expected gradient sum.
-///
-/// Mutates `grads` in place; the caller recomputes it every round anyway.
+/// LightGBM's Gradient-based One-Side Sampling. Large-|gradient| rows are
+/// kept; the rest are sampled and amplified by `(1 - top_rate) / other_rate`
+/// (inverse sampling rate) so split gains stay unbiased. Mutates `grads` in
+/// place; the caller recomputes it every round.
 pub fn gossSelect(
     grads: []hist.GradPair,
     counts: []u32,
@@ -110,8 +95,7 @@ pub fn gossSelect(
 
     const cut = gossCut(grads, counts, top, how);
 
-    // One ordered pass: mark the large-gradient rows and collect the rest, so
-    // the random sample below has something contiguous to draw from.
+    // Mark large-gradient rows; collect the rest contiguously for sampling.
     const words = (n + 63) / 64;
     @memset(mask[0..words], 0);
     var take = cut.take;
@@ -145,10 +129,8 @@ pub fn gossSelect(
         mask[r >> 6] |= @as(u64, 1) << @truncate(r);
     }
 
-    // Emit in ascending row order, from the bitset rather than by sorting.
-    // A scrambled row set is the worst case for the histogram kernel, which
-    // reads the row-major bin matrix and wants a forward walk; sorting 160k
-    // ids would cost more than the selection does.
+    // Ascending row order via the bitset: the histogram kernel wants a
+    // forward walk, and sorting 160k ids would cost more than selection.
     var k: usize = 0;
     for (mask[0..words], 0..) |w0, wi| {
         var w = w0;

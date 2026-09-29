@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Regularised linear and logistic regression — the simple baseline.
-//!
-//! The design matrix is derived from the same binned dataset the trees use,
-//! which is what keeps one data path for the whole library: a numeric feature
-//! contributes its bin's representative value, a categorical one contributes a
-//! one-hot block, and the missing bin encodes as the column mean (zero once
-//! standardised). Nothing is materialised — columns are read straight out of
-//! the u8 bin matrix on each pass, so memory stays at the size of the bins.
-//!
-//! Binning a numeric feature before fitting a linear model is a small loss of
-//! resolution and a real gain in robustness: quantile edges bound the influence
-//! of outliers, which plain OLS on raw columns handles badly.
-//!
-//! Fitting is L-BFGS by default: it estimates the problem's curvature from
-//! recent steps, which is what lets it reach the optimum in a few dozen passes
-//! instead of the few thousand a fixed-step first-order method needs. An L1
-//! term switches it to OWL-QN, the orthant-wise variant, so `alpha` still
-//! produces exact zeros rather than merely small coefficients.
-//! `--lin_solver=adam` keeps the first-order fitter available.
+//! Regularised linear and logistic regression: the simple baseline.
+//! The design matrix derives from the trees' binned dataset, keeping one data path:
+//! a numeric feature gives its bin's representative value, a categorical a one-hot
+//! block, the missing bin the column mean (zero once standardised). Nothing is
+//! materialised: columns are read from the bin matrix each pass, so memory stays
+//! at the bins' size. Binning costs a little resolution, but quantile edges bound
+//! outlier influence, which plain OLS on raw columns handles badly.
+//! Default fit is L-BFGS: a curvature estimate from recent steps reaches the optimum
+//! in a few dozen passes, not the thousands a fixed-step first-order method needs.
+//! L1 switches to OWL-QN (orthant-wise) so `alpha` gives exact zeros, not small
+//! coefficients. `--lin_solver=adam` keeps the first-order fitter.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -36,30 +28,22 @@ const Problem = lin_solve.Problem;
 const fitLbfgs = lin_solve.fitLbfgs;
 const fitAdam = lin_solve.fitAdam;
 
-/// How the linear model's coefficients are fitted. Both minimise the *same*
-/// convex objective, so wherever both arrive they must agree -- measured, and
-/// the places they do not are in docs/linear-solvers.md.
+/// How coefficients are fitted. Both minimise the *same* convex objective, so where
+/// both arrive they must agree; measured, with the exceptions, in docs/linear-solvers.md.
 pub const LinSolver = enum {
-    /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), with
-    /// **OWL-QN** (orthant-wise limited-memory quasi-Newton) when `alpha` > 0.
-    /// Builds a curvature estimate from recent steps, so it reaches the
-    /// optimum in tens of passes where a first-order method needs thousands.
-    /// This is also what scikit-learn's LogisticRegression defaults to, which
-    /// makes the two directly comparable.
+    /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), **OWL-QN**
+    /// (orthant-wise limited-memory quasi-Newton) when `alpha` > 0. Tens of passes where
+    /// first-order needs thousands; scikit-learn LogisticRegression's default, so comparable.
     lbfgs,
-    /// **Adam** (adaptive moment estimation), full batch, with an L1
-    /// proximal step. Needs no objective
-    /// evaluation and so no line search, which makes each pass cheaper — but
-    /// it takes far more of them to reach the same coefficients.
+    /// **Adam** (adaptive moment estimation), full batch, L1 proximal step. No objective
+    /// evaluation, so no line search: cheaper passes, but far more of them.
     adam,
 };
 
-/// The linear model's settings. `objective` picks the model: logistic
-/// regression or linear regression (see objective.zig).
+/// Linear model settings; `objective` picks logistic or linear regression (objective.zig).
 pub const Params = struct {
     objective: Objective = .logistic,
-    /// Multiplier on positive-class gradients. >1 upweights the minority
-    /// class for imbalanced binary problems.
+    /// Multiplier on positive-class gradients; >1 upweights an imbalanced minority.
     scale_pos_weight: f32 = 1.0,
     /// L2 penalty on the coefficients (ridge). The intercept is unpenalised.
     lambda: f32 = 1.0,
@@ -67,18 +51,14 @@ pub const Params = struct {
     alpha: f32 = 0.0,
     /// Which optimiser fits the coefficients. Linear only.
     lin_solver: LinSolver = .lbfgs,
-    /// Maximum full-batch iterations. `lbfgs` normally converges in a few
-    /// dozen and stops on `lin_tol` well short of this; `adam` usually needs
-    /// all of them. Linear only.
+    /// Max full-batch iterations. `lbfgs` usually stops on `lin_tol` within a few
+    /// dozen; `adam` usually needs all. Linear only.
     lin_epochs: u32 = 300,
-    /// Adam step size. Ignored by `lbfgs`, which gets its step length from a
-    /// line search rather than from a constant. Linear only.
+    /// Adam step size; `lbfgs` ignores it (line search sets its step). Linear only.
     lin_lr: f32 = 0.05,
-    /// Stop when the largest absolute coefficient change in an iteration
-    /// falls below this. Same units for both solvers.
+    /// Stop when an iteration's largest coefficient change is below this (both solvers).
     lin_tol: f32 = 1e-7,
-    /// Standardise each design column to zero mean and unit variance before
-    /// fitting. Off makes the penalties scale-dependent and is rarely right.
+    /// Standardise columns to zero mean, unit variance. Off (scale-dependent penalties) is rarely right.
     lin_standardize: bool = true,
     /// Print per-round metrics every N rounds. 0 silences training.
     verbose_eval: u32 = 10,
@@ -90,21 +70,18 @@ pub const Params = struct {
     }
 };
 
-/// Ceiling on one-hot expansion. A categorical with thousands of levels would
-/// silently turn a small table into a huge design matrix; fail loudly instead.
+/// One-hot ceiling: fail loudly rather than silently build a huge design matrix.
 pub const max_design_cols: usize = 1 << 16;
 
 const numeric_col: u16 = std.math.maxInt(u16);
 
-/// One column of the design matrix. Public because saving a linear model
-/// means writing these out.
+/// One design-matrix column; public because saving a linear model writes these.
 pub const Col = struct {
     feature: u32,
     /// `numeric_col`, or the bin this one-hot column indicates.
     bin: u16,
     center: f32,
-    /// Reciprocal of the standard deviation; 0 for a constant column, which
-    /// zeroes the column out rather than dividing by ~0.
+    /// 1/stddev; 0 for a constant column, zeroing it rather than dividing by ~0.
     scale: f32,
 };
 
@@ -113,8 +90,7 @@ pub const Col = struct {
 pub const Design = struct {
     gpa: std.mem.Allocator,
     cols: []Col,
-    /// `repr[f][b]` is the value bin `b` of feature `f` stands for. Only
-    /// populated for numeric features.
+    /// `repr[f][b]`: the value bin `b` of feature `f` stands for. Numeric only.
     repr: [][]f32,
 
     pub fn deinit(d: *Design) void {
@@ -154,12 +130,8 @@ fn buildDesign(
             .numeric => {
                 const table = try gpa.alloc(f32, nb);
                 repr[f] = table;
-                // Binning computed the mean of the values that landed in each
-                // bin, which is what a bin should stand for. Fall back to the
-                // midpoint of the bin's edges for a dataset assembled without
-                // going through `quantise`; that is a biased stand-in under a
-                // skewed within-bin distribution, and on the EV set it costs
-                // 0.0003 AUC against the means.
+                // Binning's per-bin value means. Without `quantise`, fall back to edge
+                // midpoints: biased under skew, 0.0003 AUC worse on the EV set.
                 if (ds.means[f].len == nb) {
                     @memcpy(table, ds.means[f]);
                 } else {
@@ -168,9 +140,7 @@ fn buildDesign(
                         table[b] = data.binMidpoint(ds.edges[f], b - 1);
                         sum += table[b];
                     }
-                    // Bin 0 is missing; give it the feature's mean so a
-                    // missing entry sits at the centre and contributes
-                    // nothing once standardised.
+                    // Bin 0 (missing) gets the feature mean: zero once standardised.
                     table[0] = if (nb <= 1) 0 else @floatCast(sum / @as(f64, @floatFromInt(nb - 1)));
                 }
                 try cols.append(gpa, .{ .feature = @intCast(f), .bin = numeric_col, .center = 0, .scale = 1 });
@@ -281,13 +251,11 @@ const ScoreCtx = struct {
 pub const TrainResult = struct {
     model: Linear,
     epochs: u32,
-    /// How the fit ended. A caller that prints nothing else should still
-    /// check `fit.stalled()`: a stalled solve returns coefficients that look
-    /// ordinary and are not a solution to anything.
+    /// How the fit ended. Always check `fit.stalled()`: a stalled solve returns
+    /// ordinary-looking coefficients that solve nothing.
     fit: Fit = .{ .iters = 0 },
     score: f64,
-    /// Nanoseconds spent scoring the validation set; not part of fitting.
-    /// See `booster.TrainResult.valid_ns`.
+    /// Nanoseconds scoring validation, not fitting; see `booster.TrainResult.valid_ns`.
     valid_ns: u64,
 };
 
@@ -321,8 +289,7 @@ pub fn train(
     const rsum_part = try gpa.alloc(f64, reduce_chunks);
     defer gpa.free(rsum_part);
 
-    // Start the intercept at the base rate so the first steps do not have to
-    // travel there; for logistic that is the log-odds of the label mean.
+    // Intercept starts at the base rate (logistic: log-odds of the label mean).
     var sum: f64 = 0;
     for (ds.labels) |y| sum += y;
     const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
@@ -342,8 +309,7 @@ pub fn train(
         .ds = ds,
         .objective = cfg.objective,
         .scale_pos_weight = cfg.scale_pos_weight,
-        // L1/L2 are stated against the summed loss, so divide by n to match
-        // the mean-loss gradient the steps are taken against.
+        // L1/L2 are stated for the summed loss; divide by n for the mean-loss gradient.
         .l2 = @as(f64, cfg.lambda) / n_f,
         .l1 = @as(f64, cfg.alpha) / n_f,
         .theta = theta,
@@ -358,11 +324,9 @@ pub fn train(
 
     const fit: Fit = switch (cfg.lin_solver) {
         .lbfgs => try fitLbfgs(gpa, &pr, cfg, log),
-        // Adam has no line search and so no "the search could not move"
-        // failure, which is why `converged` stays true for it. But "did the
-        // gradient actually come down" is answerable for any solver, and
-        // leaving it unanswered meant adam reported success while returning
-        // a coin-flip model on a badly scaled design.
+        // No line search, so no "search could not move" failure: `converged` stays
+        // true. `stalled()` still checks the gradient came down; without that, adam
+        // reported success on a coin-flip model with a badly scaled design.
         .adam => try fitAdam(gpa, &pr, cfg, log),
     };
     const epochs = fit.iters;

@@ -17,8 +17,8 @@ const LinTerm = tree.LinTerm;
 const LeafSpan = tree.LeafSpan;
 const Tree = tree.Tree;
 
-/// Hard cap on the root-to-leaf features a linear leaf may use. Independent
-/// of `max_depth` so the array stays a fixed size in `Work`.
+/// Hard cap on root-to-leaf features a linear leaf may use; independent of `max_depth` so `Work` is
+/// fixed-size.
 pub const max_path: usize = 8;
 
 pub const Work = struct {
@@ -29,15 +29,14 @@ pub const Work = struct {
     total: hist.Bin,
     slot: u32,
     split: split.Split,
-    /// Distinct numeric features tested between the root and this node.
-    /// Empty unless `linear_leaves` is on -- tracking it otherwise is pure
-    /// cost for something nothing reads.
+    /// Distinct numeric features tested between root and this node. Empty unless `linear_leaves`:
+    /// otherwise pure cost for something nothing reads.
     path: [max_path]u32 = undefined,
     n_path: u8 = 0,
 };
 
-/// Hard ceiling on histogram slot memory. Beyond this the caller is asked to
-/// reduce tree size rather than have the allocator decide for them.
+/// Hard ceiling on histogram slot memory; beyond it the caller must shrink the tree, not the
+/// allocator decide.
 const slot_memory_budget: usize = 2 << 30;
 
 pub const Builder = struct {
@@ -52,15 +51,10 @@ pub const Builder = struct {
     free_slots: std.ArrayList(u32),
 
     rows: []u32,
-    /// Gradients indexed by original row id, borrowed for the current tree.
-    ///
-    /// These used to be permuted to match `rows`, so that a node's gradients
-    /// were contiguous. That paid for itself when the histogram loop was
-    /// feature-outer and read each gradient once *per feature*; row-outer
-    /// reads it once per row, and the permutation then costs far more than it
-    /// saves -- it tripled what the partition had to move (12 bytes a row
-    /// against 4). Measured: the row-id gather costs 4 ms across a 200-tree
-    /// fit, the moving cost over 100.
+    /// Gradients indexed by original row id, borrowed for the current tree. Not permuted to match
+    /// `rows`: that paid off when the histogram loop was feature-outer, but row-outer reads each
+    /// once per row, and permuting tripled partition traffic (12 bytes a row vs 4): gather 4 ms vs
+    /// moving 100+ ms per 200-tree fit.
     g: []const hist.GradPair,
     /// Destination for the parallel partition, which cannot be done in place.
     rows_out: []u32,
@@ -222,15 +216,10 @@ pub const Builder = struct {
         return k;
     }
 
-    /// Features whose histograms are materialised for every node of this tree.
-    ///
-    /// This is deliberately the per-*tree* sample and never the per-level or
-    /// per-node one. A node's histogram is derived from its parent's by
-    /// subtraction, which is only valid where parent and child cover the same
-    /// features; sampling per node would subtract against bins the parent
-    /// never accumulated. Level/node sampling therefore restricts which
-    /// features are *considered* for a split, not which are built — which is
-    /// also what XGBoost and LightGBM do.
+    /// Features whose histograms are materialised for every node of this tree: always the per-tree
+    /// sample, never per-level/node. Subtraction needs parent and child to cover the same features,
+    /// so level/node sampling restricts which features are considered, not built (as XGBoost and
+    /// LightGBM do).
     fn treeFeatures(b: *const Builder) []const u32 {
         return b.tree_features[0..b.n_tree_features];
     }
@@ -271,8 +260,7 @@ pub const Builder = struct {
         };
     }
 
-    /// Chunks the root sum is split into. Fixed, not derived from the thread
-    /// count, so the result does not depend on `--n_threads`.
+    /// Chunks the root sum is split into; fixed so the result does not depend on `--n_threads`.
     const total_chunks: usize = 64;
     /// Below this many rows the barrier costs more than the sum saves.
     const total_parallel_min: usize = 1 << 15;
@@ -281,8 +269,8 @@ pub const Builder = struct {
 
     fn makeLeaf(b: *Builder, w: Work) !void {
         const p = b.splitParams();
-        // Shrinkage is applied here, so a finished tree's output is already
-        // its contribution to the ensemble and no caller has to remember eta.
+        // Shrinkage applied here: a finished tree's output is already its ensemble contribution (no
+        // eta downstream).
         const raw = split.leafWeight(w.total.g, w.total.h, p);
         const weight: f32 = @floatCast(raw * b.cfg.learning_rate);
         var n_lin: u8 = 0;
@@ -303,24 +291,16 @@ pub const Builder = struct {
 
     const fitLinearLeaf = @import("leaf_linear.zig").fitLinearLeaf;
 
-    /// Gradient and hessian sums over a node's rows.
-    ///
-    /// Only the root needs this — every other node inherits its total from
-    /// its parent's split — but the root is *every* row, so on 668k rows over
-    /// 200 trees the serial version was 46 ms, 7% of a fit and one of the
-    /// three things holding 8-thread scaling to 4.8x against xgboost's 5.3x.
-    ///
-    /// Summed in a fixed number of chunks, reduced in chunk order, regardless
-    /// of how many threads are running. A plain `parallelFor` over rows would
-    /// group the additions differently at one thread than at eight and make
-    /// the model depend on `--n_threads`, which is a property worth more than
-    /// the milliseconds.
+    /// Gradient and hessian sums over a node's rows. Only the root needs it (others inherit from
+    /// the parent's split), but the root is every row: on 668k rows x 200 trees the serial version
+    /// was 46 ms, 7% of a fit and one of three things holding 8-thread scaling to 4.8x vs xgboost's
+    /// 5.3x. Fixed chunk count, reduced in chunk order at any thread count: a plain `parallelFor`
+    /// over rows would group additions per thread count, making the model depend on `--n_threads`,
+    /// which matters more than the milliseconds.
     fn totalOf(b: *Builder, rows: []const u32) hist.Bin {
         const n = rows.len;
-        // Deliberately *not* also conditioned on the worker count: that would
-        // make one thread group the additions differently from eight, which
-        // is the thing this is arranged to avoid. `parallelFor` already runs
-        // the chunks inline when there is one worker.
+        // Deliberately not conditioned on worker count: that would group additions differently at
+        // one thread than at eight. `parallelFor` already runs the chunks inline with one worker.
         if (n < total_parallel_min) {
             var g: f64 = 0;
             var h: f64 = 0;
@@ -349,11 +329,9 @@ pub const Builder = struct {
         return .{ .g = g, .h = h, .n = @floatFromInt(n) };
     }
 
-    /// Fill `rows[0..n_active]` with the rows this tree will see.
-    ///
-    /// An explicit `subset` wins outright. Otherwise `bootstrap` draws
-    /// `subsample * n` rows *with* replacement (bagging, which is what makes a
-    /// forest a forest), and without it we shuffle and take a prefix.
+    /// Fill `rows[0..n_active]` with this tree's rows. An explicit `subset` wins. Else `bootstrap`
+    /// draws `subsample * n` rows with replacement (bagging: what makes a forest a forest); without
+    /// it, shuffle and take a prefix.
     fn selectRows(b: *Builder, subset: ?[]const u32) void {
         const n_all = b.ds.n_rows;
 
@@ -371,8 +349,8 @@ pub const Builder = struct {
 
         const r = b.rng.random();
         if (b.cfg.bootstrap) {
-            // With replacement: duplicates are the point. A row drawn twice
-            // simply carries twice the weight in this tree's histograms.
+            // With replacement: duplicates are the point; a row drawn twice carries twice the
+            // weight.
             for (b.rows[0..k]) |*slot_row| slot_row.* = r.uintLessThan(u32, @intCast(n_all));
             b.n_active = k;
             return;
@@ -389,15 +367,14 @@ pub const Builder = struct {
         b.n_active = k;
     }
 
-    /// Grow one tree against `gradients` (indexed by original row id).
-    /// Returns the tree; `leafSpans()` describes where its leaves' rows landed.
+    /// Grow one tree against `gradients` (indexed by original row id); `leafSpans()` gives leaf row
+    /// spans.
     pub fn grow(b: *Builder, gradients: []const hist.GradPair) !Tree {
         return b.growRows(gradients, null);
     }
 
-    /// As `grow`, but over an explicit row set. GOSS uses this to hand the
-    /// builder the rows it chose; passing null falls back to the config's own
-    /// `subsample`/`bootstrap` policy.
+    /// As `grow`, over an explicit row set (GOSS hands in its chosen rows); null falls back to the
+    /// config's `subsample`/`bootstrap` policy.
     pub fn growRows(
         b: *Builder,
         gradients: []const hist.GradPair,
@@ -471,8 +448,8 @@ pub const Builder = struct {
             const t_part = prof.start();
             const mid = b.partition(w.start, w.end, w.split);
             prof.stop(.partition, t_part);
-            // A split the histogram endorsed but the partition cannot realise
-            // (every row on one side) would loop forever; treat it as a leaf.
+            // A split the histogram endorsed but the partition cannot realise (all rows one side)
+            // would loop forever; treat it as a leaf.
             if (mid == w.start or mid == w.end) {
                 try b.makeLeaf(w);
                 continue;
@@ -499,21 +476,12 @@ pub const Builder = struct {
                 .right = ri,
             };
 
-            // Will these children only ever become leaves?
-            //
-            // `makeLeaf` reads a node's total, its row span and its slot --
-            // never its histogram or its split. So for a child that is
-            // certain to be a leaf, building the histogram and searching it
-            // is pure waste, and it is not a small amount: half of a
-            // depthwise tree's nodes are its last level, so half of all
-            // histogram builds and split searches were thrown away.
-            //
-            // Two cases are decidable here. The depth cap is static. The leaf
-            // cap is too, because `leaf_count` at pop time never decreases --
-            // a pop either makes a leaf (queue -1, leaves +1) or splits
-            // (queue -1 +2, leaves +0) -- so once the budget is reached every
-            // remaining pop is a leaf. `b.queue` is post-removal here, and
-            // the next pop will see `leaves + queue + 2`.
+            // Will these children only ever be leaves? `makeLeaf` reads a node's total, row span
+            // and slot, never its histogram or split, so building and searching those is waste:
+            // half a depthwise tree's nodes are its last level. Both caps are decidable here: depth
+            // is static, and `leaf_count` at pop time never decreases (a pop makes a leaf: queue
+            // -1, leaves +1; or splits: queue -1 +2), so once the budget is hit every remaining pop
+            // is a leaf. `b.queue` is post-removal here; the next pop sees `leaves + queue + 2`.
             const at_depth_cap = b.cfg.max_depth != 0 and w.depth + 1 >= b.cfg.max_depth;
             const at_leaf_cap = b.leaves.items.len + b.queue.items.len + 2 >= leaf_cap;
             const children_are_leaves = at_depth_cap or at_leaf_cap;
@@ -525,8 +493,8 @@ pub const Builder = struct {
             const n_left = mid - w.start;
             const n_right = w.end - mid;
             if (children_are_leaves) {
-                // Nothing to build. The slots are still taken and released
-                // through the normal path so the free list behaves the same.
+                // Nothing to build; slots still go through the normal path so the free list behaves
+                // the same.
             } else if (n_left <= n_right) {
                 const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.g, tree_feats, b.slot(slot_l));
@@ -544,20 +512,15 @@ pub const Builder = struct {
             }
             b.giveSlot(w.slot);
 
-            // Each child draws its own candidate features, as XGBoost does.
-            // The draws happen even when the search is skipped: they consume
-            // the builder's RNG, and skipping them would shift every later
-            // sample and change the trees under `colsample_bylevel/bynode`.
+            // Each child draws its own candidate features, as XGBoost does. Draws happen even when
+            // the search is skipped: they consume the RNG, and dropping them would shift every
+            // later sample and change the trees under `colsample_bylevel/bynode`.
             const t_bs = prof.start();
             var left_split: split.Split = .{};
             var right_split: split.Split = .{};
-            // Draw, use, draw, use. `featuresFor` hands back a slice of one
-            // shared buffer, so hoisting both draws above both searches makes
-            // them alias and the left child gets searched with the right
-            // child's sample -- silently, and only when a colsample is below
-            // 1.0. The draws happen even when the search is skipped: they
-            // consume the builder's RNG, and dropping them would shift every
-            // later sample.
+            // Draw, use, draw, use: `featuresFor` returns a slice of one shared buffer, so hoisting
+            // both draws aliases them and the left child silently gets the right's sample
+            // (colsample < 1).
             const left_search = b.featuresFor(w.depth + 1);
             if (!children_are_leaves)
                 left_split = split.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
@@ -566,9 +529,8 @@ pub const Builder = struct {
                 right_split = split.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
             prof.stop(.best_split, t_bs);
 
-            // Children inherit the path and add the feature just tested,
-            // unless it is categorical (a dictionary id is not a number to
-            // fit a slope in) or already present.
+            // Children inherit the path plus the feature just tested, unless categorical (a
+            // dictionary id is no number to fit a slope in) or already present.
             var path = w.path;
             var n_path = w.n_path;
             if (b.cfg.linear_leaves and
@@ -621,8 +583,8 @@ pub const Builder = struct {
         return .{ .nodes = nodes, .cat_ids = ids, .lin = lin };
     }
 
-    /// Depthwise takes the oldest pending node (breadth-first); lossguide takes
-    /// the one whose split buys the most.
+    /// Depthwise takes the oldest pending node (breadth-first); lossguide takes the one whose split
+    /// buys the most.
     fn pickNext(b: *Builder) usize {
         if (b.cfg.grow_policy == .depthwise) return 0;
         var best: usize = 0;
@@ -645,12 +607,6 @@ pub const Builder = struct {
     }
 };
 
-/// Shared state for the three passes of a parallel partition.
-///
-/// `parallelFor` hands out fixed-size chunks from a cursor, so `begin / chunk`
-/// recovers which chunk a worker got — which is what lets the counting pass
-/// and the scatter pass agree on where each chunk's output belongs without any
-/// coordination between them.
 /// One chunk of the root's gradient sum.
 const TotalCtx = struct {
     g: []const hist.GradPair,
@@ -661,8 +617,7 @@ const TotalCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *TotalCtx = @ptrCast(@alignCast(ctx));
-        // `begin`/`end` index chunks, not rows, so a chunk always covers the
-        // same rows however the pool hands them out.
+        // `begin`/`end` index chunks, not rows, so a chunk covers the same rows however handed out.
         var c = begin;
         while (c < end) : (c += 1) {
             const lo = @min(c * self.size, self.rows.len);

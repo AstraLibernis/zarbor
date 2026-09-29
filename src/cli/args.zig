@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! The one argument syntax every command takes: positionals and `--key=value`.
-//! Each command decides what an unknown or valueless flag means.
+//! The one argv syntax: positionals and `--key=value`; each command decides what unknown or bare flags mean.
 
 const std = @import("std");
 

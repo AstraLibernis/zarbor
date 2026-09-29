@@ -2,10 +2,8 @@
 // Copyright (C) 2026 AstraLibernis
 
 //! Hyperparameter surface for every model in zarbor.
-//!
-//! Names follow XGBoost where an equivalent exists, so published tunings
-//! transfer without a translation table. LightGBM-only knobs keep LightGBM's
-//! names for the same reason.
+//! Names follow XGBoost where an equivalent exists, so published tunings transfer
+//! without a translation table; LightGBM-only knobs keep LightGBM's names.
 
 const std = @import("std");
 const data = @import("data.zig");
@@ -14,11 +12,9 @@ const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const Objective = @import("objective.zig").Objective;
 
-/// Which model to fit. All three share the binning, missing-value and
-/// categorical handling in `data.zig`; they differ in what they do with it.
+/// Which model to fit; all share `data.zig` binning, missing-value and categorical handling.
 pub const Algo = enum {
-    /// Gradient-boosted trees. `grow_policy` selects XGBoost- or
-    /// LightGBM-style growth.
+    /// Gradient-boosted trees; `grow_policy` selects XGBoost- or LightGBM-style growth.
     gbdt,
     /// Bagged unshrunk trees, averaged. No boosting.
     random_forest,
@@ -37,14 +33,10 @@ fn parseInto(comptime T: type, val: []const u8) !T {
     };
 }
 
-/// Set a field by name from its string form, in every group that has it
-/// (`lambda` reaches the trees of both ensembles and the linear model).
-/// Returns false when `key` names no field, which lets a caller fall through
-/// to its own flags.
-///
-/// Every command that accepts hyperparameters goes through this, so the flag
-/// surface cannot drift from the structs -- and a tuner can set a field it has
-/// never heard of by rendering a value and passing the name straight through.
+/// Set a field by name from its string form in every group that has it (`lambda`
+/// reaches both ensembles' trees and the linear model). False when `key` names no
+/// field, so a caller can fall through to its own flags. Every command uses this,
+/// so flags cannot drift from the structs, and a tuner can pass any field through.
 pub fn applyFlag(cfg: *Config, key: []const u8, val: []const u8) !bool {
     return applyIn(cfg, key, val);
 }
@@ -119,10 +111,8 @@ pub const Config = struct {
         };
     }
 
-    /// The standard name of the model this configuration fits, so the run
-    /// says what it is instead of making the reader reassemble it from
-    /// flags. `linear` is the case that needed it: `--objective` silently
-    /// switches between the two textbook simple models.
+    /// Standard name of the fitted model, so the run says what it is. Needed for
+    /// `linear`, where `--objective` silently switches between two textbook models.
     pub fn modelName(c: Config) []const u8 {
         const l = c.linear;
         return switch (c.algo) {
@@ -152,9 +142,8 @@ pub const Config = struct {
         };
     }
 
-    /// Breiman's per-split feature default, which needs the feature count and
-    /// so cannot be set until the data is binned. sqrt(p) for classification,
-    /// p/3 for regression.
+    /// Breiman's per-split feature default (sqrt(p) classification, p/3 regression);
+    /// needs the feature count, so set after binning. An explicit flag wins.
     pub fn applyForestFeatureDefault(
         c: *Config,
         n_features: usize,

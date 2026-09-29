@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! CSV parsing: bytes on disk to a column-major `Frame`.
-//!
-//! Split out of `data.zig` because parsing is not a model and not a
-//! quantisation concern -- every model in this library pays this cost before
-//! it sees a single bin, so it deserves its own module, its own tests and its
-//! own timings. `data.zig` re-exports `Frame`, `ColumnKind` and `readCsv` so
-//! existing call sites keep working.
-//!
-//! Measured against `pandas.read_csv` on the same 32 MB / 534,932-row file:
-//! 117 ms here against 179 ms there. See docs/arena.md.
+//! CSV parsing: bytes on disk to a column-major `Frame`. Every model pays
+//! this before any bin, so it has its own module, tests and timings;
+//! `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. 117 ms vs
+//! `pandas.read_csv` 179 ms on a 32 MB / 534,932-row file. See docs/arena.md.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -18,24 +12,19 @@ const zsift = @import("vendor/zsift/csv.zig");
 
 pub const ColumnKind = enum { numeric, categorical };
 
-/// A parsed but not yet quantised table. Column-major: a whole column is
-/// contiguous, because every pass over the data is per-column.
+/// A parsed, unquantised table. Column-major: every pass is per-column.
 pub const Frame = struct {
     gpa: std.mem.Allocator,
     n_rows: usize,
     names: [][]u8,
     kinds: []ColumnKind,
-    /// For numeric columns the value; for categorical, the dictionary id as a
-    /// float. NaN marks a missing entry.
+    /// Numeric value, or categorical dictionary id as float. NaN = missing.
     values: [][]f32,
     /// Dictionary for each categorical column, indexed by id. Empty otherwise.
     levels: [][][]u8,
-    /// Per column, how many non-empty fields failed to parse as a number in a
-    /// column the sniff had classified numeric -- and were not one of the
-    /// recognised missing markers either. A nonzero entry means the file
-    /// disagrees with itself: either the sniff prefix was unrepresentative or
-    /// the column holds junk. Both are worth saying out loud rather than
-    /// silently storing NaN, which is what used to happen.
+    /// Per column: non-empty, non-marker fields that failed to parse in a
+    /// sniffed-numeric column. Nonzero means an unrepresentative sniff prefix
+    /// or junk; reported rather than silently stored as NaN.
     unparsed: []u32 = &.{},
 
     pub fn deinit(f: *Frame) void {
@@ -68,32 +57,18 @@ fn trimField(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r\n");
 }
 
-/// Tokens that mean "no value recorded here".
-///
-/// These are the markers R, pandas, Excel and SQL exports actually emit. The
-/// set is deliberately short: every entry is a word no one uses as data.
+/// Missing markers R, pandas, Excel and SQL exports emit. Deliberately
+/// short: no entry is a word anyone uses as data.
 const missing_tokens = [_][]const u8{
     "na", "n/a", "#n/a", "nan", "null", "none", "nil", "?",
 };
 
-/// Is this field one of the recognised missing markers (or empty)?
-///
-/// Read this together with `looksNumeric`, because the pair encodes the one
-/// design decision that matters here: **a marker only means "missing" in a
-/// column whose other values are numbers.**
-///
-/// The Ames housing data is the clean example of why. `LotFrontage` holds
-/// numbers and `NA`; the `NA` is a frontage nobody recorded. `PoolQC` holds
-/// `Ex`/`Gd`/`TA` and `NA`; there the data description defines `NA` as the
-/// level "No Pool" -- real information about the house. Treating every `NA`
-/// as missing, which is what `pandas.read_csv` does by default, silently
-/// converts 14 of that dataset's columns from "documented category" to
-/// "unknown". Treating none of them as missing -- what this parser did before
-/// -- is worse the other way: `MasVnrArea` becomes a 328-level categorical
-/// and the file will not load at all.
-///
-/// Deciding per column costs one extra comparison in the sniff pass and gets
-/// both right with no configuration.
+/// Empty or a missing marker. With `looksNumeric`: **a marker means
+/// "missing" only in a column whose other values are numbers.** Ames: in
+/// `LotFrontage` `NA` is unrecorded; in `PoolQC` it is the level "No Pool".
+/// All-missing (pandas default) turns 14 columns' documented categories into
+/// "unknown"; never-missing makes `MasVnrArea` a 328-level categorical and the
+/// file will not load. Per column costs one sniff comparison, no config.
 pub fn isMissingToken(s: []const u8) bool {
     const t = trimField(s);
     if (t.len == 0) return true;
@@ -112,26 +87,14 @@ fn looksNumeric(s: []const u8) bool {
     return true;
 }
 
-/// Ceiling on distinct values in one column while reading. Far above any
-/// usable categorical -- it exists so a free-text column cannot allocate a
-/// dictionary the size of the file. The bin-width limit that actually matters
-/// is `max_bins`, checked in `binOne` after drops are applied.
+/// Read-time distinct-value ceiling: stops a free-text column allocating a
+/// file-sized dictionary. The real bin limit is `max_bins`, in `binOne`.
 const max_levels: usize = 1 << 20;
 
-/// Column kinds that are already known, keyed by name.
-///
-/// The parser decides a column's kind by looking at the file, which is all it
-/// can do when nobody knows better. At prediction time somebody does: the
-/// model was trained on a schema and stored it. Letting the parser re-decide
-/// lets a file disagree with the model for reasons that have nothing to do
-/// with the column.
-///
-/// The case that found this: a 298-row holdout slice of House Prices in which
-/// every `PoolQC` happened to be `NA`. A column of nothing but missing markers
-/// is numeric-compatible, so it sniffed numeric where training had it
-/// categorical, and the prediction died with `FeatureKindMismatch` on data
-/// that was perfectly well formed. The column had not changed; the evidence
-/// available about it had.
+/// Known column kinds by name, from the model's stored schema, so a
+/// prediction file cannot re-sniff differently. A 298-row House Prices
+/// holdout with all-`NA` `PoolQC` sniffed numeric and died with
+/// `FeatureKindMismatch` on well-formed data.
 pub const KindHint = struct {
     names: []const []const u8,
     kinds: []const ColumnKind,
@@ -144,14 +107,11 @@ pub const KindHint = struct {
     }
 };
 
-/// Read and parse a CSV with the vendored zsift parser (`vendor/zsift`): quoted fields
-/// may hold delimiters, newlines and escaped `""`, and there is no column limit. The
-/// data rows are parsed on up to `pool.workerCount()` workers through `io` (zsift picks
-/// fewer, or one, for small files); each worker keeps its own columns and category
-/// dictionaries, merged in file order so level ids are first-appearance order exactly
-/// as a serial read gives. A file with a stray quote inside an unquoted field (not
-/// RFC 4180, which zsift's strict path rejects) is re-read serially by zsift's lenient
-/// parser, which treats that quote as data.
+/// Parse a CSV with vendored zsift (`vendor/zsift`): quoted fields may hold
+/// delimiters, newlines, `""`; no column limit. Up to `pool.workerCount()`
+/// workers (zsift may pick fewer), each with own columns and dictionaries,
+/// merged in file order so level ids match a serial read. A stray quote in an
+/// unquoted field (not RFC 4180) is re-read serially by the lenient parser.
 pub fn readCsv(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -162,9 +122,8 @@ pub fn readCsv(
     return readCsvHinted(gpa, io, pool, path, max_bytes, null);
 }
 
-/// `hint` pins the kind of any column it names; the rest are sniffed as usual.
-/// A column the hint does not mention is not an error -- the new file may
-/// carry extras the model never saw, and dropping them is the caller's job.
+/// `hint` pins named columns' kinds; others are sniffed. Unmentioned columns
+/// are not an error: dropping extras is the caller's job.
 pub fn readCsvHinted(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -190,11 +149,10 @@ pub fn readCsvHinted(
 
 const Mode = enum { strict, lenient };
 
-/// Bytes of CSV per worker. zsift's own size rule (`parallel.forEachField`, serial
-/// below 2 MiB) is tuned for a sink that does almost nothing per field; this one
-/// converts every field, so splitting pays far sooner. Swept 32–256 KiB against the
-/// previous all-core loader on 7 real files (0.7–45 MB): 64 KiB was the only size
-/// faster on every file in every round (medians 1.34–1.73×, worst round 1.08×).
+/// CSV bytes per worker. zsift's rule (`parallel.forEachField`, serial below
+/// 2 MiB) suits a near-free sink; this one converts every field. Swept 32–256
+/// KiB vs the all-core loader on 7 real files (0.7–45 MB): only 64 KiB won on
+/// every file every round (medians 1.34–1.73×, worst round 1.08×).
 const bytes_per_worker: usize = 64 << 10;
 
 /// Scratch per worker for unescaping one quoted field with `""` in it; a longer
@@ -224,8 +182,7 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
         }
         if (names.items.len == 0) return error.NoColumns;
         try kinds.appendNTimes(gpa, .numeric, names.items.len);
-        // A pinned column is not sniffed at all: the hint is evidence from the whole
-        // training set, and this file's prefix cannot outvote it.
+        // Pinned columns are not sniffed: whole-training-set evidence beats a prefix.
         const pinned = try gpa.alloc(bool, names.items.len);
         defer gpa.free(pinned);
         @memset(pinned, false);
@@ -323,9 +280,8 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
     };
 }
 
-/// Concatenate column `c` of every range into `out`. For a categorical column the
-/// ranges' local level ids are renumbered into one dictionary, walked in range order,
-/// so each level's id is its first appearance in the file. Returns the levels, owned.
+/// Concatenate column `c` of every range into `out`; categorical local ids are
+/// renumbered in range order (first appearance in file). Returns owned levels.
 fn mergeColumn(gpa: std.mem.Allocator, sinks: []RangeSink, c: usize, out: []f32) ![][]u8 {
     var at: usize = 0;
     if (sinks[0].kinds[c] == .numeric) {
@@ -364,8 +320,7 @@ fn mergeColumn(gpa: std.mem.Allocator, sinks: []RangeSink, c: usize, out: []f32)
     return list.toOwnedSlice(gpa);
 }
 
-/// One range's rows, column-major, with the range's own category dictionaries (local
-/// ids in first-appearance order within the range). Written by one worker only.
+/// One range's rows, column-major, with local first-appearance dictionaries. One writer.
 const RangeSink = struct {
     gpa: std.mem.Allocator,
     kinds: []const ColumnKind,
@@ -427,8 +382,7 @@ const RangeSink = struct {
     fn put(s: *RangeSink, c: usize, bytes: []const u8) !void {
         const t = trimField(bytes);
         var v: f32 = std.math.nan(f32);
-        // Only a genuinely empty field is missing in a categorical column: its `NA`
-        // is a level (see `isMissingToken`).
+        // Categorical: only an empty field is missing; `NA` is a level.
         if (t.len != 0) switch (s.kinds[c]) {
             .numeric => v = std.fmt.parseFloat(f32, t) catch blk: {
                 if (!isMissingToken(t)) s.bad[c] += 1;
@@ -437,8 +391,7 @@ const RangeSink = struct {
             .categorical => {
                 const gop = try s.dicts[c].getOrPut(s.gpa, t);
                 if (!gop.found_existing) {
-                    // A memory guard, not the bin cap (that is `binOne`'s): a free-text
-                    // column must not build a dictionary the size of the file.
+                    // Memory guard, not the bin cap (`binOne`'s).
                     if (s.levels[c].items.len >= max_levels) return error.TooManyLevels;
                     const owned = try s.gpa.dupe(u8, t);
                     gop.key_ptr.* = owned;

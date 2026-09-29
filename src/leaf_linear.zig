@@ -12,13 +12,10 @@ const Builder = builder.Builder;
 const Work = builder.Work;
 const max_path = builder.max_path;
 
-/// In-place Cholesky solve of a small symmetric positive-definite system.
-///
-/// `a` is read as its upper triangle and overwritten; `rhs` carries the
-/// solution out. Returns false when the factorisation meets a non-positive
-/// pivot, which is what a feature constant within the leaf looks like and is
-/// common near the bottom of a tree. The caller treats that as "no slopes",
-/// which is the admissible `beta = 0` solution rather than a failure.
+/// In-place Cholesky solve of a small SPD system. Reads `a`'s upper triangle and overwrites it;
+/// `rhs` returns the solution. False on a non-positive pivot: a feature constant within the leaf,
+/// common near the bottom of a tree. The caller takes that as "no slopes", the admissible `beta =
+/// 0`, not a failure.
 fn choleskySolve(a: *[max_path][max_path]f64, rhs: *[max_path]f64, n: usize) bool {
     var l: [max_path][max_path]f64 = undefined;
     for (0..n) |i| for (0..n) |j| {
@@ -52,13 +49,10 @@ fn choleskySolve(a: *[max_path][max_path]f64, rhs: *[max_path]f64, n: usize) boo
     return true;
 }
 
-/// Slopes for one leaf, appended to `b.lin`. Returns how many were kept.
-///
-/// Centring each feature on its *hessian-weighted* within-leaf mean is not
-/// cosmetic. It makes every cross term between the intercept and a slope
-/// vanish, so the intercept is exactly the constant leaf weight already
-/// computed and only the slope block has to be solved. A failure there is
-/// therefore a fallback to the constant leaf rather than an error.
+/// Slopes for one leaf, appended to `b.lin`; returns how many were kept. Centring on the
+/// hessian-weighted within-leaf mean zeroes every intercept-slope cross term, so the intercept is
+/// exactly the constant leaf weight and only the slope block is solved; its failure falls back to
+/// the constant leaf, not an error.
 pub fn fitLinearLeaf(b: *Builder, w: Work) !u8 {
     const n = @min(@as(usize, w.n_path), @as(usize, b.cfg.lin_leaf_max_terms));
     const rows = b.rows[w.start..w.end];
@@ -93,12 +87,9 @@ pub fn fitLinearLeaf(b: *Builder, w: Work) !u8 {
             for (j..n) |k| a[j][k] += @as(f64, gp.h) * x[j] * x[k];
         }
     }
-    // Standardise before the ridge. `a[j][j]` is `sum_h * var_j`, so a
-    // flat additive lambda means something different on a column measured
-    // in dollars than on one measured in people -- it is not a ridge at
-    // all, it is an arbitrary per-column shrinkage. Scaling each axis by
-    // its own weighted sd makes lambda comparable across columns, which
-    // is what `linear.zig` does to its design matrix for the same reason.
+    // Standardise before the ridge. `a[j][j]` is `sum_h * var_j`, so a flat lambda would shrink a
+    // dollars column and a people column arbitrarily differently; scaling each axis by its weighted
+    // sd makes lambda comparable across columns, as `linear.zig` does to its design matrix.
     var sd: [max_path]f64 = undefined;
     for (0..n) |j| {
         const v = a[j][j] / sum_h;

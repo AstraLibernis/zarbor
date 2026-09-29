@@ -1,37 +1,28 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Phase timers for tree building.
-//!
-//! Exists because `perf` cannot run in this sandbox (no CAP_PERFMON, and
-//! `perf_event_paranoid` is host-owned), and because two successive guesses at
-//! the bottleneck — the serial partition, then histogram cache residency —
-//! were each only half right or plain wrong. Guessing is more expensive than
-//! measuring.
-//!
-//! Timers are read by the submitting thread around whole parallel regions, so
-//! they measure wall time per phase, not CPU time, and never appear inside a
-//! worker's inner loop.
+//! Phase timers for tree building. `perf` cannot run here (no CAP_PERFMON,
+//! host-owned `perf_event_paranoid`), and two bottleneck guesses (serial
+//! partition, histogram cache residency) were wrong or half right. Read by the
+//! submitter around whole parallel regions: wall time per phase, never inside
+//! a worker's inner loop.
 
 const std = @import("std");
 const linux = std.os.linux;
 
 pub const Phase = enum {
-    /// GOSS row selection, which happens in the boosting loop rather than in
-    /// the tree builder.
+    /// GOSS row selection, in the boosting loop, not the tree builder.
     goss_select,
     select_rows,
     hist_build,
-    /// Sub-phases of `hist_build`: clearing the private slots, accumulating,
-    /// and reducing them. Inside `hist_build`, not additional to it.
+    /// `hist_build` sub-phases (clear, accumulate, reduce); inside it, not added.
     hist_clear,
     hist_accum,
     hist_reduce,
     hist_subtract,
     best_split,
     partition,
-    /// Sub-phases of the parallel partition, so the three passes can be sized
-    /// against each other. They are inside `partition`, not additional to it.
+    /// The partition's three passes, sized against each other; inside it, not added.
     part_count,
     part_scatter,
     part_copy,
@@ -48,8 +39,7 @@ pub inline fn now() u64 {
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
-/// Off unless `--profile` is passed, so the timestamp calls stay out of the
-/// way of an ordinary run.
+/// Off unless `--profile`, keeping timestamp calls out of ordinary runs.
 pub var enabled: bool = false;
 
 var totals: [@typeInfo(Phase).@"enum".fields.len]u64 = @splat(0);
@@ -67,8 +57,7 @@ pub fn reset() void {
     totals = @splat(0);
 }
 
-/// `part_*` time is *inside* `partition`, so it must not be added to the
-/// total or counted as its own percentage.
+/// `part_*` is *inside* `partition`: not added to the total or given its own percentage.
 fn nested(p: Phase) bool {
     return switch (p) {
         .part_count, .part_scatter, .part_copy => true,

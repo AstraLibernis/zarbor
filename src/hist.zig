@@ -1,22 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Histogram construction. The split search over them is in split.zig.
-//!
-//! This is the whole cost of boosting. Two decisions carry the performance:
-//!
-//!  1. Gradients for a node are gathered into a contiguous buffer **once**,
-//!     then reused across all features. The gather is the expensive part of
-//!     the inner loop, and a node builds one histogram per feature, so paying
-//!     it once instead of per-feature removes most of the random access.
-//!
-//!  2. Accumulation uses per-worker private histograms and a vectorised
-//!     reduction, so the inner loop needs no atomics at all. A private
-//!     histogram is tens of KB and stays in that core's L2.
-//!
-//! Sums are f64 even though gradients are f32: a root node adds hundreds of
-//! thousands of terms into a few hundred accumulators, and f32 loses real
-//! precision over that many additions.
+//! Histogram construction; the split search is in split.zig. This is the whole cost of boosting.
+//! 1. A node's gradients are gathered once, reused across all features: the gather is the costly
+//!    part and a node builds one histogram per feature, so this removes most random access.
+//! 2. Per-worker private histograms (tens of KB, stay in L2), vectorised reduction: no atomics.
+//! Sums are f64 though gradients are f32: a root adds hundreds of thousands of terms into a few
+//! hundred accumulators, and f32 loses real precision over that many additions.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -30,18 +20,11 @@ pub const GradPair = extern struct {
     h: f32,
 };
 
-/// One histogram cell: gradient sum, hessian sum, row count.
-///
-/// Four f64 lanes, 32-byte aligned, rather than two doubles and a `u32`
-/// count. The count in a lane makes the whole update a *single* aligned
-/// vector load-add-store instead of three separate scattered
-/// read-modify-writes, and the dead fourth lane pays for itself by making the
-/// element size a power of two, so indexing is a shift rather than a multiply.
-///
-/// Measured against the 24-byte shape on the real bin widths: 1.35x on its
-/// own, and it composes with the row-major layout rather than overlapping
-/// with it (1.74x layout alone, 2.34x together, every node size from 2k to
-/// 500k rows).
+/// One histogram cell: gradient sum, hessian sum, row count. Four 32-byte-aligned f64 lanes, not
+/// two doubles and a u32: a lane for the count makes the update one aligned vector load-add-store,
+/// not three scattered read-modify-writes; the dead lane makes the size a power of two (shift, not
+/// multiply). Vs the 24-byte shape on real bin widths: 1.35x alone; composes with row-major layout
+/// (1.74x alone, 2.34x together) at every node size from 2k to 500k rows.
 pub const Bin = extern struct {
     g: f64 align(32) = 0,
     h: f64 = 0,
@@ -67,39 +50,22 @@ pub const Bin = extern struct {
     }
 };
 
-/// Scratch for one tree's histograms.
-///
-/// Features get **packed per-feature offsets**, not a uniform stride sized by
-/// the widest feature. That distinction is worth more than it sounds. On a
-/// typical table the widths are wildly uneven — 234 and 202 bins for two
-/// continuous columns, but 3 or 4 for the categoricals — so a uniform stride
-/// allocated 13x240 = 3120 slots for 558 real bins, a 5.6x waste.
-///
-/// The waste was not merely memory. Clearing and reducing the private
-/// histograms is a *fixed* cost per node, paid whatever the node's size, so it
-/// dominated exactly where most of the nodes are: the bottom of the tree.
-/// Measured per node, packing is 1.08x at 500k rows but 3.15x at 8k and 4.09x
-/// at 2k, and a depth-6 tree keeps half its internal nodes in the last level.
-///
-/// Each feature still starts on a cache-line boundary, which keeps the clear
-/// and the reduce off partial lines.
+/// Scratch for one tree's histograms. Packed per-feature offsets, not a widest-feature stride:
+/// widths are uneven (234 and 202 bins vs 3-4 for categoricals), so a stride wasted 5.6x (13x240 =
+/// 3120 slots for 558 bins). Clear+reduce is fixed per node, dominating the many small bottom nodes:
+/// packing is 1.08x at 500k rows, 3.15x at 8k, 4.09x at 2k; a depth-6 tree has half its internal
+/// nodes in the last level. Features start on cache lines, keeping clear/reduce off partial lines.
 pub const Bank = struct {
     gpa: std.mem.Allocator,
     n_workers: usize,
     n_features: usize,
-    /// `offsets[f]..offsets[f+1]` is feature `f`'s bin range within a slot.
-    /// Length `n_features + 1`; the last entry is the slot length.
+    /// Feature `f`'s bins: `offsets[f]..offsets[f+1]`. `n_features + 1` long; last = slot length.
     offsets: []u32,
     /// `n_workers * slotLen()`
     private: []Bin,
-    /// Build sequence number each worker last cleared its slot for, one per
-    /// cache line so the stamps do not share a line.
-    ///
-    /// Clearing the private slots was 108 ms of a 773 ms fit — 15%, on the
-    /// main thread, and entirely overhead: 147 KB memset per node build,
-    /// 6400 of them. A worker now clears its own slot on its first chunk, so
-    /// the clear is spread across the cores that are about to use it, and a
-    /// worker that never got a chunk is neither cleared nor reduced.
+    /// Build seq each worker last cleared its slot for, one per cache line. Clearing on the main
+    /// thread was 108 ms of a 773 ms fit (147 KB memset x 6400 builds); now each worker clears its
+    /// own slot on its first chunk, and a worker with no chunk is neither cleared nor reduced.
     stamps: []u64,
     /// Scratch for the workers that took part in the last build.
     parts: []usize,
@@ -107,24 +73,14 @@ pub const Bank = struct {
 
     const stamp_stride: usize = @max(1, std.atomic.cache_line / @sizeOf(u64));
 
-    /// Bins per alignment step, chosen so `step * @sizeOf(Bin)` is a whole
-    /// number of cache lines.
-    ///
-    /// The obvious `cache_line / @sizeOf(Bin)` is wrong, and wrong in a way
-    /// that only shows up on some CPUs. `Bin` is 24 bytes, and Zig reports a
-    /// 128-byte cache line on Zen 5 (64 on much else), so that expression is
-    /// 128/24 = 5 here — not a power of two, which `alignForward` requires.
-    /// Debug catches it with an assert; ReleaseFast elides the assert and
-    /// silently produces a stride smaller than the bin count, overlapping the
-    /// per-feature histogram slices and corrupting every split search.
-    ///
-    /// Dividing by the gcd gives the smallest step whose byte size is a cache
-    /// line multiple: 128/gcd(24,128) = 16 bins here, 8 where the line is 64.
+    /// Bins per alignment step, so `step * @sizeOf(Bin)` is whole cache lines. Not `cache_line /
+    /// @sizeOf(Bin)`: 24-byte `Bin` on Zen 5's 128-byte line gives 5, not the power of two
+    /// `alignForward` needs; Debug asserts, ReleaseFast silently overlaps feature slices and corrupts
+    /// every split search. gcd gives the smallest valid step: 128/gcd(24,128) = 16; 8 at 64 bytes.
     const bin_step: usize = @max(1, std.atomic.cache_line / std.math.gcd(@sizeOf(Bin), std.atomic.cache_line));
 
     inline fn roundUp(n: usize) usize {
-        // Plain multiple-rounding, not alignForward: `bin_step` is a count of
-        // bins and carries no power-of-two guarantee.
+        // Multiple-rounding, not alignForward: `bin_step` has no power-of-two guarantee.
         return ((n + bin_step - 1) / bin_step) * bin_step;
     }
 
@@ -187,36 +143,20 @@ pub const Bank = struct {
     }
 };
 
-/// Row-outer accumulation over the row-major bin matrix.
-///
-/// The obvious loop is feature-outer over the column-major bins, and it is
-/// what this was for a long time. Two things make row-outer 1.74x faster on
-/// real data:
-///
-///  * A row's bins are one contiguous run, so `rows[i]` and `grads[i]` are
-///    read once per row instead of once per row *per feature*.
-///  * The updates within a row hit thirteen different feature histograms, so
-///    they are independent. Feature-outer updates one histogram repeatedly,
-///    and on a 3-bin categorical consecutive rows collide constantly, which
-///    serialises the whole loop on store-to-load forwarding.
-///
-/// The second point is why this was measured at only 1.07x once before: that
-/// benchmark gave every feature 256 bins, where collisions are rare and the
-/// histogram spills to L2. Real tables are lopsided — here two columns hold
-/// 437 of the 559 bins and the other eleven have three to seven each.
-///
-/// No prefetching and no unrolling: both measured slower. The rows arrive
-/// ascending from the stable partition, so the hardware prefetcher already
-/// has the stream, and extra rows in flight only add register pressure.
+/// Row-outer accumulation over row-major bins: 1.74x over feature-outer column-major on real data.
+/// A row's bins are contiguous, so `rows[i]` and `grads[i]` are read once per row, not per feature;
+/// its updates hit different histograms, so are independent, while feature-outer on a 3-bin
+/// categorical collides constantly and serialises on store-to-load forwarding. An earlier benchmark
+/// saw 1.07x: 256 bins per feature makes collisions rare and spills to L2; real tables are lopsided
+/// (two columns held 437 of 559 bins, eleven had 3-7). No prefetch or unroll, both slower: rows come
+/// ascending from the stable partition, and more rows in flight only add register pressure.
 const BuildCtx = struct {
     bank: *Bank,
     ds: *const Dataset,
     /// Row ids belonging to this node, contiguous.
     rows: []const u32,
-    /// Gradients indexed by original row id, so `grads[rows[i]]`. Not
-    /// permuted to match `rows`: keeping the permutation in step tripled what
-    /// the partition had to move, and the gather here measures at 4 ms across
-    /// a 200-tree fit.
+    /// Indexed by original row id (`grads[rows[i]]`), not permuted: keeping it in step tripled what
+    /// the partition moved, while this gather costs 4 ms across a 200-tree fit.
     grads: []const GradPair,
     features: []const u32,
     seq: u64,
@@ -226,9 +166,8 @@ const BuildCtx = struct {
         const bank = self.bank;
         const span = bank.slotLen();
         const mine = bank.private[worker * span ..][0..span];
-        // First chunk of this build for this worker: clear, and leave the
-        // stamp behind so the reduce knows this slot holds data. Only the
-        // worker itself writes its stamp, and the pool's barrier publishes it.
+        // First chunk of this build for this worker: clear and stamp, so the reduce knows the slot
+        // holds data. Only the worker writes its stamp; the pool's barrier publishes it.
         const st = bank.stamp(worker);
         if (st.* != self.seq) {
             @memset(mine, .{});
@@ -252,13 +191,9 @@ const BuildCtx = struct {
     }
 };
 
-/// Reduces the private histograms into `out` over the whole slot.
-///
-/// Reducing every feature rather than only the selected ones is deliberate
-/// now that the slot is packed: it is a flat, branch-free loop over ~16 KB,
-/// and skipping features would cost more in index arithmetic than it saves.
-/// Unselected features end up holding whatever their private copies did,
-/// which the caller already must not read.
+/// Reduces private histograms into `out` over the whole slot. All features, not just selected ones:
+/// a flat branch-free pass over ~16 KB beats the index arithmetic of skipping. Unselected features
+/// hold whatever their private copies did, which the caller already must not read.
 const ReduceCtx = struct {
     bank: *Bank,
     /// Workers that actually took a chunk, ascending.
@@ -279,21 +214,13 @@ const ReduceCtx = struct {
     }
 };
 
-/// Below this many rows a node is built on one thread.
-///
-/// Tuned, not guessed. The cost this trades against is the per-node fixed
-/// cost — clearing every worker's private histogram and reducing them — which
-/// packing the bins cut by ~4.5x. That made fanning out worthwhile at much
-/// smaller nodes than before: sweeping the threshold, 8192 (the old value)
-/// costs 1516 ms on a 200-tree fit where 512 costs 1213 ms, and the curve is
-/// flat between 256 and 768 before rising again below 128, where the chunks
-/// get too small for the barrier. Output is identical at every setting.
+/// Below this many rows a node is built on one thread. Tuned against per-node clear+reduce cost
+/// (packing cut it ~4.5x): 200-tree fit at 8192 (old value) 1516 ms, at 512 1213 ms; flat 256-768,
+/// rising below 128 where chunks get too small for the barrier. Output identical at every setting.
 pub const parallel_threshold: usize = 512;
 
-/// Build the histogram for one node into `out`, which must be one slot's
-/// worth (`n_features * stride`).
-///
-/// Only `features` are populated; the caller must not read the others.
+/// Build one node's histogram into `out`, one slot's worth (`n_features * stride`). Only `features`
+/// are populated; the caller must not read the others.
 pub fn build(
     pool: *Pool,
     bank: *Bank,
@@ -305,14 +232,12 @@ pub fn build(
 ) void {
     const span = bank.slotLen();
 
-    // Whether to fan out is decided here, not left to the pool, because the
-    // clear and the merge below must cover exactly the workers that ran. If
-    // those disagreed, a stale private histogram would be merged in.
+    // Fan-out is decided here, not by the pool: the clear and merge must cover exactly the workers
+    // that ran, else a stale private histogram is merged in.
     const parallel = bank.n_workers > 1 and rows.len > parallel_threshold;
     const active: usize = if (parallel) bank.n_workers else 1;
 
-    // The clear happens inside the accumulate, on whichever workers take a
-    // chunk; see `Bank.stamps`.
+    // The clear runs inside the accumulate, on workers that take a chunk; see `Bank.stamps`.
     bank.seq += 1;
     var bctx = BuildCtx{
         .bank = bank,
@@ -333,9 +258,7 @@ pub fn build(
     const t_r = prof.start();
     defer prof.stop(.hist_reduce, t_r);
 
-    // Ascending worker order, and slots nobody touched are skipped rather
-    // than added as zeros — which is why this stays bit-identical to reducing
-    // all of them.
+    // Ascending worker order; untouched slots skipped, not added as zeros: bit-identical to all.
     var n_parts: usize = 0;
     for (0..active) |w| {
         if (bank.stamp(w).* == bank.seq) {
@@ -369,9 +292,7 @@ const SubCtx = struct {
     }
 };
 
-/// A node's histogram is its parent's minus its sibling's.
-///
-/// Flat over the packed slot: one contiguous pass, no per-feature indexing.
+/// A node's histogram is parent minus sibling: one flat pass over the packed slot.
 pub fn subtract(pool: *Pool, bank: *Bank, out: []Bin, parent: []const Bin, sibling: []const Bin) void {
     const span = bank.slotLen();
     var ctx = SubCtx{ .out = out[0..span], .parent = parent[0..span], .sibling = sibling[0..span] };

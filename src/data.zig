@@ -1,26 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! CSV ingest and quantisation.
-//!
-//! The booster never sees raw feature values. Every column is reduced to a
-//! bin index up front, which is what lets the whole design stay in cache:
-//! 668k rows x 13 features is 17 MB as bins, versus 35 MB as f32. Split
-//! finding then works on bin indices alone and touches the original values
-//! only to report thresholds.
+//! CSV ingest and quantisation. Every column becomes bin indices up front so
+//! the design stays in cache (668k rows x 13 features: 17 MB as bins, 35 MB
+//! as f32). Split finding uses bins; raw values only report thresholds.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
 
-/// A bin index. Was `u8`, which capped a categorical column at 255 levels and
-/// put ZIP3, city and metro names out of reach entirely. Measured at
-/// 0.98-1.01x of `u8` in the accumulation kernel -- that loop is bound by the
-/// scattered histogram update, not by reading the index -- so the width is
-/// paid in memory only. See docs/wide-categoricals.md.
+/// `u16` so categoricals can exceed 255 levels (ZIP3, city, metro). 0.98-1.01x
+/// of `u8` in the accumulation kernel (bound by the scattered histogram
+/// update), so it costs memory only. See docs/wide-categoricals.md.
 pub const BinIdx = u16;
 
-/// Hard ceiling, set by the index type. `n_bins` is a `u16` and must be able
-/// to hold a count this large.
+/// Hard ceiling from the index type; `n_bins` (`u16`) must hold it.
 pub const max_bins = std.math.maxInt(BinIdx);
 
 pub const csv = @import("csv.zig");
@@ -31,27 +24,23 @@ pub const BinPolicy = enum {
     quantile,
     /// Equal-width bins between min and max. Cheaper, worse on skewed data.
     uniform,
-    /// LightGBM's `GreedyFindBin`. Any distinct value carrying at least a
-    /// bin's worth of rows gets a bin to itself, and the remaining budget is
-    /// spread over what is left -- so a column that is 92% one value spends
-    /// its cuts on the other 8% instead of collapsing them all onto the mode.
+    /// LightGBM's `GreedyFindBin`: a value with a bin's worth of rows gets its
+    /// own bin, the rest share the budget, so a 92%-one-value column spends
+    /// its cuts on the other 8% rather than the mode.
     greedy,
 };
 
 /// How `quantise` turns columns into bins. Shared by every model.
 pub const BinParams = struct {
     bin_policy: BinPolicy = .quantile,
-    /// Rows a bin must hold under `greedy` before a cut is placed after it.
-    /// LightGBM's `min_data_in_bin`.
+    /// Rows a bin must hold under `greedy` before a cut. LightGBM's `min_data_in_bin`.
     min_data_in_bin: u32 = 3,
-    /// Bins per feature. Capped at 256 because bins are stored as u8, which
-    /// is what keeps the feature matrix inside L3.
+    /// Bins per feature. Capped at 256 so the column-major `bins` stays one
+    /// byte per bin, which keeps the feature matrix inside L3.
     max_bin: u16 = 256,
-    /// Cardinality above which a categorical column is refused outright. The
-    /// bin index can hold far more; this exists so a free-text column cannot
-    /// turn into a histogram nobody can afford. 255 is what the `u8` bin used
-    /// to enforce, and is kept as the default so widening the index changes
-    /// no existing run on its own.
+    /// Categorical cardinality refused outright, so a free-text column cannot
+    /// become an unaffordable histogram. Default 255 (the old `u8` limit) so
+    /// widening `BinIdx` alone changes no existing run.
     max_cat_levels: u32 = 255,
 
     pub fn validate(p: BinParams) !void {
@@ -59,10 +48,8 @@ pub const BinParams = struct {
     }
 };
 
-/// Parsing (`csv.zig`), label encoding (`label_encoder.zig`) and the saved
-/// binning (`schema.zig`) live in their own files. Re-exported here because
-/// every caller of this module needs them; moving the code out should not
-/// move every call site.
+/// Re-exported from `csv.zig`, `label_encoder.zig`, `schema.zig` so call
+/// sites did not move when the code did.
 pub const ColumnKind = csv.ColumnKind;
 pub const Frame = csv.Frame;
 pub const readCsv = csv.readCsv;
@@ -81,63 +68,39 @@ pub const lowerBound = bin_edges.lowerBound;
 
 // ------------------------------------------------------------------ binning
 
-/// A quantised training matrix.
-///
-/// Bin 0 of every feature is reserved for "missing". Real values start at 1.
-/// Keeping missing in its own bin is what lets split finding choose a default
-/// direction per split instead of imposing one globally.
+/// A quantised training matrix. Bin 0 is "missing", real values start at 1;
+/// that lets split finding pick a default direction per split.
 pub const Dataset = struct {
     gpa: std.mem.Allocator,
     n_rows: usize,
     n_features: usize,
-    /// Column-major: `bins[f * n_rows + r]`. Partitioning a node reads one
-    /// feature for every row, so that pass wants the column contiguous.
-    /// Column-major, **one byte per bin**: `bins[f * n_rows + r]`.
-    ///
-    /// Partitioning reads one feature down a node's rows, and those rows are
-    /// scattered once the tree is more than a level deep, so each one tends to
-    /// want its own cache line and the element size is paid in full. Measured
-    /// when the whole matrix went to `u16`: partition went from 51 ms to
-    /// 110 ms on adult while the row-major accumulate did not move at all.
-    /// So this stays a byte, and a column too wide for one lives in
-    /// `wide_cols` instead. See docs/wide-categoricals.md.
+    /// Column-major, one byte per bin: `bins[f * n_rows + r]`. Partition reads
+    /// one feature over scattered rows, each its own cache line, so element
+    /// size is paid in full: at `u16` partition went 51 -> 110 ms on adult
+    /// (accumulate unchanged). Too-wide columns go to `wide_cols`.
+    /// See docs/wide-categoricals.md.
     bins: []u8,
-    /// Column-major storage for features whose bin count exceeds 256. Empty
-    /// slice for every other feature, which is almost all of them.
+    /// Column-major bins for features with more than 256 bins; empty otherwise.
     wide_cols: [][]BinIdx,
-    /// The same bins row-major: `bins_rm[r * n_features + f]`.
-    ///
-    /// Both layouts are kept because the two hot passes want opposite things.
-    /// Histogram building reads every selected feature of a row and gains
-    /// 1.74x from having them contiguous; partitioning reads a single feature
-    /// down the rows and would touch thirteen times the cache lines in that
-    /// layout. The copy costs 13 bytes a row -- 8.7 MB on 668k rows, against
-    /// a 93 MB peak -- and one transpose pass at load time.
+    /// Row-major copy: `bins_rm[r * n_features + f]`. Histogram building gains
+    /// 1.74x from a contiguous row; partition would touch 13x the cache lines
+    /// here. Cost: 13 bytes a row (8.7 MB on 668k rows vs a 93 MB peak) and
+    /// one transpose at load.
     bins_rm: []BinIdx,
     /// Bins actually in use per feature, including the missing bin.
     n_bins: []u16,
-    /// Cut points per feature; `edges[f][i]` is the inclusive upper bound of
-    /// real-value bin `i`. Length is `n_bins[f] - 2`.
+    /// `edges[f][i]`: inclusive upper bound of real-value bin `i`; length `n_bins[f] - 2`.
     edges: [][]f32,
-    /// `means[f][b]` is the mean of the training values that landed in bin `b`
-    /// of numeric feature `f`; empty for categorical features. Slot 0 is the
-    /// missing bin and holds the column mean instead.
-    ///
-    /// Only the linear model reads this: it has to pick one number to stand
-    /// for a whole bin, and the midpoint of the bin's two edges is a biased
-    /// stand-in whenever the values inside are skewed -- which, under quantile
-    /// cuts on a heavy-tailed column, they usually are. Trees never care,
-    /// since they only ever compare bin indices.
+    /// `means[f][b]`: mean training value in bin `b` of numeric `f` (slot 0:
+    /// column mean); empty for categoricals. Read only by the linear model:
+    /// the edge midpoint is biased for skewed bins, the norm under quantile
+    /// cuts on heavy tails. Trees compare bin indices only.
     means: [][]f32,
     kinds: []ColumnKind,
     names: [][]u8,
-    /// Level strings for each categorical feature, indexed by dictionary id;
-    /// empty for numeric features.
-    ///
-    /// Retained because a categorical bin *is* its dictionary id, and those
-    /// ids are assigned in order of first appearance. Without the strings, a
-    /// second file cannot be binned the same way as the first, and a saved
-    /// model could not score anything it had not been trained on.
+    /// Categorical level strings by dictionary id; empty for numeric. A bin
+    /// *is* its first-appearance id, so without these a second file cannot be
+    /// binned the same way and a saved model cannot score new data.
     levels: [][][]u8,
     /// Empty when the frame carried no target column.
     labels: []f32,
@@ -170,9 +133,8 @@ pub const Dataset = struct {
         return d.wide_cols[f].len != 0;
     }
 
-    /// Column-major bins for a narrow feature. Asserting rather than
-    /// returning an optional: the two callers both dispatch on `isWide`
-    /// first, and a silent wrong answer here is a mis-partitioned tree.
+    /// Asserts, not optional: both callers dispatch on `isWide` first, and a
+    /// silent wrong answer is a mis-partitioned tree.
     pub inline fn columnNarrow(d: *const Dataset, f: usize) []const u8 {
         std.debug.assert(!d.isWide(f));
         return d.bins[f * d.n_rows ..][0..d.n_rows];
@@ -195,11 +157,8 @@ pub const Dataset = struct {
     }
 };
 
-/// Fills the row-major mirror of a column-major bin matrix.
-///
-/// Parallel over row blocks: each worker reads `n_features` column streams
-/// sequentially and writes one contiguous run, which the prefetcher handles
-/// on both sides. Transposing by feature instead would scatter every write.
+/// Fills the row-major mirror. Parallel over row blocks: sequential column
+/// reads, one contiguous write run; by-feature would scatter every write.
 const TransposeCtx = struct {
     bins: []const BinIdx,
     out: []BinIdx,
@@ -218,12 +177,8 @@ const TransposeCtx = struct {
     }
 };
 
-/// Split a wide column-major scratch matrix into the byte mirror the
-/// partition reads and per-feature overrides for the columns that do not fit.
-///
-/// The scratch is what binning produces and what the row-major transpose
-/// consumes; neither wants to know which columns are wide. This is the one
-/// place that does.
+/// Split the `BinIdx` scratch into the byte matrix partition reads plus
+/// per-feature wide columns. The only place that knows which are wide.
 pub fn splitByWidth(
     gpa: std.mem.Allocator,
     scratch: []const BinIdx,
@@ -266,9 +221,8 @@ pub fn buildRowMajor(
     return out;
 }
 
-/// Quantise `src` into a `Dataset`. `label`, when given, names the target
-/// column and how to encode it; that column is excluded from the feature set.
-/// `skip` names columns to drop (an id column, typically).
+/// Quantise `src`. `label` names and encodes the target (excluded from
+/// features); `skip` names columns to drop, e.g. an id.
 pub fn quantise(
     gpa: std.mem.Allocator,
     pool: *Pool,
@@ -287,18 +241,15 @@ pub fn quantise(
     const n_features = feats.items.len;
     if (n_features == 0) return error.NoFeatures;
 
-    // Width is checked here, on the columns that survived `skip`, rather than
-    // inside the parallel binning below -- which collapses every worker error
-    // into one `BinningFailed` and so cannot say which column was at fault.
+    // Checked here, after `skip`: parallel binning collapses errors into
+    // `BinningFailed` and cannot name the column.
     for (feats.items) |c| {
         if (src.kinds[c] == .categorical and src.levels[c].len > cfg.max_cat_levels)
             return error.CategoricalTooWide;
     }
 
-    // Mutable, and the errdefer guards on length: the scratch is handed back
-    // to the allocator partway through this function, and an `errdefer` on a
-    // pointer that has already been freed is a double free on any later
-    // failure. Clearing the slice is how the guard is told it is spent.
+    // Mutable, errdefer keyed on length: freed midway, then cleared so a
+    // later failure does not double free.
     var bins = try gpa.alloc(BinIdx, n_features * src.n_rows);
     errdefer if (bins.len != 0) gpa.free(bins);
     const n_bins = try gpa.alloc(u16, n_features);
@@ -306,9 +257,7 @@ pub fn quantise(
     const edges = try gpa.alloc([]f32, n_features);
     errdefer gpa.free(edges);
     @memset(edges, &.{});
-    // The workers below fill these, and if one of them fails the others have
-    // already allocated. Freeing only the outer array leaked every numeric
-    // feature's cut points on the `BinningFailed` path.
+    // Free inner slices too: on `BinningFailed` other workers have allocated.
     errdefer for (edges) |e| if (e.len != 0) gpa.free(e);
     const means = try gpa.alloc([]f32, n_features);
     errdefer gpa.free(means);
@@ -340,8 +289,7 @@ pub fn quantise(
         .policy = cfg.bin_policy,
         .failed = .init(false),
     };
-    // One feature per work item: each is an independent sort plus a linear
-    // assignment pass, which balances well across cores.
+    // One feature per item: independent sort + linear pass, balances well.
     pool.parallelFor(n_features, &ctx, BinCtx.run, 1);
     if (ctx.failed.load(.monotonic)) return error.BinningFailed;
 
@@ -357,9 +305,7 @@ pub fn quantise(
         if (kinds[f] != .categorical) continue;
         const src_levels = src.levels[col];
         const copy = try gpa.alloc([]u8, src_levels.len);
-        // Published empty *before* the fallible dupes, so a failure partway
-        // leaves the errdefer above a well-formed array to walk rather than
-        // uninitialised pointers.
+        // Emptied before the fallible dupes so the errdefer walks valid slices.
         @memset(copy, &.{});
         levels[f] = copy;
         for (src_levels, copy) |from, *to| to.* = try gpa.dupe(u8, from);
@@ -398,11 +344,8 @@ pub fn quantise(
     };
 }
 
-/// A new dataset holding only `rows`, sharing the source's bin edges.
-///
-/// Used for train/validation splits: both halves must be quantised with the
-/// same cut points, or a threshold learned on one would mean something
-/// different on the other.
+/// A dataset of only `rows`, sharing the source's edges. For train/validation
+/// splits: a threshold must mean the same on both halves.
 pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Dataset {
     const n = rows.len;
     const bins = try gpa.alloc(u8, ds.n_features * n);
@@ -427,8 +370,7 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         }
     }
 
-    // The row-major mirror needs no transpose here: one selected row is
-    // already contiguous in the source, so this is a run of short memcpys.
+    // No transpose: each source row is contiguous, so short memcpys.
     const nf = ds.n_features;
     const bins_rm = try gpa.alloc(BinIdx, nf * n);
     errdefer gpa.free(bins_rm);

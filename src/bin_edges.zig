@@ -21,23 +21,14 @@ pub fn binMidpoint(edges: []const f32, real_bin: usize) f32 {
     return 0.5 * (edges[real_bin - 1] + edges[real_bin]);
 }
 
-/// LightGBM's `GreedyFindBin` (v4.7.0, src/io/bin.cpp), which is the only
-/// part of the binning that a plain quantile rule gets badly wrong.
+/// LightGBM's `GreedyFindBin` (v4.7.0, src/io/bin.cpp). Quantile cuts on a
+/// 92%-zero column (adult `capital-gain`) land in the mass, dedup, and leave a
+/// few bins for the 8% with the signal: 0.6088 AUC vs LightGBM's 0.6224 on
+/// that column alone. Here a value with a bin's worth of rows gets its own
+/// bin and the budget is recomputed over the rest, repeatedly.
 ///
-/// A quantile rule places its cuts at fixed rank positions. On a column that
-/// is 92% zeros -- `capital-gain` in the adult census set, say -- almost every
-/// cut lands inside that mass, dedups against its neighbour, and the whole
-/// budget collapses onto a handful of usable bins covering the 8% that
-/// carries the signal. Measured: 0.6088 AUC against LightGBM's 0.6224 on that
-/// column alone.
-///
-/// The fix is to notice the mode. Any distinct value holding at least a bin's
-/// worth of rows takes a bin to itself; the remaining budget is then recomputed
-/// over what is left, repeatedly, so the tail gets the resolution.
-///
-/// `present` must be sorted ascending. Cuts are inclusive upper bounds, which
-/// is what `lowerBound` below expects -- LightGBM stores midpoints between
-/// neighbouring distinct values, and the two assign every row to the same bin.
+/// `present` must be sorted ascending. Cuts are inclusive upper bounds, as
+/// `lowerBound` expects; LightGBM's midpoints assign every row the same bin.
 fn greedyBins(
     gpa: std.mem.Allocator,
     present: []f32,
@@ -143,9 +134,8 @@ pub const BinCtx = struct {
     n_rows: usize,
     max_bin: u16,
     min_data_in_bin: u32,
-    /// Cardinality above which a categorical column is refused. Not a limit of
-    /// the index type -- it stops a free-text column becoming a 50,000-bin
-    /// histogram that would be legal and unusable.
+    /// Categorical cardinality refused. Not an index-type limit: it stops a
+    /// free-text column becoming a legal but unusable 50,000-bin histogram.
     max_cat_levels: u32,
     policy: BinPolicy,
     failed: std.atomic.Value(bool),
@@ -167,15 +157,10 @@ pub const BinCtx = struct {
         if (self.src.kinds[col] == .categorical) {
             // Ids are already dense and small; bin j+1 is level j.
             const card = self.src.levels[col].len;
-            // Checked here as well as at dictionary build time, because this
-            // is where the cast is: a frame assembled by any other route must
-            // not be able to reach it with an id that does not fit. The
-            // configured limit is the one that usually bites -- it exists to
-            // stop a free-text column becoming a 50,000-bin histogram, not
-            // because the index cannot hold it.
-            // `max_bin` deliberately does not appear here. It is the number of
-            // quantile cuts a *numeric* column gets; a categorical's width is
-            // its cardinality and nothing else decides it.
+            // Rechecked here because this is where the cast is: a frame built
+            // by any route must not reach it with an id that does not fit.
+            // `max_bin` deliberately absent: it counts numeric quantile cuts; a
+            // categorical's width is its cardinality alone.
             if (card >= max_bins or card > self.max_cat_levels) return error.CategoricalTooWide;
             for (vals, out) |v, *b| {
                 b.* = if (std.math.isNan(v)) 0 else @intCast(@as(usize, @intFromFloat(v)) + 1);
@@ -246,8 +231,7 @@ pub const BinCtx = struct {
 
         const nb: usize = edges.len + 2;
         const means = try self.gpa.alloc(f32, nb);
-        // Published before the two fallible allocations below, so a failure
-        // there leaves it for the caller's errdefer to free.
+        // Published first so the caller's errdefer frees it on later failure.
         self.means[f] = means;
         const sums = try self.gpa.alloc(f64, nb);
         defer self.gpa.free(sums);
@@ -266,9 +250,7 @@ pub const BinCtx = struct {
             all += sm;
             seen += c;
         }
-        // Bin 0 is missing and holds no values of its own. The column mean
-        // puts a missing entry at the centre, where it contributes nothing
-        // once the column is standardised.
+        // Missing bin gets the column mean: zero once standardised.
         means[0] = if (seen == 0) 0 else @floatCast(all / @as(f64, @floatFromInt(seen)));
         for (means[1..], sums[1..], cnts[1..], 1..) |*m, sm, c, b| {
             m.* = if (c == 0)

@@ -12,11 +12,9 @@ const csv = zarbor.csv;
 const csv_profile = zarbor.csv_profile;
 
 /// `zarbor profile <data.csv>` -- describe a file without training on it.
-///
-/// This exists because the alternative is a throwaway pandas script per
-/// dataset, and that script is where the understanding then lives: outside
-/// the tool, unversioned, and different every time. The parser has already
-/// walked every byte, so it is the right place to answer what is in the file.
+/// Replaces a throwaway pandas script per dataset, which keeps the understanding
+/// outside the tool, unversioned, different each time. The parser already walks
+/// every byte, so it is the place to answer what is in the file.
 pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !void {
     const io = init.io;
     var path: ?[]const u8 = null;

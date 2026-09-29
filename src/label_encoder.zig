@@ -17,20 +17,13 @@ fn indexOfStr(haystack: []const []const u8, needle: []const u8) ?usize {
     return null;
 }
 
-/// How a raw target column becomes the numbers a model actually fits.
-///
-/// A categorical column's dictionary id is assigned by order of *first
-/// appearance*, so using that id directly as the label makes the meaning of
-/// "1" depend on which row happened to come first: train on a file whose
-/// first row holds the positive class and the target is silently inverted,
-/// with no error and a perfectly plausible AUC. The encoder fixes an explicit
-/// class order, travels with the model, and is applied to every later file by
-/// *string*, so a category always means the same number no matter how the
-/// rows are ordered.
+/// Raw target -> fitted numbers. Dictionary ids follow first appearance, so
+/// as labels a positive first row silently inverts the target (plausible AUC,
+/// no error). This fixes the class order, travels with the model, and maps by
+/// *string*, independent of row order.
 pub const LabelEncoder = struct {
     gpa: std.mem.Allocator,
-    /// Class strings in label order: `classes[0]` encodes to 0, `classes[1]`
-    /// to 1. Empty for a numeric target, which is passed through unchanged.
+    /// `classes[i]` encodes to i. Empty for a numeric target (passed through).
     classes: [][]u8 = &.{},
 
     pub fn deinit(e: *LabelEncoder) void {
@@ -39,14 +32,9 @@ pub const LabelEncoder = struct {
         e.* = undefined;
     }
 
-    /// Derive the encoding from a target column.
-    ///
-    /// Classes are ordered lexicographically rather than by appearance, which
-    /// is what makes the result independent of row order, and matches
-    /// scikit-learn's `LabelEncoder` so a reference implementation agrees. For
-    /// the usual binary spellings that also puts the negative class first
-    /// ("No" < "Yes", "false" < "true", "neg" < "pos"); `pos_label` overrides
-    /// it for the ones where it does not ("abnormal" < "normal").
+    /// Classes sorted lexicographically (row-order independent, matches
+    /// scikit-learn's `LabelEncoder`); negative-first for "No"/"Yes",
+    /// "false"/"true", "neg"/"pos". `pos_label` overrides ("abnormal" < "normal").
     pub fn fromColumn(
         gpa: std.mem.Allocator,
         src: *const Frame,
@@ -54,18 +42,14 @@ pub const LabelEncoder = struct {
         pos_label: ?[]const u8,
     ) !LabelEncoder {
         if (src.kinds[col] == .numeric) {
-            // Nothing to name: the column is already numbers. Rejecting
-            // --pos-label here rather than ignoring it keeps a typo in the
-            // label column from passing as a no-op.
+            // Numeric: reject --pos-label so a label-column typo is not a no-op.
             if (pos_label != null) return error.PosLabelOnNumericTarget;
             return .{ .gpa = gpa };
         }
 
         const levels = src.levels[col];
         if (levels.len == 0) return error.EmptyTarget;
-        // zarbor is binary-only. Three classes encoded as 0/1/2 would train
-        // and score without complaint, which is precisely the failure mode
-        // this type exists to remove.
+        // Binary-only: 0/1/2 would train and score silently, the failure this type removes.
         if (levels.len == 1) return error.SingleClassTarget;
         if (levels.len > 2) return error.MulticlassNotSupported;
 
@@ -95,11 +79,8 @@ pub const LabelEncoder = struct {
         return indexOfStr(e.classes, name);
     }
 
-    /// Map `src`'s target column onto model labels.
-    ///
-    /// Fails loudly on a missing value or a class the encoder has never seen:
-    /// both would otherwise land on class 0 and be indistinguishable from a
-    /// legitimate negative.
+    /// Map `src`'s target onto labels. Missing or unseen classes fail: they
+    /// would land on 0, indistinguishable from a real negative.
     pub fn encode(
         e: *const LabelEncoder,
         gpa: std.mem.Allocator,
@@ -137,8 +118,7 @@ pub const LabelEncoder = struct {
         return out;
     }
 
-    /// Reject labels the objective cannot represent, such as a {1,2}-coded
-    /// numeric target handed to logistic loss.
+    /// Reject labels the objective cannot represent, e.g. {1,2} under logistic loss.
     pub fn validate(_: *const LabelEncoder, labels: []const f32, obj: Objective) !void {
         if (obj != .logistic) return;
         // Written so NaN fails too.

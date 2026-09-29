@@ -5,12 +5,9 @@
 
 const std = @import("std");
 
-/// Area under the ROC curve, by the rank identity
-/// `AUC = (sum of positive ranks - n_pos(n_pos+1)/2) / (n_pos * n_neg)`.
-///
-/// Ties share their average rank, which matters here: a boosted ensemble
-/// produces many exactly equal scores when rows share a leaf, and ranking them
-/// arbitrarily would bias the result.
+/// ROC AUC by rank identity: `(sum of positive ranks - n_pos(n_pos+1)/2) / (n_pos * n_neg)`.
+/// Ties share their average rank: rows sharing a leaf get equal scores, and
+/// arbitrary tie order would bias the result.
 pub fn auc(gpa: std.mem.Allocator, scores: []const f32, labels: []const f32) !f64 {
     std.debug.assert(scores.len == labels.len);
     const n = scores.len;
@@ -66,10 +63,8 @@ pub fn logloss(raw: []const f32, labels: []const f32) f64 {
     return acc / @as(f64, @floatFromInt(raw.len));
 }
 
-/// Mean binary cross-entropy from probabilities rather than log-odds.
-///
-/// A forest leaf can hold exactly 0 or 1 when its rows are pure, which would
-/// make the loss infinite, so probabilities are clamped away from the ends.
+/// Mean binary cross-entropy from probabilities. Clamped away from 0 and 1:
+/// a pure forest leaf holds exactly 0 or 1, which would make the loss infinite.
 pub fn loglossProb(prob: []const f32, labels: []const f32) f64 {
     var acc: f64 = 0;
     for (prob, labels) |pr, y| {

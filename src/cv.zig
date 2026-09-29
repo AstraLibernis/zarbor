@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! K-fold cross-validation in a single process.
-//!
-//! `train` fits one model against one split, so cross-validating it from
-//! outside means re-reading and re-binning the same CSV once per fold -- ten
-//! times per configuration, counting the `predict` calls, for data that never
-//! changes between them. A hyperparameter search pays that on every trial.
-//!
-//! This reads and bins once, then loops the folds over the already-binned
-//! matrix. What it prints is the out-of-fold score: every row predicted by the
-//! one model that did not train on it, pooled and scored as a single vector.
-//! That is a stricter number than the mean of the per-fold scores and the one
-//! worth tuning against, because it is computed on every row exactly once.
-//!
-//! Predictions are pooled on the natural scale (probabilities), not raw
-//! log-odds. Each fold is a different model with its own base score, and
-//! AUC over a pooled vector compares rows *across* folds -- so the scale has
-//! to mean the same thing in all of them.
+//! K-fold cross-validation in one process (the CLI is src/cli/cv.zig).
+//! Driving `train` per fold from outside re-reads and re-bins the same CSV ten
+//! times per config (with `predict`); a search pays that every trial. Here the
+//! caller bins once and folds loop over that matrix. The headline is the
+//! out-of-fold score: each row predicted by the model that did not train on
+//! it, pooled into one vector. Stricter than the per-fold mean, and the one to
+//! tune against: every row counts exactly once.
+//! Pooled on the natural scale (probabilities), not log-odds: each fold has its
+//! own base score and pooled AUC compares rows *across* folds.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -27,10 +19,9 @@ const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
 const Fitted = @import("fitted.zig").Fitted;
 
-/// Assign every row a fold. For logistic the assignment is stratified: the
-/// two classes are shuffled and dealt out separately, so a fold cannot draw
-/// an unrepresentative share of a rare positive class. Dealing round-robin
-/// from a shuffled list also keeps the folds within one row of equal size.
+/// Assign every row a fold. `stratify` (for logistic) shuffles and deals each
+/// class separately, so no fold gets a skewed share of a rare positive class.
+/// Round-robin dealing keeps folds within one row of equal size.
 pub fn assignFolds(
     gpa: std.mem.Allocator,
     labels: []const f32,
@@ -47,8 +38,7 @@ pub fn assignFolds(
 
     var head: usize = 0;
     if (stratify) {
-        // Positives first, then negatives; each group is shuffled on its own
-        // and dealt from the same rotating counter, which interleaves them.
+        // Positives then negatives, each shuffled alone, dealt from one counter.
         for (labels, 0..) |y, i| if (y >= 0.5) {
             order[head] = @intCast(i);
             head += 1;
@@ -77,19 +67,11 @@ pub fn assignFolds(
     return fold;
 }
 
-/// Assign folds by *group* rather than by row: every row sharing a group id
-/// lands in the same fold.
-///
-/// Without this, cross-validation on panel data silently lies. If a ZIP code
-/// appears in May and June and the split is by row, one month trains while
-/// the other validates, and the score measures memory rather than
-/// generalisation. Grouping is the difference between "how well does this
-/// predict a new month for a place I know" and "how well does it predict a
-/// place I have never seen" -- which can be several RMSE apart.
-///
-/// Groups are dealt largest-first into whichever fold is currently smallest,
-/// because group sizes are usually uneven and a round-robin over a shuffled
-/// list would leave the folds lopsided.
+/// Assign folds by *group*: rows sharing a group id share a fold. Without it,
+/// panel-data CV lies: a ZIP code in May and June split by row scores memory,
+/// not generalisation ("new month, known place" vs "unseen place" can differ
+/// by several RMSE). Groups go largest-first into the smallest fold, since
+/// uneven sizes under round-robin leave folds lopsided.
 pub fn assignGroupFolds(
     gpa: std.mem.Allocator,
     groups: []const f32,
@@ -115,8 +97,7 @@ pub fn assignGroupFolds(
     defer gpa.free(order);
     for (order, 0..) |*v, i| v.* = @intCast(i);
 
-    // Shuffle first so equal-sized groups are not ordered by appearance, then
-    // sort by size; ties keep the shuffled order.
+    // Shuffle, then sort by size: ties keep shuffled, not appearance, order.
     var prng: std.Random.DefaultPrng = .init(seed);
     shuffle(prng.random(), order);
     const sizes = counts.values();
@@ -145,8 +126,7 @@ pub fn assignGroupFolds(
 
     for (groups, 0..) |g, i| {
         const key: u64 = @bitCast(@as(f64, g));
-        // getIndex, not a scan: the map already knows where the group is, and
-        // a linear lookup here would be rows x groups.
+        // getIndex, not a scan: a linear lookup would be rows x groups.
         fold[i] = of[counts.getIndex(key).?];
     }
     return fold;
@@ -161,10 +141,8 @@ fn shuffle(r: std.Random, xs: []u32) void {
     }
 }
 
-/// What one cross-validation produced. `pooled` is the out-of-fold score over
-/// every evaluated row at once; `mean`/`sd` describe the spread between folds.
-/// They are different numbers and answer different questions: tune against
-/// `pooled`, judge whether a difference is real against `sd`.
+/// `pooled`: out-of-fold score over all evaluated rows; `mean`/`sd`: spread
+/// between folds. Tune against `pooled`; judge if a difference is real by `sd`.
 pub const Outcome = struct {
     pooled: f64,
     mean: f64,
@@ -174,9 +152,8 @@ pub const Outcome = struct {
 };
 
 pub const Opts = struct {
-    /// Evaluate only the first N folds. A search uses this as a cheap
-    /// approximation: a hopeless configuration reveals itself on two folds
-    /// and need not be charged for five. 0 means all of them.
+    /// Evaluate only the first N folds (0 = all): a cheap search fidelity, a
+    /// hopeless config shows on two folds without paying for five.
     use_folds: u32 = 0,
     /// Filled with the out-of-fold prediction for every evaluated row.
     oof: ?[]f32 = null,
@@ -184,9 +161,8 @@ pub const Opts = struct {
     progress: ?*std.Io.Writer = null,
 };
 
-/// Higher is better for AUC, lower is better for RMSE. Everything that ranks
-/// configurations goes through here so the comparison cannot drift from the
-/// objective.
+/// Higher AUC, lower RMSE is better. All config ranking goes through here so
+/// the comparison cannot drift from the objective.
 pub fn better(obj: Objective, a: f64, b: f64) bool {
     return switch (obj) {
         .logistic => a > b,
@@ -194,11 +170,8 @@ pub fn better(obj: Objective, a: f64, b: f64) bool {
     };
 }
 
-/// Cross-validate one configuration over an already-binned dataset.
-///
-/// The dataset and the fold assignment are inputs rather than things this
-/// computes, which is the whole point: a search binds them once and then pays
-/// only for fitting, instead of re-reading a CSV per configuration.
+/// Cross-validate one config over an already-binned dataset. Data and folds
+/// are inputs so a search binds them once and pays only for fitting.
 pub fn crossValidate(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -217,9 +190,8 @@ pub fn crossValidate(
     const per_fold = try gpa.alloc(f64, run_folds);
     defer gpa.free(per_fold);
 
-    // Only the rows belonging to a fold that actually ran are scored, so a
-    // partial-fidelity result is an honest score on a subset rather than a
-    // full-length vector padded with zeros.
+    // Only rows of folds that ran are scored: a partial-fidelity result is an
+    // honest subset score, not a full vector padded with zeros.
     var scored: std.ArrayList(u32) = .empty;
     defer scored.deinit(gpa);
 

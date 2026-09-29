@@ -11,34 +11,24 @@ const tree = @import("tree.zig");
 const builder = @import("builder.zig");
 const Builder = builder.Builder;
 
-/// Below this many rows the barriers cost more than the scan saves.
-///
-/// Tuned rather than guessed: sweeping it, 32768 (the original guess)
-/// spends 360 ms in partition on a 200-tree fit where 2048 spends 271 ms,
-/// and the curve rises monotonically above that. Output is identical at
-/// every setting.
+/// Below this many rows the barriers cost more than the scan saves. Tuned: on a 200-tree fit 32768
+/// (the original guess) spends 360 ms in partition, 2048 spends 271 ms; the curve rises
+/// monotonically above that. Output identical at every setting.
 const parallel_partition_min: usize = 2048;
 
-/// Takes the four scalars the decision needs, not the whole `Split`.
-///
-/// `Split` is 160 bytes once a categorical split carries its id array
-/// inline, and this runs once per row per partition pass. Reading the
-/// decision through it put partition at 2.2x; the element width of the
-/// bin, which is what two earlier guesses blamed, was worth nothing.
+/// Takes the four scalars the decision needs, not the whole 160-byte `Split` (inline categorical id
+/// array): read per row per pass, it put partition at 2.2x. Bin element width, blamed twice, was
+/// worth nothing.
 pub inline fn goesLeft(bin: data.BinIdx, t: split.SplitTest) bool {
     if (bin == 0) return t.missing_left;
     if (t.is_cat) return split.catContains(t.ids, bin);
     return bin <= t.threshold;
 }
 
-/// Reorder `rows[start..end]` so the left child's rows come first.
-/// Only row ids move; gradients are looked up by row id.
-///
-/// This is per-level O(rows) work and used to be the serial half of tree
-/// building: with it single-threaded, 16 threads bought only 1.66x over 1,
-/// and time scaled with tree *depth* rather than node count. It is now a
-/// count / prefix-sum / scatter, which is three parallel passes instead of
-/// one serial one.
+/// Reorder `rows[start..end]` so the left child's rows come first; only row ids move (gradients are
+/// looked up by id). Count / prefix-sum / scatter in three parallel passes: done serially, this
+/// per-level O(rows) work capped 16 threads at 1.66x over 1 and made time scale with depth, not
+/// node count.
 pub fn partition(b: *Builder, start: usize, end: usize, sp: split.Split) usize {
     if (b.ds.isWide(sp.feature))
         return partitionOn(b, data.BinIdx, b.ds.columnWide(sp.feature), start, end, sp);
@@ -102,13 +92,9 @@ pub fn partitionOn(
     return start + total_left;
 }
 
-/// The one-thread path, and stable like the parallel one.
-///
-/// It used to be an in-place Hoare swap, which is fewer passes but leaves
-/// a node's rows in arbitrary order. That matters now: the histogram
-/// kernel reads the row-major bin matrix, and an ascending row order is
-/// what lets the hardware prefetcher follow it. Two branchless passes and
-/// a memcpy beat one pass of mispredicted swaps anyway.
+/// The one-thread path, stable like the parallel one. Not an in-place Hoare swap: that leaves rows
+/// in arbitrary order, and the histogram kernel needs ascending rows for the hardware prefetcher
+/// over the row-major matrix. Two branchless passes and a memcpy beat mispredicted swaps anyway.
 pub fn partitionSerialOn(
     b: *Builder,
     comptime C: type,
@@ -135,16 +121,12 @@ pub fn partitionSerialOn(
     return start + n_left;
 }
 
-/// Generic over the column's element type so a table that fits in a byte
-/// keeps reading bytes here.
-///
-/// This is the one place the bin width is visibly paid. Partitioning walks a
-/// single feature down a node's rows, and those rows are scattered once the
-/// tree is more than a level deep, so each tends to want its own cache line
-/// and the element size is paid in full rather than amortised. Measured when
-/// the whole matrix went to `u16`: 51 ms -> 110 ms on adult, while the
-/// row-major accumulate did not move. The row-major mirror is therefore
-/// uniformly `u16` and only this stays narrow.
+/// Generic over the column element type so byte-wide tables keep reading bytes. The one place bin
+/// width is visibly paid: one feature walked down scattered rows costs a cache line per row, so the
+/// element size is not amortised. Whole matrix as `u16`: 51 -> 110 ms on adult, row-major
+/// accumulate unmoved. So the row-major mirror is uniformly `u16` and only this stays narrow.
+/// `parallelFor` hands out fixed-size chunks, so `begin / chunk` recovers the chunk: count and
+/// scatter agree on each chunk's output position with no coordination.
 fn PartCtx(comptime C: type) type {
     return struct {
         const Self = @This();
@@ -178,9 +160,8 @@ fn PartCtx(comptime C: type) type {
             var i = self.start + begin;
             while (i < self.start + end) : (i += 1) {
                 const row = self.rows[i];
-                // Branchless: which side a row takes is close to a coin flip near
-                // a good split, so a branch here mispredicts about half the time.
-                // Selecting the cursor instead costs a cmov and nothing else.
+                // Branchless: near a good split the side is a coin flip, so a branch mispredicts
+                // about half the time; selecting the cursor costs one cmov.
                 const left = goesLeft(self.col[row], self.sp);
                 const dst = if (left) li else ri;
                 self.rows_out[dst] = row;

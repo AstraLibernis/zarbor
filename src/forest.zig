@@ -2,18 +2,12 @@
 // Copyright (C) 2026 AstraLibernis
 
 //! Random forest: bagged, unshrunk trees, averaged.
-//!
-//! This shares `tree.zig` with the booster rather than reimplementing tree
-//! induction, which works because of an identity worth spelling out. The
-//! histogram search maximises `G²/(H+lambda)` summed over children. Feed it
-//! `g = -y` and `h = 1` and that becomes `(Σy)²/n` — exactly CART's variance
-//! reduction, and for 0/1 labels exactly the Gini criterion. The optimal leaf
-//! weight `-G/(H+lambda)` likewise collapses to `mean(y)`.
-//!
-//! So a forest tree is a boosting tree fed constant gradients, with shrinkage
-//! off and `lambda = 0`. The differences that remain are real ones: rows are
-//! drawn with replacement, every tree sees the same targets rather than the
-//! previous round's residuals, and the ensemble averages instead of summing.
+//! Reuses the booster's `tree.zig` by an identity: the histogram search maximises
+//! `G²/(H+lambda)` over children; with `g = -y`, `h = 1`, `lambda = 0` that is
+//! `(Σy)²/n`, CART's variance reduction (Gini for 0/1 labels), and the leaf weight
+//! `-G/(H+lambda)` is `mean(y)`. So a forest tree is a boosting tree fed constant
+//! gradients with shrinkage off. Real differences: rows drawn with replacement,
+//! every tree fits the same targets (not residuals), the ensemble averages.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -25,10 +19,9 @@ const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
 
-/// A forest's settings. Its tree defaults are what make it a random forest:
-/// deep, bootstrapped, unshrunk, leaf-capped so the histogram budget stays
-/// bounded. `colsample_bynode` gets Breiman's sqrt(p) (or p/3) from
-/// `config.Config.applyForestFeatureDefault` once p is known.
+/// Tree defaults make it a random forest: deep, bootstrapped, unshrunk,
+/// leaf-capped to bound the histogram budget. `colsample_bynode` gets Breiman's
+/// sqrt(p) (or p/3) from `config.Config.applyForestFeatureDefault` once p is known.
 pub const Params = struct {
     /// Number of bagged trees, fitted independently.
     n_rounds: u32 = 300,
@@ -67,9 +60,8 @@ pub const Forest = struct {
         m.* = undefined;
     }
 
-    /// Mean of the member trees. Already on the objective's natural scale:
-    /// each leaf holds `mean(y)` over its rows, so for logistic this is a
-    /// probability and there is no link function to invert.
+    /// Mean of member trees, already on the natural scale: leaves hold `mean(y)`,
+    /// so for logistic this is a probability with no link to invert.
     pub fn predict(m: *const Forest, pool: *Pool, ds: *const Dataset, out: []f32) void {
         std.debug.assert(out.len == ds.n_rows);
         var ctx = PredictCtx{ .m = m, .ds = ds, .out = out };
@@ -89,15 +81,10 @@ const PredictCtx = struct {
         const inv: f32 = if (n == 0) 0 else 1.0 / @as(f32, @floatFromInt(n));
         const out = self.out[begin..end];
 
-        // Trees outer, rows inner. The other order walks every tree for one
-        // row before moving on, and a 300 x 1024-leaf forest is ~19.7 MB of
-        // nodes -- so each row scattered across 300 separate arrays, none of
-        // which stayed cached. This way one tree's nodes (~65 KB) and the
-        // chunk's bins stay in L2 for the whole pass.
-        //
-        // Bit-exact with the row-major order: each `out[r]` still accumulates
-        // the same trees in the same sequence, rounding to f32 at each step
-        // exactly as the register accumulator did.
+        // Trees outer, rows inner: a 300 x 1024-leaf forest is ~19.7 MB of nodes,
+        // so row-major scattered each row across 300 uncached arrays; this keeps
+        // one tree (~65 KB) and the chunk's bins in L2. Bit-exact with row-major:
+        // each `out[r]` sums the same trees in the same order, rounding to f32 per step.
         @memset(out, 0);
         for (self.m.trees.items) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
@@ -126,8 +113,7 @@ pub const TrainResult = struct {
     n_trees: u32,
     /// Validation score of the full ensemble, or NaN with no validation set.
     score: f64,
-    /// Nanoseconds spent predicting and scoring the validation set; not part
-    /// of fitting. See `booster.TrainResult.valid_ns`.
+    /// Nanoseconds predicting and scoring validation, not fitting; see `booster.TrainResult.valid_ns`.
     valid_ns: u64,
 };
 
@@ -140,8 +126,7 @@ pub fn train(
     log: ?*std.Io.Writer,
 ) !TrainResult {
     var cfg = cfg_in;
-    // Averaging is the variance control; shrinking each member as well would
-    // just produce a weak ensemble scaled by eta.
+    // Averaging controls variance; shrinking members too just scales a weak ensemble by eta.
     cfg.tree.learning_rate = 1.0;
     try cfg.validate();
     if (ds.labels.len == 0) return error.NoLabels;
@@ -191,11 +176,9 @@ pub fn train(
             pool.parallelFor(v.n_rows, &actx, AccumCtx.run, 4096);
             prof.stop(.valid_predict, t_vp);
 
-            // Only score when something consumes it. A forest has no early
-            // stopping, so every round but the last (and any logged one) threw
-            // the number away — and the metric is a 133k-row sort on one
-            // thread. That was 1.18 s of a 2.35 s fit, the same mistake the
-            // booster made and had fixed.
+            // Score only when consumed: no early stopping, so only the last and logged
+            // rounds use it, and the metric is a single-thread sort (133k rows: 1.18 s
+            // of a 2.35 s fit when scored every round; the booster has the same fix).
             const log_due = log != null and cfg.verbose_eval != 0 and
                 (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
             if (!log_due and round + 1 != cfg.n_rounds) {
@@ -234,8 +217,7 @@ pub fn train(
     };
 }
 
-/// Forest predictions are already probabilities/means, so unlike the booster
-/// there is no raw-score scale to convert from.
+/// Predictions are already probabilities/means: no raw-score scale to convert, unlike the booster.
 fn evaluate(
     gpa: std.mem.Allocator,
     obj: Objective,

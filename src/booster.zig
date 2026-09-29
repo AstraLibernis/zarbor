@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! The boosting loop.
-//!
-//! The objective is dispatched through `inline else`, so each loss compiles to
-//! its own specialised gradient loop with the sigmoid and the weighting
-//! inlined — there is no indirect call anywhere in the per-row path.
+//! The boosting loop. The objective dispatches through `inline else`, so each
+//! loss compiles its own gradient loop with sigmoid and weighting inlined: no
+//! indirect call in the per-row path.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -24,57 +22,44 @@ const gossSelect = goss.gossSelect;
 pub const Sampling = enum {
     /// Uniform random subset of size `subsample`, without replacement.
     uniform,
-    /// LightGBM's Gradient-based One-Side Sampling: keep every large-gradient
-    /// row, sample the rest, and amplify the survivors so the gradient sum
-    /// stays unbiased. Ignores `subsample`.
+    /// LightGBM's Gradient-based One-Side Sampling: keep large-gradient rows, sample
+    /// the rest, amplify survivors so the gradient sum stays unbiased. Ignores `subsample`.
     goss,
 };
 
-/// Which magnitude GOSS ranks rows by when choosing the ones to keep in full.
-///
-/// This is the one place the GOSS paper and LightGBM's implementation part
-/// company, and it is worth 0.0012 AUC on a binary problem. Measured in
-/// docs/goss.md.
+/// Magnitude GOSS ranks rows by to keep in full. The one place the GOSS paper and
+/// LightGBM's code differ; worth 0.0012 AUC on a binary problem (docs/goss.md).
 pub const GossRank = enum {
-    /// `|g|`. What Ke et al. (NeurIPS 2017) specify, and what LightGBM's own
-    /// `top_rate` documentation describes. Keeps the rows with the largest
-    /// residual.
+    /// `|g|`: Ke et al. (NeurIPS 2017) and LightGBM's `top_rate` docs. Keeps the
+    /// largest residuals.
     gradient,
-    /// `|g * h|`. What LightGBM actually computes in `goss.hpp`. The hessian
-    /// factor pulls confidently-wrong rows *out* of the kept set -- for
-    /// logistic loss `h = p(1-p)`, so a row at p = 0.99 is scored a hundred
-    /// times lower than one at p = 0.5 with the same residual. Select this
-    /// for parity with LightGBM; on squared error the two are identical,
-    /// because `h` is 1.
+    /// `|g * h|`: what LightGBM computes in `goss.hpp`; select for LightGBM parity.
+    /// The hessian pulls confidently-wrong rows *out* of the kept set: logistic
+    /// `h = p(1-p)`, so p = 0.99 scores ~100x lower than p = 0.5 at equal residual.
+    /// Identical to `gradient` on squared error (`h` = 1).
     gradient_hessian,
 };
 
 /// Everything gradient boosting needs; the trees' own settings are in `tree`.
 pub const Params = struct {
-    /// Number of boosting rounds (trees) to fit. For `random_forest` this is
-    /// the number of bagged trees, fitted independently.
+    /// Boosting rounds (trees).
     n_rounds: u32 = 500,
-    /// Initial raw score for every row. For logistic this is a log-odds.
-    /// Null means "derive from the training label mean", which is what you
-    /// almost always want.
+    /// Initial raw score (log-odds for logistic). Null (the usual choice) derives
+    /// it from the training label mean.
     base_score: ?f32 = null,
     objective: Objective = .logistic,
-    /// Multiplier on positive-class gradients. >1 upweights the minority
-    /// class for imbalanced binary problems.
+    /// Multiplier on positive-class gradients; >1 upweights an imbalanced minority.
     scale_pos_weight: f32 = 1.0,
     /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
     sampling: Sampling = .uniform,
-    /// Ranking key for GOSS. Defaults to the paper's `|g|`, which measures
-    /// better here; `gradient_hessian` is LightGBM's. Ignored unless
-    /// `sampling = .goss`.
+    /// GOSS ranking key: the paper's `|g|` (measures better here) or LightGBM's
+    /// `gradient_hessian`. Ignored unless `sampling = .goss`.
     goss_rank: GossRank = .gradient,
-    /// GOSS: fraction of rows kept for having the largest |gradient|.
+    /// GOSS: fraction of rows kept in full for the largest `goss_rank` key.
     top_rate: f32 = 0.2,
     /// GOSS: fraction of the *remaining* rows sampled uniformly.
     other_rate: f32 = 0.1,
-    /// Stop when the validation metric has not improved for this many rounds.
-    /// 0 disables early stopping. Not meaningful for `random_forest`, whose
-    /// trees are independent, or for `linear`.
+    /// Stop after this many rounds without validation improvement; 0 disables.
     early_stopping_rounds: u32 = 0,
     /// Print per-round metrics every N rounds. 0 silences training.
     verbose_eval: u32 = 10,
@@ -83,9 +68,8 @@ pub const Params = struct {
     pub fn validate(p: Params) !void {
         if (p.n_rounds == 0) return error.NoRounds;
         try p.tree.validate();
-        // Bagging with replacement makes a row's gradient contribute more
-        // than once, which is meaningless when the next round's gradient is
-        // computed from a single accumulated score per row.
+        // With replacement a row's gradient counts more than once, meaningless when
+        // next round's gradient comes from one accumulated score per row.
         if (p.tree.bootstrap) return error.BootstrapWithBoosting;
         if (p.sampling == .goss) {
             if (p.top_rate <= 0 or p.top_rate >= 1) return error.BadTopRate;
@@ -118,8 +102,7 @@ pub const Model = struct {
         pool.parallelFor(ds.n_rows, &ctx, PredictCtx.run, 2048);
     }
 
-    /// Predictions on the objective's natural scale: probabilities for
-    /// logistic, raw values for regression.
+    /// Natural-scale predictions: probabilities for logistic, raw for regression.
     pub fn predict(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
         m.predictRaw(pool, ds, out);
         if (m.objective == .logistic) {
@@ -154,24 +137,15 @@ pub inline fn sigmoid(x: f32) f32 {
 pub const lanes = 8;
 pub const F8 = @Vector(lanes, f32);
 
-/// `sigmoid` for eight rows at once.
-///
-/// `@exp` on a scalar is a libm call — 7.8 ns an element here, and glibc's
-/// `expf` is no faster, so the cost is scalar transcendental evaluation
-/// rather than anyone's implementation. Computing it inline as
-/// `2^(-x*log2e)`, with the integer part folded into the exponent field and
-/// the fraction from a degree-5 minimax polynomial, vectorises to 0.67 ns an
-/// element: 11.7x, and gradients were 15% of a fit.
-///
-/// Accurate to under 1e-6 absolute, which `"vectorised sigmoid matches the
-/// scalar one"` pins. That is a few f32 ulp, and it feeds gradients that are
-/// themselves stored as f32 — but it is an approximation, so it is confined
-/// to the gradient loop. Predictions, which are what a caller actually reads,
-/// go through the scalar `sigmoid`.
+/// `sigmoid` for eight rows. Scalar `@exp` is a libm call at 7.8 ns/element (glibc
+/// `expf` no faster). Inline `2^(-x*log2e)`, integer part into the exponent field,
+/// fraction by degree-5 minimax polynomial, vectorises to 0.67 ns: 11.7x, and
+/// gradients were 15% of a fit. Error < 1e-6 absolute (a few f32 ulp), pinned by
+/// `"vectorised sigmoid matches the scalar one"`. Still an approximation, so it is
+/// confined to gradients; predictions use the scalar `sigmoid`.
 pub inline fn sigmoid8(x: F8) F8 {
     const one: F8 = @splat(1.0);
-    // exp overflows f32 past ~88; clamping there costs nothing since sigmoid
-    // has long since saturated.
+    // exp overflows f32 past ~88; sigmoid has saturated long before, so clamp.
     const lim: F8 = @splat(88.0);
     const t = @min(@max(-x, -lim), lim);
     const y = t * @as(F8, @splat(1.44269504));
@@ -188,12 +162,8 @@ pub inline fn sigmoid8(x: F8) F8 {
     return one / (one + p * @as(F8, @bitCast(bits)));
 }
 
-/// The same approximation for a single row.
-///
-/// The tail of the vectorised loop must not use the *exact* `sigmoid`: chunk
-/// boundaries move with the thread count, so a row would get a different
-/// gradient at one thread than at eight, and the model would quietly depend
-/// on `--n_threads`. Same function, one lane.
+/// `sigmoid8` for one row. The vector loop's tail must not use exact `sigmoid`:
+/// chunk boundaries move with thread count, so the model would depend on `--n_threads`.
 pub inline fn sigmoid1(x: f32) f32 {
     const v: F8 = @splat(x);
     return sigmoid8(v)[0];
@@ -230,8 +200,7 @@ const GradCtx = struct {
                 const w = @select(f32, y > half, spw, one);
                 const g = w * (p - y);
                 const h = w * @max(p * (one - p), floor);
-                // GradPair is {g, h} interleaved, so write it a row at a time
-                // rather than trying to scatter two vectors into it.
+                // GradPair is {g, h} interleaved: write per row, not two vector scatters.
                 const ga: [lanes]f32 = g;
                 const ha: [lanes]f32 = h;
                 for (0..lanes) |k| self.grads[i + k] = .{ .g = ga[k], .h = ha[k] };
@@ -264,21 +233,16 @@ const ApplyCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ApplyCtx = @ptrCast(@alignCast(ctx));
-        // Leaf spans are disjoint by construction, so distinct workers never
-        // touch the same row and no synchronisation is needed.
+        // Leaf spans are disjoint, so workers never share a row: no synchronisation.
         for (self.spans[begin..end]) |s| {
             for (self.rows[s.start..s.end]) |r| self.raw[r] += s.weight;
         }
     }
 };
 
-/// Applies a finished tree to *every* training row.
-///
-/// The span-based `ApplyCtx` only touches rows the tree actually saw, which is
-/// correct when the tree saw all of them and wrong the moment any row sampling
-/// is in play: an unsampled row's raw score would stay at the previous round's
-/// value, and next round's gradient for it would be computed against a stale
-/// ensemble. Sampled rounds pay for a full traversal instead.
+/// Applies a finished tree to *every* training row. Span-based `ApplyCtx` touches
+/// only rows the tree saw; under row sampling an unsampled row's raw score would go
+/// stale and its next gradient be wrong. Sampled rounds pay a full traversal.
 const ApplyAllCtx = struct {
     t: *const tree.Tree,
     ds: *const Dataset,
@@ -311,21 +275,15 @@ pub const TrainResult = struct {
     model: Model,
     /// Rounds kept after the post-hoc trim.
     n_rounds: u32,
-    /// Rounds actually executed before early stopping fired. Distinct from
-    /// `n_rounds`, which also reflects trimming the trees that came after the
-    /// best round — the two differ, and conflating them hides whether early
-    /// stopping ever triggered at all.
+    /// Rounds executed before early stopping fired. Unlike `n_rounds` (post-trim),
+    /// this shows whether early stopping triggered at all.
     rounds_run: u32,
-    /// Best validation score seen. With `early_stopping_rounds == 0` the
-    /// metric is only computed on logged rounds and the last one, so this is
-    /// the best of *those*, not of every round. NaN with no validation set.
+    /// Best validation score seen; NaN with no validation set. With
+    /// `early_stopping_rounds == 0` only logged rounds and the last are scored.
     best_score: f64,
-    /// Nanoseconds spent predicting and scoring the validation set.
-    ///
-    /// Separated because it is not part of fitting the model, and a
-    /// comparison against a library called without an eval set would
-    /// otherwise charge us for work it never did. Always measured, not only
-    /// under `--profile`: two clock reads a round cost nothing.
+    /// Nanoseconds predicting and scoring validation. Kept apart from fitting so a
+    /// comparison with a library run without an eval set is fair. Always measured,
+    /// not only under `--profile`: two clock reads a round cost nothing.
     valid_ns: u64,
 };
 
@@ -342,8 +300,7 @@ fn evaluate(
 ) !f64 {
     return switch (obj) {
         .logistic => blk: {
-            // AUC is rank-based, so raw log-odds rank identically to
-            // probabilities and the sigmoid can be skipped.
+            // AUC is rank-based: log-odds rank like probabilities, skip the sigmoid.
             break :blk try metric.auc(gpa, raw, labels);
         },
         .squared_error => blk: {
@@ -452,11 +409,9 @@ pub fn train(
         errdefer t.deinit(gpa);
         try model.trees.append(gpa, t);
 
-        // Spans only cover the rows the tree saw; that is every row only when
-        // nothing was sampled away.
+        // Spans cover only rows the tree saw (all rows only without sampling).
         const t_ap = prof.start();
-        // A linear leaf has no single constant to add to a whole span, so
-        // the span fast path is only valid for constant leaves.
+        // Span fast path needs constant leaves; a linear leaf has no single constant.
         if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
             var actx = ApplyCtx{
                 .spans = builder.leafSpans(),
@@ -481,12 +436,9 @@ pub fn train(
             pool.parallelFor(v.n_rows, &vctx, ValidCtx.run, 4096);
             prof.stop(.valid_predict, t_vp);
 
-            // Only score when something will actually consume it. Early
-            // stopping needs every round; a log line needs its own round; the
-            // final round fills in `best_score` for the caller. Without this
-            // guard the metric ran unconditionally, and on 668k rows that was
-            // 52% of total training time — a full 133k-row sort per round,
-            // single-threaded, discarded 199 times out of 200.
+            // Score only when consumed: early stopping (every round), a log line, or the
+            // final round (`best_score`). Unguarded, on 668k rows it was 52% of training:
+            // a single-thread 133k-row sort per round, discarded 199 times in 200.
             const log_due = log != null and cfg.verbose_eval != 0 and
                 (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
             if (cfg.early_stopping_rounds == 0 and !log_due and round + 1 != cfg.n_rounds) {

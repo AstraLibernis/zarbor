@@ -1,37 +1,22 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Hyperparameter search, with the strategy selected the way the model is.
-//!
-//! `--search` picks between four families that differ in what they assume:
-//!
-//!   grid    Every combination of a discrete lattice. Assumes nothing, and
-//!           pays for it: cost is the product of the axes, so it re-tests the
-//!           same value of an important knob once per combination of the
-//!           unimportant ones. Exhaustive and reproducible, which is what it
-//!           is for -- not for finding an optimum in ten dimensions.
-//!   random  Independent draws per parameter. The honest baseline: with only
-//!           a few parameters mattering, every trial gives each of them a
-//!           fresh value, which is exactly what a grid fails to do.
-//!   bayes   Tree-structured Parzen Estimator. Models the density of good
-//!           configurations against the density of bad ones and proposes
-//!           where their ratio is highest. Spends its budget near what has
-//!           worked, at the risk of committing early to a local basin.
-//!   bandit  Successive halving. Starts many configurations at a cheap
-//!           fidelity, keeps the best fraction, and re-runs the survivors at
-//!           a higher one. Assumes a config's cheap score ranks roughly like
-//!           its expensive score -- usually true, and false exactly when a
-//!           config needs its full budget to show its worth.
-//!
-//! All four share one evaluator (`cv.crossValidate`) over one binned dataset,
-//! so a strategy difference is never confounded by a data difference, and the
-//! CSV is read and binned once for the entire search rather than once per
-//! trial.
-//!
-//! The search reports against the fold split it searched on. That number is
-//! the maximum of many trials and so is optimistic by construction -- the
-//! winner is partly whatever suited this split. `--confirm=N` re-scores the
-//! leaders on fold seeds they have never seen, which is the number to believe.
+//! Hyperparameter search: space, evaluator and strategies (flags and printing
+//! live in src/cli/tune.zig). Four `Search` families, differing in assumptions:
+//!   grid    every lattice combination; assumes nothing, costs the product of
+//!           the axes (re-tests a key knob per combo of unimportant ones).
+//!           Exhaustive and reproducible, not an optimiser in ten dimensions.
+//!   random  independent draws; the honest baseline: every trial gives each
+//!           of the few parameters that matter a fresh value, unlike a grid.
+//!   bayes   Tree-structured Parzen Estimator (TPE): proposes where good/bad
+//!           density ratio peaks; may commit early to a local basin.
+//!   bandit  successive halving: many configs at cheap fidelity, survivors
+//!           re-run higher. Assumes cheap score ranks like full score; false
+//!           exactly when a config needs its full budget to show its worth.
+//! All share one evaluator (`cv.crossValidate`) over one binned dataset: no
+//! strategy/data confound, and the CSV is read and binned once per search.
+//! The best score on the searched split is optimistic (max of many trials);
+//! re-scoring leaders on unseen fold seeds (CLI `--confirm`) is the one to believe.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -46,9 +31,8 @@ pub const Search = enum { grid, random, bayes, bandit };
 
 pub const Kind = enum { choice, uniform, log_uniform, int_uniform, int_log };
 
-/// One axis. Values are carried as f64 so every strategy can treat the space
-/// uniformly; `render` turns a coordinate back into the string the config
-/// flag parser expects, which is what keeps this generic over any field.
+/// One axis, carried as f64 so every strategy treats the space uniformly;
+/// `render` gives back the config flag string, keeping this generic per field.
 pub const Param = struct {
     name: []const u8,
     kind: Kind,
@@ -60,8 +44,8 @@ pub const Param = struct {
         return p.kind == .choice;
     }
 
-    /// Bounds in the *encoded* space -- log-scaled axes are searched in logs,
-    /// so that a step near 0.1 counts for as much as a step near 50.
+    /// Bounds in the *encoded* space: log axes are searched in logs, so a step
+    /// near 0.1 counts as much as one near 50.
     pub fn bounds(p: Param) struct { lo: f64, hi: f64 } {
         return switch (p.kind) {
             .choice => .{ .lo = 0, .hi = @floatFromInt(p.choices.len - 1) },
@@ -78,13 +62,9 @@ pub const Param = struct {
         };
     }
 
-    /// Fold an out-of-range value back inside instead of clamping it.
-    ///
-    /// Clamping sends every overshoot to the same endpoint, so a kernel
-    /// centred near a bound stacks a point mass exactly on it -- proposals
-    /// pile up on `lambda=50.000000` and the axis stops being searched.
-    /// Reflection puts that probability back into the interior, where it
-    /// belongs.
+    /// Reflect an out-of-range value inside, not clamp: clamping stacks a
+    /// point mass on the bound (proposals piled on `lambda=50.000000`) and
+    /// the axis stops being searched.
     fn reflect(p: Param, x: f64) f64 {
         const b = p.bounds();
         if (!(b.hi > b.lo)) return b.lo;
@@ -114,9 +94,8 @@ pub const Param = struct {
         };
     }
 
-    /// Lattice points for `grid`. A continuous axis has no natural set, so it
-    /// is cut into `steps` points from end to end -- in the encoded space, so
-    /// a log axis is cut geometrically.
+    /// Lattice points for `grid`: a continuous axis is cut into `steps` points
+    /// end to end in the encoded space (a log axis geometrically).
     pub fn gridPoints(p: Param, gpa: std.mem.Allocator, steps: usize) ![]f64 {
         if (p.kind == .choice) {
             const xs = try gpa.alloc(f64, p.choices.len);
@@ -176,9 +155,8 @@ pub fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
     return .{ .name = name, .kind = .choice, .choices = try list.toOwnedSlice(gpa) };
 }
 
-/// A space worth searching for each model, so `tune` is useful with no
-/// `--param` at all. Ranges bracket the shipped defaults rather than centring
-/// on them, so a search can move in either direction.
+/// Default space per model, so a search needs no explicit params. Ranges
+/// bracket the shipped defaults, so a search can move in either direction.
 pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const specs: []const []const u8 = switch (algo) {
         .gbdt => &.{
@@ -221,23 +199,18 @@ pub const Trial = struct {
     text: []const u8,
 };
 
-/// Whether a Config field decides how the data is *binned* rather than how a
-/// model is fitted to it.
-///
-/// This distinction is not cosmetic. Binning happens once, before any trial,
-/// so a search that varies one of these and does nothing about it will report
-/// a value it never actually used -- which is exactly what happened: sixty
-/// trials printed `max_bin=64` while every one of them fitted the 256-bin
-/// matrix, and the winning config did not reproduce when run through `cv`.
+/// Whether a Config field changes the *binning*, not the fit. Binning happens
+/// before trials, so varying one unnoticed reports a value never used: sixty
+/// trials printed `max_bin=64` but fitted the 256-bin matrix, and the winner
+/// did not reproduce through `cv`.
 pub fn affectsBinning(name: []const u8) bool {
     return std.mem.eql(u8, name, "max_bin") or
         std.mem.eql(u8, name, "bin_policy") or
         std.mem.eql(u8, name, "max_cat_levels");
 }
 
-/// Holds the binned matrix, and rebuilds it when a trial asks for binning that
-/// differs from what is loaded. Re-binning costs ~200 ms against seconds of
-/// fitting, so doing it on change is cheap; doing it never was wrong.
+/// Holds the binned matrix; rebuilds it when a trial's binning differs.
+/// Re-binning costs ~200 ms against seconds of fitting; never doing it is wrong.
 pub const Binner = struct {
     gpa: std.mem.Allocator,
     pool: *pool_mod.Pool,
@@ -247,8 +220,7 @@ pub const Binner = struct {
     drops: []const []const u8,
     ds: data.Dataset,
     max_bin: u16,
-    /// Tracked like `max_bin`, because it changes the binning and a cached
-    /// matrix built under a different value is the wrong matrix.
+    /// Tracked like `max_bin`: a matrix cached under another value is wrong.
     max_cat_levels: u32 = (data.BinParams{}).max_cat_levels,
     policy: data.BinPolicy,
     rebins: usize = 0,
@@ -276,8 +248,7 @@ pub const Binner = struct {
     }
 };
 
-/// A configuration and the score it earned at the current rung. Named rather
-/// than anonymous because the sort needs a concrete type to specialise on.
+/// A config and its score at the current rung; named so the sort can specialise.
 pub const Scored = struct { x: []f64, s: f64 };
 
 pub const Evaluator = struct {
@@ -314,18 +285,14 @@ pub const Evaluator = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Returns null when the configuration is invalid -- a search space can
-    /// always propose a combination `Config.validate` rejects, and that is a
-    /// skipped trial, not a failure.
+    /// Null for an invalid config (one `Config.validate` rejects): a skipped
+    /// trial, not a failure.
     pub fn run(e: Evaluator, x: []const f64, use_folds: u32) !?cv.Outcome {
         const cfg = try e.apply(x);
         cfg.validate() catch return null;
-        // Binning first: a trial that changes `max_bin` needs a different
-        // matrix, not just different flags. A `max_bin` below the widest
-        // categorical column cannot be binned at all -- that is the search
-        // space proposing something invalid, exactly like a rejected
-        // `validate`, so it is a skipped trial and not a failure. `get` fails
-        // before it frees anything, so the cached matrix is still intact.
+        // Binning first: a new `max_bin` needs a new matrix. One below the
+        // widest categorical is invalid like a rejected `validate`: skipped.
+        // `get` fails before freeing, so the cached matrix stays intact.
         const ds = e.binner.get(cfg) catch |err| switch (err) {
             error.CategoricalTooWide => return null,
             else => return err,
@@ -342,11 +309,9 @@ pub const Evaluator = struct {
 
 // ----- strategies
 
-/// TPE. Splits what has been seen into a good set and a bad set, builds a
-/// Parzen density over each, and proposes the candidate maximising the ratio.
-/// Modelling each axis independently is the "tree-structured" simplification:
-/// it cannot represent "a deep tree wants a bigger lambda", but it costs
-/// nothing and is what makes the estimator usable at this trial count.
+/// TPE: Parzen densities over good and bad trials, propose the max ratio.
+/// Axes are modelled independently ("tree-structured"): cannot express "deep
+/// trees want bigger lambda", but free and usable at this trial count.
 pub const Tpe = struct {
     gamma: f64,
     candidates: usize,
@@ -354,25 +319,17 @@ pub const Tpe = struct {
     fn bandwidth(p: Param, n: usize) f64 {
         const b = p.bounds();
         const span = b.hi - b.lo;
-        // Silverman's rule, floored so a handful of observations cannot
-        // collapse the kernel onto its own points and stop exploring.
+        // Silverman's rule, floored so few observations cannot collapse the
+        // kernel onto its own points and stop exploring; capped since it
+        // over-smooths at small n (n=5 asks for 3/4 of the axis).
         const h = 1.06 * span * std.math.pow(f64, @floatFromInt(@max(n, 1)), -0.2);
-        // Floored so a handful of observations cannot collapse the kernel onto
-        // its own points, and capped because Silverman's rule over-smooths
-        // badly at small n -- at n=5 it asks for a kernel three quarters as
-        // wide as the entire axis.
         return std.math.clamp(h, span * 0.05, span * 0.35);
     }
 
-    /// Density of `at` under the observations `xs`, plus one pseudo-observation
-    /// covering the whole axis.
-    ///
-    /// That prior term is not decoration. Without it the estimate is a sum of
-    /// kernels sitting only where the search has already been, so as the good
-    /// set concentrates the density outside it goes to zero, the ratio stops
-    /// distinguishing anything, and the proposal locks onto a single point --
-    /// which is exactly what this did before the prior was added: seven
-    /// identical trials in a row with two parameters pinned to their bounds.
+    /// Density of `at` under `xs` plus one whole-axis pseudo-observation.
+    /// Without that prior, density outside the visited set goes to zero, the
+    /// ratio stops discriminating and proposals lock on one point (seen: seven
+    /// identical trials, two parameters pinned to their bounds).
     fn logDensity(p: Param, xs: []const f64, at: f64, h: f64) f64 {
         if (p.isCategorical()) {
             const k: f64 = @floatFromInt(p.choices.len);
@@ -380,9 +337,8 @@ pub const Tpe = struct {
             for (xs) |v| if (@round(v) == @round(at)) {
                 hits += 1;
             };
-            // Laplace smoothing is the categorical form of the same prior: an
-            // unobserved level keeps a real probability, so the ratio cannot
-            // be infinite on a level nobody has tried yet.
+            // Laplace smoothing, the categorical prior: an untried level keeps
+            // real probability, so the ratio cannot be infinite on it.
             return @log((hits + 1) / (@as(f64, @floatFromInt(xs.len)) + k));
         }
         const b = p.bounds();
@@ -442,10 +398,8 @@ pub const Tpe = struct {
             var best_ratio: f64 = -std.math.inf(f64);
             const b = p.bounds();
             for (0..t.candidates) |_| {
-                // Draw from the good density -- which includes its prior
-                // component, so one candidate in (n_good + 1) comes from the
-                // whole axis rather than from somewhere already visited. That
-                // is what keeps the proposal able to leave a basin.
+                // Draw from the good density incl. its prior: one candidate in
+                // (n_good + 1) spans the whole axis, so proposals can leave a basin.
                 const from_prior = r.uintLessThan(usize, good.len + 1) == 0;
                 const pick = good[r.uintLessThan(usize, good.len)];
                 const cand = if (p.isCategorical())

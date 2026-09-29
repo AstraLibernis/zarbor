@@ -14,20 +14,15 @@ const Params = linear.Params;
 
 // ----------------------------------------------------------------- fitting
 
-/// Fixed chunk count for the reductions that feed the line search. Fixed, not
-/// one per thread: a backtracking step is accepted or rejected on a
-/// comparison between two objective values, so the sum has to come out
-/// bit-identical however the pool happens to hand the chunks out.
+/// Fixed chunk count for line-search reductions, not one per thread: a step is accepted
+/// by comparing two objective sums, so they must be bit-identical however chunks are handed out.
 pub const reduce_chunks: usize = 64;
 /// Below this row count the reduction is cheaper inline than across the pool.
 pub const reduce_parallel_min: usize = 8192;
 
-/// Per-row loss, its derivative with respect to the linear predictor, and the
-/// intercept's share of the gradient — one pass, because the line search runs
-/// this far more often than it runs anything else.
-///
-/// `begin`/`end` index chunks, not rows, so a chunk always covers the same
-/// rows and the partial sums always combine in the same order.
+/// Per-row loss, its derivative w.r.t. the linear predictor, and the intercept's gradient
+/// share in one pass: the line search runs this most. `begin`/`end` index chunks, not
+/// rows, so a chunk always covers the same rows and partial sums combine in the same order.
 const EvalCtx = struct {
     z: []const f32,
     labels: []const f32,
@@ -59,8 +54,7 @@ const EvalCtx = struct {
                         const wt: f64 = if (y > 0.5) self.scale_pos_weight else 1.0;
                         r = wt * (1.0 / (1.0 + @exp(-zi)) - y);
                         if (self.want_loss) {
-                            // log(1+e^z) - y*z, pivoted on the sign of z so
-                            // neither exponential can overflow.
+                            // log(1+e^z) - y*z, pivoted on sign(z) so no exp overflows.
                             const sp = if (zi > 0)
                                 zi + @log(1.0 + @exp(-zi))
                             else
@@ -123,18 +117,12 @@ const ScoreAllCtx = struct {
     }
 };
 
-/// The objective both solvers minimise:
-///
-///     f(w, b) = (1/n) Σ lossᵢ  +  ½·l2·‖w‖²  +  l1·‖w‖₁
-///
-/// with `l2 = lambda/n` and `l1 = alpha/n`, so `lambda` and `alpha` are stated
-/// against the *summed* loss — the same convention the tree models use, and
-/// the same one as scikit-learn's `C = 1/lambda`. The intercept is the last
-/// slot of the parameter vector and is in neither penalty.
-///
-/// Parameters are f64 even though the model stores f32: L-BFGS measures
-/// progress by differencing successive parameter vectors, and in f32 those
-/// differences are rounding noise long before the solver is done.
+/// Objective both solvers minimise: `f(w, b) = (1/n) Σ lossᵢ + ½·l2·‖w‖² + l1·‖w‖₁`,
+/// `l2 = lambda/n`, `l1 = alpha/n`: `lambda`/`alpha` are stated against the *summed*
+/// loss, like the tree models and scikit-learn's `C = 1/lambda`. The intercept is the
+/// last parameter slot, in neither penalty. Parameters are f64 though the model stores
+/// f32: L-BFGS differences successive parameter vectors, which in f32 are rounding
+/// noise long before the solver is done.
 pub const Problem = struct {
     pool: *Pool,
     design: *const Design,
@@ -158,9 +146,8 @@ pub const Problem = struct {
         return pr.theta.len - 1;
     }
 
-    /// Smooth part of the objective at `th`. Leaves `resid` and the
-    /// intercept's gradient share behind, so a following `grad` call costs
-    /// only the column pass.
+    /// Smooth part of the objective at `th`. Leaves `resid` and the intercept's
+    /// gradient share behind, so a following `grad` costs only the column pass.
     fn value(pr: *Problem, th: []const f64, want_loss: bool) f64 {
         const np = pr.p();
         for (pr.wf, th[0..np]) |*d, s| d.* = @floatCast(s);
@@ -232,8 +219,7 @@ fn axpy(y: []f64, x: []const f64, a: f64) void {
 
 // --------------------------------------------------------------- L-BFGS
 
-/// Curvature pairs kept. Ten is the usual choice: the extra pairs buy little
-/// and each costs two vectors the length of the parameter vector.
+/// Curvature pairs kept. Ten is usual: more buy little, each costs two parameter-length vectors.
 const lbfgs_history: usize = 10;
 const ls_max: usize = 40;
 const armijo_c1: f64 = 1e-4;
@@ -244,9 +230,8 @@ const grad_floor: f64 = 1e-12;
 /// and the next direction meaningless. Skipping keeps the older pairs.
 const curvature_floor: f64 = 1e-12;
 
-/// OWL-QN's choice of subgradient — the one of least magnitude, which at a
-/// coefficient sitting on zero is zero unless the smooth gradient is steep
-/// enough to push it off. Equals the plain gradient when there is no L1 term.
+/// OWL-QN's least-magnitude subgradient: zero at a coefficient on zero unless the
+/// smooth gradient is steep enough to push it off. The plain gradient without L1.
 pub fn pseudoGrad(pr: *const Problem, g: []const f64, out: []f64) void {
     if (pr.l1 == 0) {
         @memcpy(out, g);
@@ -268,10 +253,8 @@ pub fn pseudoGrad(pr: *const Problem, g: []const f64, out: []f64) void {
     out[np] = g[np]; // the intercept is unpenalised
 }
 
-/// Clip a trial point back into the orthant the step started from, so the L1
-/// term stays differentiable along the whole step. A coefficient that tried to
-/// cross zero lands exactly on zero, which is how OWL-QN delivers the sparsity
-/// an L1 penalty is asked for.
+/// Clip a trial point into the step's starting orthant so L1 stays differentiable along
+/// it; a coefficient crossing zero lands exactly on zero, which is OWL-QN's sparsity.
 pub fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
     const np = t.len - 1;
     for (t[0..np], from[0..np], pg[0..np]) |*v, o, s| {
@@ -280,15 +263,8 @@ pub fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
     }
 }
 
-/// Limited-memory BFGS: approximate the inverse Hessian from the last few
-/// steps and gradient differences, so the step direction already carries the
-/// problem's curvature and no learning rate has to be guessed. `alpha` > 0
-/// switches on OWL-QN, which is the same recursion with the subgradient and
-/// orthant projection above.
-/// How a fit ended. `converged` means the coefficients stopped moving *and*
-/// the gradient actually came down; a fit that stops moving with a large
-/// gradient has stalled, which is a different thing and used to be reported
-/// as success.
+/// How a fit ended. `converged`: coefficients stopped moving *and* the gradient came
+/// down. Stopping with a large gradient is a stall, not success.
 pub const Fit = struct {
     iters: u32,
     /// Pseudo-gradient infinity-norm at the first iteration and the last.
@@ -296,16 +272,17 @@ pub const Fit = struct {
     g_last: f64 = 0,
     converged: bool = true,
 
-    /// The gradient vanishes at an optimum whatever the variables are scaled
-    /// by, so its fall from where it started is the scale-free way to ask
-    /// whether a fit arrived. Measured here: a healthy run ends four to five
-    /// orders down (1.4e-5 of its starting value); a run stalled by bad
-    /// conditioning ends three (3e-3). 1e-3 sits between them.
+    /// The gradient vanishes at an optimum under any scaling, so its fall is the
+    /// scale-free arrival test. Measured: healthy runs end 4-5 orders down (1.4e-5),
+    /// runs stalled by bad conditioning 3 (3e-3); 1e-3 sits between.
     pub fn stalled(f: Fit) bool {
         return !f.converged or f.g_last > 1e-3 * f.g_first;
     }
 };
 
+/// Limited-memory BFGS: inverse Hessian from recent steps and gradient differences,
+/// so the direction carries curvature and no learning rate is guessed. `alpha` > 0
+/// is OWL-QN: same recursion with the subgradient and orthant projection above.
 pub fn fitLbfgs(
     gpa: std.mem.Allocator,
     pr: *Problem,
@@ -347,8 +324,7 @@ pub fn fitLbfgs(
         fit.g_last = gmax;
         if (gmax <= grad_floor) break;
 
-        // Two-loop recursion: dir ← H·pg, newest pair first on the way down
-        // and oldest first on the way back up.
+        // Two-loop recursion: dir ← H·pg, newest pair first down, oldest first back up.
         @memcpy(dir, pg);
         for (0..stored) |i| {
             const k = (head + m - 1 - i) % m;
@@ -356,9 +332,8 @@ pub fn fitLbfgs(
             axpy(dir, hy[k * n ..][0..n], -alph[k]);
         }
         if (stored != 0) {
-            // Scale the identity the recursion starts from by the last pair's
-            // curvature; without this the first step of every iteration is
-            // the wrong size by orders of magnitude.
+            // Scale the starting identity by the last pair's curvature; without it
+            // every iteration's first step is wrong by orders of magnitude.
             const k = (head + m - 1) % m;
             const y = hy[k * n ..][0..n];
             const yy = dot(y, y);
@@ -374,12 +349,9 @@ pub fn fitLbfgs(
         }
         for (dir) |*v| v.* = -v.*;
 
-        // The quasi-Newton step may leave the current orthant; the components
-        // that would are dropped rather than followed. Untested on its own,
-        // and not for want of trying: `projectOrthant` clips the trial point
-        // back regardless, so removing this changes how fast the solver gets
-        // there and not where it lands. Kept because it is the formulation
-        // OWL-QN is stated in and the projection alone is a weaker guarantee.
+        // Drop direction components that would leave the orthant. Not testable alone:
+        // `projectOrthant` clips anyway, so removing this changes speed, not result.
+        // Kept as OWL-QN's stated formulation; projection alone is a weaker guarantee.
         if (pr.l1 != 0) {
             for (dir[0 .. n - 1], pg[0 .. n - 1]) |*dv, s| {
                 if (dv.* * -s <= 0) dv.* = 0;
@@ -388,8 +360,7 @@ pub fn fitLbfgs(
 
         var dg = dot(dir, pg);
         if (!(dg < 0)) {
-            // A stale history, or every component clipped away. Fall back to
-            // steepest descent and start the history over.
+            // Stale history or all components clipped: steepest descent, reset history.
             for (dir, pg) |*dv, s| dv.* = -s;
             dg = dot(dir, pg);
             stored = 0;
@@ -397,8 +368,7 @@ pub fn fitLbfgs(
             if (!(dg < 0)) break;
         }
 
-        // With no curvature yet, unit length is arbitrary; scale by the
-        // gradient so the first trial point is not absurdly far away.
+        // No curvature yet: scale by the gradient so the first trial is not absurdly far.
         var step: f64 = if (stored == 0) @min(1.0, 1.0 / gmax) else 1.0;
         var f_new: f64 = f;
         var accepted = false;
@@ -406,8 +376,7 @@ pub fn fitLbfgs(
             for (trial, pr.theta, dir) |*t, th, dv| t.* = th + step * dv;
             if (pr.l1 != 0) projectOrthant(trial, pr.theta, pg);
             f_new = pr.value(trial, true) + pr.l1norm(trial);
-            // After projection the step actually taken is not `step * dir`,
-            // so Armijo has to be measured against the realised move.
+            // After projection the move is not `step * dir`; Armijo uses the realised one.
             var expected = step * dg;
             if (pr.l1 != 0) {
                 expected = 0;
@@ -419,10 +388,8 @@ pub fn fitLbfgs(
             }
             step *= 0.5;
         }
-        // No improvement anywhere along the ray. On a well-scaled problem
-        // that means f32 scoring noise now dominates the objective; on a
-        // badly-scaled one it means the line search cannot move at all.
-        // `stalled` tells those apart by looking at the gradient.
+        // No improvement along the ray: f32 scoring noise dominates (well scaled) or the
+        // search cannot move (badly scaled). `stalled` tells them apart by the gradient.
         if (!accepted) {
             fit.converged = false;
             break;
@@ -476,11 +443,9 @@ inline fn softThreshold(v: f64, t: f64) f64 {
     return 0;
 }
 
-/// Full-batch Adam with the L1 term applied as a proximal soft-threshold after
-/// each step, so `alpha` genuinely produces zeros rather than merely small
-/// coefficients. Needs no objective evaluation and so no line search, at the
-/// cost of an order of magnitude more passes than `lbfgs` for the same
-/// accuracy.
+/// Full-batch Adam, L1 as a proximal soft-threshold after each step so `alpha` gives
+/// exact zeros. No objective evaluation, so no line search, but an order of magnitude
+/// more passes than `lbfgs` for the same accuracy.
 pub fn fitAdam(
     gpa: std.mem.Allocator,
     pr: *Problem,
@@ -492,10 +457,8 @@ pub fn fitAdam(
 
     const g = try gpa.alloc(f64, n);
     defer gpa.free(g);
-    // Same quantity `fitLbfgs` records, so the 1e-3 ratio in `Fit.stalled()`
-    // is calibrated for both. Adam takes a proximal step rather than using
-    // the pseudo-gradient to move, but "how far did the gradient fall" is a
-    // question about the problem, not about the step rule.
+    // Same quantity `fitLbfgs` records, so `Fit.stalled()`'s 1e-3 ratio fits both;
+    // gradient fall is a property of the problem, not of Adam's proximal step rule.
     const pg = try gpa.alloc(f64, n);
     defer gpa.free(pg);
     var fit: Fit = .{ .iters = 0 };
