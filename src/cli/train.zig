@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt <train.csv>`: fit one model against one train/valid split.
+//! `zarbor <train.csv>`: fit one model against one train/valid split.
 
 const std = @import("std");
 const builtin = @import("builtin");

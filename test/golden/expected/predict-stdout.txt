@@ -1,4 +1,4 @@
-$ zgbdt predict titanic3.csv --model=l.zm
+$ zarbor predict titanic3.csv --model=l.zm
 exit 0
 --- stdout
 rows    1309

@@ -17,7 +17,7 @@ throw away 14 columns of real information; treat none of them as missing and
 the file will not load. The rule now is **the column decides**: in a column of
 numbers, `NA` is a hole; in a column of words, it is another word.
 
-**3. Reading a file now says what is in it.** `zgbdt profile <data.csv>` prints
+**3. Reading a file now says what is in it.** `zarbor profile <data.csv>` prints
 each column's type, how much is missing, how many distinct values, the range,
 and how many values sit far outside it -- then names anything suspect. Every
 training run prints a one-line version. This is what catches a file that was
@@ -135,7 +135,7 @@ nothing.
 The change is therefore a **loading fix, not an accuracy fix**. What it bought
 is that the file opens.
 
-## `zgbdt profile <data.csv>`
+## `zarbor profile <data.csv>`
 
     rows    1460
     cols    80

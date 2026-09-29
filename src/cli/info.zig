@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt info`: what a saved model holds.
+//! `zarbor info`: what a saved model holds.
 
 const std = @import("std");
 const zarbor = @import("zarbor");

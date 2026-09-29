@@ -1,9 +1,9 @@
-$ zgbdt titanic3.csv --label=survived --no_such_flag=1 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor titanic3.csv --label=survived --no_such_flag=1 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 1
 --- stdout
 unknown flag: --no_such_flag
 
-usage: zgbdt <train.csv> --label=<column> [options]
+usage: zarbor <train.csv> --label=<column> [options]
 
   --algo=NAME         gbdt | random_forest | linear   (default gbdt)
   --label=NAME        target column (required)
@@ -18,12 +18,12 @@ usage: zgbdt <train.csv> --label=<column> [options]
   --save=FILE         write the trained model to FILE
 
 other commands:
-  zgbdt predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
-  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
-  zgbdt info    --model=M.zm
-  zgbdt profile <data.csv>   what is in the file, before any model
-  zgbdt cv      <train.csv> --label=<column> [--folds=5]
-  zgbdt tune    <train.csv> --label=<column> [--search=random]
+  zarbor predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
+  zarbor blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
+  zarbor info    --model=M.zm
+  zarbor profile <data.csv>   what is in the file, before any model
+  zarbor cv      <train.csv> --label=<column> [--folds=5]
+  zarbor tune    <train.csv> --label=<column> [--search=random]
 
 predict and blend bin the new data with the schema stored in the model,
 so categorical levels map to the same bins they did in training. Pass

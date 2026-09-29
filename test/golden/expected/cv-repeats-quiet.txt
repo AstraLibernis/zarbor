@@ -1,4 +1,4 @@
-$ zgbdt cv titanic3.csv --label=survived --folds=3 --repeats=3 --quiet=1 --n_rounds=40 --oof=oofr.csv --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor cv titanic3.csv --label=survived --folds=3 --repeats=3 --quiet=1 --n_rounds=40 --oof=oofr.csv --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
 repeats 3   oof 0.849831   sd 0.008744   best 0.837466   worst 0.856190 # ms

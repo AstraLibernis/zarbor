@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt predict` and `zgbdt blend`: score a CSV with one or more saved models.
+//! `zarbor predict` and `zarbor blend`: score a CSV with one or more saved models.
 
 const std = @import("std");
 const zarbor = @import("zarbor");

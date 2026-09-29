@@ -1,4 +1,4 @@
-$ zgbdt titanic3.csv --label=survived --algo=linear --lin_solver=adam --lin_epochs=100 --alpha=0.01 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor titanic3.csv --label=survived --algo=linear --lin_solver=adam --lin_epochs=100 --alpha=0.01 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
 parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)

@@ -70,7 +70,7 @@ nothing moves. Cost is 1.05–1.25x.
 **The ceiling matters more than the gain.** The bin type is `u8`, so
 `data.zig` refuses any categorical with 256+ levels outright. On the `housing`
 frame that means `City` (3,113), `Zip3` (753) and `Metro` (650) must be dropped
-before zgbdt will read the file at all. F1 does nothing for them. High
+before zarbor will read the file at all. F1 does nothing for them. High
 cardinality remains a target-encoding problem, and lifting the bin width is a
 separate change nobody has costed.
 

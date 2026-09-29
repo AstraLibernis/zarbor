@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! zgbdt — train a gradient-boosted tree ensemble on a CSV.
+//! zarbor — train a gradient-boosted tree ensemble on a CSV.
 //!
 //! Every field of `Config` is exposed as `--field=value` by comptime
 //! reflection, so the flag surface and the struct can never drift apart.
@@ -15,7 +15,7 @@ const cv = @import("cv.zig");
 const tune = @import("tune.zig");
 
 pub const usage =
-    \\usage: zgbdt <train.csv> --label=<column> [options]
+    \\usage: zarbor <train.csv> --label=<column> [options]
     \\
     \\  --algo=NAME         gbdt | random_forest | linear   (default gbdt)
     \\  --label=NAME        target column (required)
@@ -30,12 +30,12 @@ pub const usage =
     \\  --save=FILE         write the trained model to FILE
     \\
     \\other commands:
-    \\  zgbdt predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
-    \\  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
-    \\  zgbdt info    --model=M.zm
-    \\  zgbdt profile <data.csv>   what is in the file, before any model
-    \\  zgbdt cv      <train.csv> --label=<column> [--folds=5]
-    \\  zgbdt tune    <train.csv> --label=<column> [--search=random]
+    \\  zarbor predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
+    \\  zarbor blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
+    \\  zarbor info    --model=M.zm
+    \\  zarbor profile <data.csv>   what is in the file, before any model
+    \\  zarbor cv      <train.csv> --label=<column> [--folds=5]
+    \\  zarbor tune    <train.csv> --label=<column> [--search=random]
     \\
     \\predict and blend bin the new data with the schema stored in the model,
     \\so categorical levels map to the same bins they did in training. Pass

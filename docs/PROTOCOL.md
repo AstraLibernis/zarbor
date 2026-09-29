@@ -48,7 +48,7 @@ Declared now, identical in both arms, not tuned for either:
     min_child_samples=20, lambda=1.0, max_bin=256
     objective: logistic for adult/bank, l2 for california/ames/housing
 
-Evaluation is `zgbdt cv --folds=5`, pooled out-of-fold score, over
+Evaluation is `zarbor cv --folds=5`, pooled out-of-fold score, over
 `--seed` in {0, 1, 2}. `housing` additionally uses `--group-col=Zip`.
 
 Neither feature gets a hyperparameter search. A tuned new arm against an

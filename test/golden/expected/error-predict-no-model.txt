@@ -1,4 +1,4 @@
-$ zgbdt predict titanic3.csv
+$ zarbor predict titanic3.csv
 exit 1
 --- stdout
 --- stderr

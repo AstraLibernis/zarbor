@@ -98,8 +98,8 @@ a wide binned design.
 
 ### 4. One binary, no dependencies, CV and search in-process
 
-`zgbdt cv` reads and bins once and loops folds over the binned matrix;
-`--repeats=N` extends that across fold seeds. `zgbdt tune` runs the search in
+`zarbor cv` reads and bins once and loops folds over the binned matrix;
+`--repeats=N` extends that across fold seeds. `zarbor tune` runs the search in
 the same process. No Python harness shelling out per fold, no environment to
 reproduce. The parser alone is 1.31x `pandas.read_csv` (135 ms against 177 ms
 on 40 MB, `docs/arena.md`).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt profile`: what is in a CSV, before any model.
+//! `zarbor profile`: what is in a CSV, before any model.
 
 const std = @import("std");
 const zarbor = @import("zarbor");
@@ -10,7 +10,7 @@ const data = zarbor.data;
 const pool_mod = zarbor.pool;
 const csv = zarbor.csv;
 
-/// `zgbdt profile <data.csv>` -- describe a file without training on it.
+/// `zarbor profile <data.csv>` -- describe a file without training on it.
 ///
 /// This exists because the alternative is a throwaway pandas script per
 /// dataset, and that script is where the understanding then lives: outside
@@ -30,7 +30,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         .bare => {},
     };
     const p = path orelse {
-        try out.writeAll("usage: zgbdt profile <data.csv> [--max-bytes=N]\n");
+        try out.writeAll("usage: zarbor profile <data.csv> [--max-bytes=N]\n");
         try out.flush();
         return error.NoCsvPath;
     };

@@ -1,4 +1,4 @@
-$ zgbdt predict titanic3.csv --model=f.zm --id-col=name --pred-col=p_survive --n_threads=2 --out=pi.csv
+$ zarbor predict titanic3.csv --model=f.zm --id-col=name --pred-col=p_survive --n_threads=2 --out=pi.csv
 exit 0
 --- stdout
 rows    1309

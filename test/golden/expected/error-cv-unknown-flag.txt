@@ -1,9 +1,9 @@
-$ zgbdt cv titanic3.csv --label=survived --nope=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor cv titanic3.csv --label=survived --nope=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 1
 --- stdout
 unknown flag: --nope
 
-usage: zgbdt cv <train.csv> --label=<column> [options]
+usage: zarbor cv <train.csv> --label=<column> [options]
 
   --folds=N           number of folds (default 5)
   --fold-seed=N       seed for the fold assignment (default 1)
@@ -25,7 +25,7 @@ usage: zgbdt cv <train.csv> --label=<column> [options]
 
 Every Config flag works here too, so a search can vary the model
 without changing anything else:
-  zgbdt cv train.csv --label=y --n_rounds=500 --max_depth=4 --lambda=45
+  zarbor cv train.csv --label=y --n_rounds=500 --max_depth=4 --lambda=45
 
 Folds are stratified on the label for a classification objective, so
 each fold holds the same class balance as the whole file.

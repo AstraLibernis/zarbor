@@ -1,7 +1,7 @@
-$ zgbdt profile
+$ zarbor profile
 exit 1
 --- stdout
-usage: zgbdt profile <data.csv> [--max-bytes=N]
+usage: zarbor profile <data.csv> [--max-bytes=N]
 --- stderr
 error: NoCsvPath
 --- files

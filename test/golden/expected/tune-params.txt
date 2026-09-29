@@ -1,4 +1,4 @@
-$ zgbdt tune titanic3.csv --label=survived --search=random --trials=4 --folds=2 --seed=3 --param=max_depth=2,4 --param=lambda=0.5..8:log --param=n_rounds=20..60:int --confirm=2 --confirm-seeds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor tune titanic3.csv --label=survived --search=random --trials=4 --folds=2 --seed=3 --param=max_depth=2,4 --param=lambda=0.5..8:log --param=n_rounds=20..60:int --confirm=2 --confirm-seeds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
 data     titanic3.csv

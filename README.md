@@ -15,14 +15,15 @@ fields may hold newlines and escaped quotes, there is no column limit, and it
 loads 1.5-1.7x faster than before, byte-identically. The benchmark glue is Zig
 (`zig build tools`); Python remains only where a reference library runs.
 Still open: merging the two comparison harnesses (see Benchmarks).
+After v0.5.0 the executable was renamed from `zgbdt` to `zarbor`.
 
     zig build -Doptimize=ReleaseFast
 
-    ./zig-out/bin/zgbdt train.csv --label=y --save=m.zm
-    ./zig-out/bin/zgbdt predict test.csv --model=m.zm --out=p.csv
-    ./zig-out/bin/zgbdt cv   train.csv --label=y --folds=5
-    ./zig-out/bin/zgbdt tune train.csv --label=y --search=bayes --trials=60
-    ./zig-out/bin/zgbdt profile train.csv
+    ./zig-out/bin/zarbor train.csv --label=y --save=m.zm
+    ./zig-out/bin/zarbor predict test.csv --model=m.zm --out=p.csv
+    ./zig-out/bin/zarbor cv   train.csv --label=y --folds=5
+    ./zig-out/bin/zarbor tune train.csv --label=y --search=bayes --trials=60
+    ./zig-out/bin/zarbor profile train.csv
 
     zig build test      # unit tests
     zig build golden    # CLI end to end on real data vs test/golden/expected
@@ -65,7 +66,7 @@ to be `NA` sniffed numeric where training had it categorical, and failed with
 `FeatureKindMismatch`. `readCsvHinted` pins the kinds the model names and
 sniffs the rest.
 
-`zgbdt profile <data.csv>` reports what is in a file without training on it --
+`zarbor profile <data.csv>` reports what is in a file without training on it --
 per column the kind, missing count, distinct values, min/median/max and a
 count past the Tukey outer fence; then a footer naming values that failed to
 parse after the sniff window, columns that cannot inform a split, and
@@ -114,7 +115,7 @@ the flag surface and the struct cannot drift apart.
 
 ## Cross-validation
 
-`zgbdt cv` reads and bins once, then loops folds over the binned matrix.
+`zarbor cv` reads and bins once, then loops folds over the binned matrix.
 **`--repeats=N` extends that across fold seeds** -- N consecutive assignments
 over the same binned matrix, reporting the spread. One fold assignment on a
 small table is mostly noise, and reconstructing the spread by relaunching the
@@ -187,7 +188,7 @@ Both are off by default, both were pre-registered before they were written,
 and neither met the bar it was given. `docs/PROTOCOL.md` fixes the datasets,
 the fixed hyperparameters and the success criterion; `docs/RESULTS.md` has the
 numbers; `docs/categorical-splits.md` and `docs/linear-leaves.md` carry the
-derivations. `zig build tools -- grid <zgbdt> <tag>` reproduces the grid and
+derivations. `zig build tools -- grid <zarbor> <tag>` reproduces the grid and
 `zig build tools -- summarise <base.tsv> <new.tsv>` pairs two runs.
 
     --cat_split=optimal    partition a categorical by gradient order rather

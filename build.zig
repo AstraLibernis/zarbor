@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zarbor", .module = lib }},
     });
 
-    const exe = b.addExecutable(.{ .name = "zgbdt", .root_module = mod });
+    const exe = b.addExecutable(.{ .name = "zarbor", .root_module = mod });
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);

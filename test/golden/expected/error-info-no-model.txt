@@ -1,4 +1,4 @@
-$ zgbdt info g.zm
+$ zarbor info g.zm
 exit 1
 --- stdout
 --- stderr

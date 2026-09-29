@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt cv`: k-fold cross-validation from the command line (see zarbor.cv).
+//! `zarbor cv`: k-fold cross-validation from the command line (see zarbor.cv).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,7 +17,7 @@ const assignFolds = cv.assignFolds;
 const crossValidate = cv.crossValidate;
 
 const usage =
-    \\usage: zgbdt cv <train.csv> --label=<column> [options]
+    \\usage: zarbor cv <train.csv> --label=<column> [options]
     \\
     \\  --folds=N           number of folds (default 5)
     \\  --fold-seed=N       seed for the fold assignment (default 1)
@@ -39,7 +39,7 @@ const usage =
     \\
     \\Every Config flag works here too, so a search can vary the model
     \\without changing anything else:
-    \\  zgbdt cv train.csv --label=y --n_rounds=500 --max_depth=4 --lambda=45
+    \\  zarbor cv train.csv --label=y --n_rounds=500 --max_depth=4 --lambda=45
     \\
     \\Folds are stratified on the label for a classification objective, so
     \\each fold holds the same class balance as the whole file.

@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len < 4) {
-        std.log.err("usage: golden <zgbdt> <golden-dir> <scratch-dir> [--update]", .{});
+        std.log.err("usage: golden <zarbor> <golden-dir> <scratch-dir> [--update]", .{});
         return error.BadArgs;
     }
     const golden_dir, const scratch = .{ args[2], args[3] };
@@ -131,7 +131,7 @@ fn runCase(io: Io, gpa: Allocator, exe: []const u8, scratch: []const u8, case: C
     });
     var rec: Io.Writer.Allocating = .init(gpa);
     const w = &rec.writer;
-    try w.writeAll("$ zgbdt");
+    try w.writeAll("$ zarbor");
     for (argv.items[1..]) |a| try w.print(" {s}", .{a});
     switch (r.term) {
         .exited => |c| try w.print("\nexit {d}\n", .{c}),

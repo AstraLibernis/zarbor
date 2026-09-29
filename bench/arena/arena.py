@@ -40,7 +40,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "bench" / "arena"
-ZGBDT = ROOT / "zig-out" / "bin" / "zgbdt"
+ZARBOR = ROOT / "zig-out" / "bin" / "zarbor"
 TRAIN_CSV = ARENA / "ev_train.csv"
 VALID_CSV = ARENA / "ev_valid_only.csv"
 LABEL = "Will_Buy_EV"
@@ -57,14 +57,14 @@ def med(xs):
 def check_release():
     """Refuse to time a Debug binary (~8x slower); this repo has already sent
     a conclusion wrong that way. Same guard as bench/compare.py."""
-    r = subprocess.run([str(ZGBDT), str(TRAIN_CSV), f"--label={LABEL}",
+    r = subprocess.run([str(ZARBOR), str(TRAIN_CSV), f"--label={LABEL}",
                         "--n_rounds=1", "--verbose_eval=0", "--n_threads=1"],
                        capture_output=True, text=True)
     m = re.search(r"^build\s+(\w+)", r.stdout, re.M)
     if not m:
-        raise SystemExit(f"{ZGBDT} reports no build mode; rebuild ReleaseFast")
+        raise SystemExit(f"{ZARBOR} reports no build mode; rebuild ReleaseFast")
     if m.group(1) == "Debug":
-        raise SystemExit(f"{ZGBDT} is Debug (~8x slower); rebuild ReleaseFast")
+        raise SystemExit(f"{ZARBOR} is Debug (~8x slower); rebuild ReleaseFast")
     return m.group(1)
 
 
@@ -82,7 +82,7 @@ def zarbor(flags, tag, repeats):
     pred = ARENA / f"{tag}.pred.csv"
     read_tr, bin_tr, fit = [], [], []
     for i in range(repeats):
-        cmd = [str(ZGBDT), str(TRAIN_CSV), f"--label={LABEL}",
+        cmd = [str(ZARBOR), str(TRAIN_CSV), f"--label={LABEL}",
                "--valid-frac=0", "--verbose_eval=0", f"--n_threads={THREADS}",
                *flags]
         if i == 0:
@@ -100,7 +100,7 @@ def zarbor(flags, tag, repeats):
         # --label makes zarbor score the holdout itself, so its number can be
         # checked against the referee's on the very same predictions. Without
         # it a metric bug on either side has nowhere to show up.
-        r = subprocess.run([str(ZGBDT), "predict", str(VALID_CSV),
+        r = subprocess.run([str(ZARBOR), "predict", str(VALID_CSV),
                             f"--model={model}", f"--out={pred}",
                             f"--label={LABEL}", f"--n_threads={THREADS}"],
                            capture_output=True, text=True)
@@ -180,7 +180,7 @@ def main():
     ap.add_argument("--only", default="")
     a = ap.parse_args()
     only = set(a.only.split(",")) if a.only else None
-    print(f"zgbdt build: {check_release()}", flush=True)
+    print(f"zarbor build: {check_release()}", flush=True)
 
     # ---- the parser, measured on its own ----------------------------
     # dtype=category, not a plain read then .astype(). zarbor's parser builds
@@ -201,11 +201,11 @@ def main():
     pandas_read = med(rt)
     zr = []
     for _ in range(a.repeats):
-        o = subprocess.run([str(ZGBDT), str(TRAIN_CSV), f"--label={LABEL}",
+        o = subprocess.run([str(ZARBOR), str(TRAIN_CSV), f"--label={LABEL}",
                             "--valid-frac=0", "--n_rounds=1", "--verbose_eval=0",
                             f"--n_threads={THREADS}"],
                            capture_output=True, text=True).stdout
-        o2 = subprocess.run([str(ZGBDT), str(VALID_CSV), f"--label={LABEL}",
+        o2 = subprocess.run([str(ZARBOR), str(VALID_CSV), f"--label={LABEL}",
                              "--valid-frac=0", "--n_rounds=1", "--verbose_eval=0",
                              f"--n_threads={THREADS}"],
                             capture_output=True, text=True).stdout

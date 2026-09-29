@@ -1,4 +1,4 @@
-$ zgbdt cv titanic3.csv --label=survived --folds=3 --group-col=sibsp --fold-seed=5 --algo=linear --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor cv titanic3.csv --label=survived --folds=3 --group-col=sibsp --fold-seed=5 --algo=linear --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
 parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)

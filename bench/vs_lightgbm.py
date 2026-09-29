@@ -12,7 +12,7 @@ around one competition frame, which is the failure mode worth guarding.
 Three things make the comparison mean something:
 
   * **One split, shared.** A `__split` column is written into a copy of the CSV
-    and handed to `zgbdt --split-col`; the Python side masks on the same
+    and handed to `zarbor --split-col`; the Python side masks on the same
     column. Different splits would put more noise on the comparison than the
     effect being measured.
 
@@ -46,7 +46,7 @@ import numpy as np, pandas as pd, lightgbm as lgb
 from sklearn.metrics import roc_auc_score
 
 ROOT = Path(__file__).resolve().parent.parent
-ZGBDT = ROOT / "zig-out" / "bin" / "zgbdt"
+ZARBOR = ROOT / "zig-out" / "bin" / "zarbor"
 
 # Matched deliberately, not left at either side's defaults, which differ.
 # min_child_weight is the one that bites: LightGBM's min_sum_hessian_in_leaf
@@ -77,7 +77,7 @@ def run_zarbor(df, label, objective, extra):
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "d.csv"
         df.to_csv(p, index=False)
-        cmd = [str(ZGBDT), str(p), f"--label={label}", "--split-col=__split",
+        cmd = [str(ZARBOR), str(p), f"--label={label}", "--split-col=__split",
                f"--objective={'logistic' if objective == 'binary' else 'squared_error'}",
                f"--n_rounds={COMMON['n_rounds']}",
                f"--learning_rate={COMMON['learning_rate']}",

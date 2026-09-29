@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! `zgbdt tune`: hyperparameter search from the command line (see zarbor.tune).
+//! `zarbor tune`: hyperparameter search from the command line (see zarbor.tune).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,7 +25,7 @@ const Binner = tune.Binner;
 const cv = zarbor.cv;
 
 const usage =
-    \\usage: zgbdt tune <train.csv> --label=<column> [options]
+    \\usage: zarbor tune <train.csv> --label=<column> [options]
     \\
     \\  --search=NAME       grid | random | bayes | bandit   (default random)
     \\  --trials=N          evaluations, or the starting population for
@@ -57,7 +57,7 @@ const usage =
     \\  --min-folds=N       bandit's cheapest rung (default 2)
     \\
     \\Any Config flag pins a value for the whole search:
-    \\  zgbdt tune t.csv --label=y --algo=linear --search=bayes --trials=80
+    \\  zarbor tune t.csv --label=y --algo=linear --search=bayes --trials=80
     \\
 ;
 

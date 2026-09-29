@@ -1,4 +1,4 @@
-$ zgbdt tune titanic3.csv --label=survived --search=bandit --trials=6 --folds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+$ zarbor tune titanic3.csv --label=survived --search=bandit --trials=6 --folds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
 data     titanic3.csv

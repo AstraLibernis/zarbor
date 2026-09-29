@@ -1,4 +1,4 @@
-$ zgbdt profile titanic3.csv --max-bytes=150000
+$ zarbor profile titanic3.csv --max-bytes=150000
 exit 0
 --- stdout
 file    titanic3.csv

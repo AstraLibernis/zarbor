@@ -7,13 +7,13 @@
 Fairness rests on three things:
 
   * One split, shared. The script writes a copy of the CSV with a `__split`
-    column and hands it to `zgbdt --split-col=__split`, so both sides train on
+    column and hands it to `zarbor --split-col=__split`, so both sides train on
     exactly the same rows and score exactly the same rows. A random split per
     implementation would put ~0.001 of AUC noise on every comparison.
   * Matched hyperparameters, named explicitly below rather than left at each
     library's defaults, which differ from each other.
   * The same unit of work on both sides: in-memory numeric data to trained
-    model. That means zgbdt is charged for binning as well as training, since
+    model. That means zarbor is charged for binning as well as training, since
     the reference libraries bin inside fit(). CSV parsing is excluded from
     both, pandas having already paid it for the Python side.
   * Best-of-N, not one shot. A single fit on a loaded box scatters by 10-20%,
@@ -142,7 +142,7 @@ def check_release(binary, csv, label):
     return m.group(1)
 
 
-def run_zgbdt_once(binary, csv, label, extra):
+def run_zarbor_once(binary, csv, label, extra):
     cmd = [str(binary), str(csv), f"--label={label}", "--split-col=__split",
            "--verbose_eval=0"] + extra
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -151,15 +151,15 @@ def run_zgbdt_once(binary, csv, label, extra):
     auc = re.search(r"auc=([0-9.]+)", r.stdout)
     if not auc:
         return None, None, None, "no auc in output"
-    # Charge zgbdt for binning as well as training. The reference libraries bin
+    # Charge zarbor for binning as well as training. The reference libraries bin
     # inside fit() (xgboost ~87 ms, lightgbm ~46 ms on this data), so timing
-    # only zgbdt's `train` line compared a kernel against a kernel-plus-prep
-    # and quietly flattered zgbdt. The fair unit is "in-memory numeric data ->
-    # trained model", which for zgbdt is bin + train and excludes CSV parsing,
+    # only zarbor's `train` line compared a kernel against a kernel-plus-prep
+    # and quietly flattered zarbor. The fair unit is "in-memory numeric data ->
+    # trained model", which for zarbor is bin + train and excludes CSV parsing,
     # since pandas has already paid that on the Python side.
     # Prefer the `fit` line, which excludes predicting and scoring the
     # validation set. The reference libraries are called without an eval set,
-    # so charging zgbdt for work they never did is not a comparison.
+    # so charging zarbor for work they never did is not a comparison.
     fit = re.search(r"^fit\s+(\d+) ms", r.stdout, re.M)
     ms = fit or re.search(r"^train\s+(\d+) ms", r.stdout, re.M)
     bin_ms = re.search(r"^bin\s+(\d+) ms", r.stdout, re.M)
@@ -169,10 +169,10 @@ def run_zgbdt_once(binary, csv, label, extra):
     return float(auc.group(1)), int(ms.group(1)) / 1000, bin_s, None
 
 
-def run_zgbdt(binary, csv, label, extra, repeat):
+def run_zarbor(binary, csv, label, extra, repeat):
     best, auc, bin_s, err = None, None, None, None
     for _ in range(repeat):
-        a, t, b, e = run_zgbdt_once(binary, csv, label, extra)
+        a, t, b, e = run_zarbor_once(binary, csv, label, extra)
         if e:
             return None, None, None, e
         auc, err = a, None
@@ -200,7 +200,7 @@ def main():
     ap.add_argument("--drop", action="append", default=[])
     ap.add_argument("--valid-frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--binary", default=str(Path(__file__).parent.parent / "zig-out/bin/zgbdt"))
+    ap.add_argument("--binary", default=str(Path(__file__).parent.parent / "zig-out/bin/zarbor"))
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--repeat", type=int, default=3,
                     help="fits per implementation; the fastest is reported")
@@ -229,12 +229,12 @@ def main():
     print(f"rows {len(df)}  feats {X.shape[1]}  train {tr.sum()}  valid {va.sum()}\n")
 
     print(f"best of {a.repeat} fit(s) per implementation, {a.threads} threads, "
-          f"zgbdt built {mode}\n")
+          f"zarbor built {mode}\n")
 
     rows = []
 
     def binnote(bin_s):
-        """Show how much of zgbdt's time was binning, since the reference
+        """Show how much of zarbor's time was binning, since the reference
         libraries hide that cost inside fit() and it is the part that does not
         shrink with better tree code."""
         return f"incl {bin_s:.2f}s bin" if bin_s else ""
@@ -244,7 +244,7 @@ def main():
 
     if "xgb" in want:
         # ---- XGBoost-style boosting -----------------------------------------
-        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+        auc, fit_s, bin_s, err = run_zarbor(a.binary, split_csv, label, [
             f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", f"--max_depth={MAX_DEPTH}",
             f"--lambda={L2}", f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}",
             # xgboost has no min_child_samples at all, so turn ours off rather
@@ -262,7 +262,7 @@ def main():
 
     if "lgb" in want:
         # ---- LightGBM-style boosting ----------------------------------------
-        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+        auc, fit_s, bin_s, err = run_zarbor(a.binary, split_csv, label, [
             f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", "--max_depth=0",
             f"--max_leaves={MAX_LEAVES}", f"--lambda={L2}", f"--max_bin={MAX_BIN}",
             f"--n_threads={a.threads}", "--grow_policy=lossguide", "--sampling=goss"], a.repeat)
@@ -277,7 +277,7 @@ def main():
 
     if "rf" in want:
         # ---- Random forest ---------------------------------------------------
-        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+        auc, fit_s, bin_s, err = run_zarbor(a.binary, split_csv, label, [
             "--algo=random_forest", f"--n_rounds={RF_TREES}", f"--max_leaves={RF_LEAVES}",
             f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}"], a.repeat)
         add("RandomForest", "zarbor", auc, fit_s, err or binnote(bin_s))
@@ -290,7 +290,7 @@ def main():
 
     if "linear" in want:
         # ---- Linear ----------------------------------------------------------
-        auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
+        auc, fit_s, bin_s, err = run_zarbor(a.binary, split_csv, label, [
             "--algo=linear", "--lin_epochs=300", f"--lambda={L2}", f"--n_threads={a.threads}"], a.repeat)
         add("Linear (logistic)", "zarbor", auc, fit_s, err or binnote(bin_s))
 

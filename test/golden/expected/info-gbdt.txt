@@ -1,4 +1,4 @@
-$ zgbdt info --model=g.zm
+$ zarbor info --model=g.zm
 exit 0
 --- stdout
 file      g.zm

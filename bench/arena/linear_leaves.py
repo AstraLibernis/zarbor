@@ -27,7 +27,7 @@ from sklearn.metrics import mean_squared_error
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "bench" / "arena"
-ZGBDT = ROOT / "zig-out" / "bin" / "zgbdt"
+ZARBOR = ROOT / "zig-out" / "bin" / "zarbor"
 TRAIN, VALID = ARENA / "cal_train.csv", ARENA / "cal_valid.csv"
 LAMBDAS = [0.0, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
 
@@ -43,12 +43,12 @@ ZFLAGS = ["--objective=squared_error", "--n_rounds=200", "--learning_rate=0.1",
 def zarbor(extra, repeats=3):
     fits = []
     for i in range(repeats):
-        cmd = [str(ZGBDT), str(TRAIN), "--label=y", *ZFLAGS, *extra]
+        cmd = [str(ZARBOR), str(TRAIN), "--label=y", *ZFLAGS, *extra]
         if i == 0:
             cmd.append(f"--save={TMP}/llb.zm")
         o = subprocess.run(cmd, capture_output=True, text=True)
         fits.append(int(re.search(r"^train\s+(\d+) ms", o.stdout, re.M).group(1)))
-    p = subprocess.run([str(ZGBDT), "predict", str(VALID), f"--model={TMP}/llb.zm",
+    p = subprocess.run([str(ZARBOR), "predict", str(VALID), f"--model={TMP}/llb.zm",
                         "--label=y", "--n_threads=16"], capture_output=True, text=True)
     return float(re.search(r"rmse=([0-9.]+)", p.stdout).group(1)), int(np.median(fits))
 

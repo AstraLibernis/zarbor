@@ -7,12 +7,12 @@
 //!
 //!   zig build tools -- summarise <base.tsv> <new.tsv>    pair two grid runs (seeds)
 //!   zig build tools -- figure [scoreboard.json] [out.html]
-//!   zig build tools -- grid <zgbdt> <tag> [flags...]     the PROTOCOL.md grid, TSV out
+//!   zig build tools -- grid <zarbor> <tag> [flags...]     the PROTOCOL.md grid, TSV out
 //!   zig build tools -- controls                          PROTOCOL.md controls C2-C5
 //!   zig build tools -- solver-stress                     do lbfgs and adam meet?
 //!
 //! Paths: `$ZARBOR_BENCH_DATA` overrides `<repo>/bench/data`; the repo root is injected
-//! by build.zig. `controls` needs `$ZARBOR_OLD` (a previous zgbdt build): no default.
+//! by build.zig. `controls` needs `$ZARBOR_OLD` (a previous zarbor build): no default.
 //! Scratch files go under `<repo>/.zig-cache/tools/` and are removed afterwards.
 
 const std = @import("std");
@@ -635,7 +635,7 @@ const grid_sets = [_]Dataset{
 /// `$ONLY=a,b` limits datasets; `$SEEDS` defaults to 0,1,2.
 fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
     if (args.len < 2) {
-        print("usage: tools grid <zgbdt> <tag> [extra flags...]\n", .{});
+        print("usage: tools grid <zarbor> <tag> [extra flags...]\n", .{});
         return error.BadArgs;
     }
     const binary = args[0];
@@ -675,12 +675,12 @@ fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const
 // ---------------------------------------------------------------- controls
 
 /// Controls C2-C5 of docs/PROTOCOL.md (was controls.sh). NEW is this checkout's
-/// zig-out/bin/zgbdt; OLD is `$ZARBOR_OLD` (required); the data is `adult.csv` in the
+/// zig-out/bin/zarbor; OLD is `$ZARBOR_OLD` (required); the data is `adult.csv` in the
 /// data directory, label `y`. Exit status 1 when any control fails.
 fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {
-    const new = try std.fs.path.join(gpa, &.{ paths.root, "zig-out", "bin", "zgbdt" });
+    const new = try std.fs.path.join(gpa, &.{ paths.root, "zig-out", "bin", "zarbor" });
     const old = init.environ_map.get("ZARBOR_OLD") orelse {
-        print("error: controls needs $ZARBOR_OLD, a zgbdt built from the previous version\n", .{});
+        print("error: controls needs $ZARBOR_OLD, a zarbor built from the previous version\n", .{});
         return error.MissingOld;
     };
     const t = try scratchDir(init.io, gpa);
@@ -906,11 +906,11 @@ fn ratioAfter(text: []const u8, prefix: []const u8) ?f64 {
 }
 
 fn solve(init: std.process.Init, gpa: Allocator, pool: *zarbor.pool.Pool, train: []const u8, valid: []const u8, dir: []const u8, y: []const f32, solver: []const u8, std_on: bool, alpha: f64, lam: f64) !Solved {
-    const zgbdt = try std.fs.path.join(gpa, &.{ paths.root, "zig-out", "bin", "zgbdt" });
+    const exe_path = try std.fs.path.join(gpa, &.{ paths.root, "zig-out", "bin", "zarbor" });
     const model = try std.fmt.allocPrint(gpa, "{s}/ss_{s}.zm", .{ dir, solver });
     const pred = try std.fmt.allocPrint(gpa, "{s}/ss.csv", .{dir});
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(gpa, &.{ zgbdt, train, "--label=Will_Buy_EV", "--valid-frac=0", "--algo=linear", "--verbose_eval=0", "--n_threads=16" });
+    try argv.appendSlice(gpa, &.{ exe_path, train, "--label=Will_Buy_EV", "--valid-frac=0", "--algo=linear", "--verbose_eval=0", "--n_threads=16" });
     try argv.append(gpa, try std.fmt.allocPrint(gpa, "--lin_solver={s}", .{solver}));
     try argv.append(gpa, try std.fmt.allocPrint(gpa, "--lin_standardize={s}", .{if (std_on) "true" else "false"}));
     var b: [32]u8 = undefined;
@@ -922,7 +922,7 @@ fn solve(init: std.process.Init, gpa: Allocator, pool: *zarbor.pool.Pool, train:
     if (r.code != 0) return .{ .auc = null, .state = "ERROR", .ratio = null };
     const stalled = std.mem.find(u8, r.text, "STALLED") != null;
     const ratio = ratioAfter(r.text, "|g|max ") orelse ratioAfter(r.text, "large (");
-    const p = try run(init, gpa, &.{ zgbdt, "predict", valid, try std.fmt.allocPrint(gpa, "--model={s}", .{model}), try std.fmt.allocPrint(gpa, "--out={s}", .{pred}), "--n_threads=16" });
+    const p = try run(init, gpa, &.{ exe_path, "predict", valid, try std.fmt.allocPrint(gpa, "--model={s}", .{model}), try std.fmt.allocPrint(gpa, "--out={s}", .{pred}), "--n_threads=16" });
     if (p.code != 0) return .{ .auc = null, .state = "PREDFAIL", .ratio = ratio };
     var pf = try zarbor.csv.readCsv(gpa, init.io, pool, pred, 1 << 30);
     defer pf.deinit();

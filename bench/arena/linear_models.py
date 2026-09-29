@@ -30,7 +30,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "bench" / "arena"
-ZGBDT = ROOT / "zig-out" / "bin" / "zgbdt"
+ZARBOR = ROOT / "zig-out" / "bin" / "zarbor"
 THREADS = 16
 REPEATS = 5
 
@@ -71,7 +71,7 @@ def zarbor(task, solver):
     mp = f"{TMP}/lm_{solver}.zm"
     fits, reads, bins, state = [], [], [], "ok"
     for i in range(REPEATS):
-        cmd = [str(ZGBDT), str(task["train"]), f"--label={task['label']}",
+        cmd = [str(ZARBOR), str(task["train"]), f"--label={task['label']}",
                "--valid-frac=0", "--algo=linear", f"--objective={task['model']}",
                f"--lambda={task['lam']}", "--alpha=0", "--verbose_eval=0",
                f"--lin_solver={solver}", f"--n_threads={THREADS}"]
@@ -90,7 +90,7 @@ def zarbor(task, solver):
 
     preads, pbins, ppred = [], [], []
     for _ in range(REPEATS):
-        r = subprocess.run([str(ZGBDT), "predict", str(task["valid"]),
+        r = subprocess.run([str(ZARBOR), "predict", str(task["valid"]),
                             f"--model={mp}", f"--out={TMP}/lm.csv",
                             f"--n_threads={THREADS}"], capture_output=True, text=True)
         o = r.stdout + r.stderr

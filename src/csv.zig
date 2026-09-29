@@ -598,7 +598,7 @@ pub fn writeSummary(out: *std.Io.Writer, f: *const Frame, stats: []const ColumnS
     }
 }
 
-/// The full table, for `zgbdt profile`.
+/// The full table, for `zarbor profile`.
 pub fn writeProfile(out: *std.Io.Writer, f: *const Frame, stats: []const ColumnStat) !void {
     try out.print("rows    {d}\ncols    {d}\n\n", .{ f.n_rows, stats.len });
     try out.print("{s: <24}{s: <6}{s: >9}{s: >7}{s: >9}{s: >13}{s: >13}{s: >13}{s: >9}\n", .{

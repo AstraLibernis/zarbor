@@ -24,7 +24,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "bench" / "arena"
-ZGBDT = ROOT / "zig-out" / "bin" / "zgbdt"
+ZARBOR = ROOT / "zig-out" / "bin" / "zarbor"
 R = 5
 
 
@@ -42,7 +42,7 @@ def linear_regression_row():
     lab = "Annual_Income_USD"
     fits, preps, preds = [], [], []
     for i in range(R):
-        cmd = [str(ZGBDT), str(tr), f"--label={lab}", "--valid-frac=0",
+        cmd = [str(ZARBOR), str(tr), f"--label={lab}", "--valid-frac=0",
                "--algo=linear", "--objective=squared_error", "--lambda=0",
                "--alpha=0", "--verbose_eval=0", "--n_threads=16"]
         if i == 0:
@@ -53,7 +53,7 @@ def linear_regression_row():
         preps.append(ms(out, "bin"))
     pp = []
     for _ in range(R):
-        o = subprocess.run([str(ZGBDT), "predict", str(va), f"--model={TMP}/sb.zm",
+        o = subprocess.run([str(ZARBOR), "predict", str(va), f"--model={TMP}/sb.zm",
                             f"--out={TMP}/sb.csv", f"--label={lab}", "--n_threads=16"],
                            capture_output=True, text=True)
         out = o.stdout + o.stderr

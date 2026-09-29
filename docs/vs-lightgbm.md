@@ -10,7 +10,7 @@ Run it with `python bench/vs_lightgbm.py`. Every number below is from it.
 ## How the comparison is made honest
 
 **One split, shared.** A `__split` column goes into a copy of the CSV and is
-handed to `zgbdt --split-col`; the Python side masks on the same column.
+handed to `zarbor --split-col`; the Python side masks on the same column.
 
 **A noise floor, not a chosen tolerance.** The first version used LightGBM's
 spread across `random_state`, which is exactly zero: with no row or feature

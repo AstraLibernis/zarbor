@@ -1,7 +1,7 @@
-$ zgbdt tune
+$ zarbor tune
 exit 1
 --- stdout
-usage: zgbdt tune <train.csv> --label=<column> [options]
+usage: zarbor tune <train.csv> --label=<column> [options]
 
   --search=NAME       grid | random | bayes | bandit   (default random)
   --trials=N          evaluations, or the starting population for
@@ -33,7 +33,7 @@ usage: zgbdt tune <train.csv> --label=<column> [options]
   --min-folds=N       bandit's cheapest rung (default 2)
 
 Any Config flag pins a value for the whole search:
-  zgbdt tune t.csv --label=y --algo=linear --search=bayes --trials=80
+  zarbor tune t.csv --label=y --algo=linear --search=bayes --trials=80
 --- stderr
 error: NoInput
 --- files
