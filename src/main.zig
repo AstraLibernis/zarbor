@@ -717,7 +717,7 @@ fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
 fn explainLabel(out: *std.Io.Writer, err: anyerror, target: []const u8) !void {
     const hint: []const u8 = switch (err) {
         error.MulticlassNotSupported =>
-        \\has more than two distinct values. zmodels fits binary and
+        \\has more than two distinct values. zarbor fits binary and
         \\regression targets only; a multiclass column would otherwise be
         \\encoded 0,1,2,... and fitted as if those were magnitudes.
         ,

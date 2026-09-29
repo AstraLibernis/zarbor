@@ -95,7 +95,7 @@ on the coefficients, and therefore on anything computed from them.
 | `lbfgs` (default) | L-BFGS, with OWL-QN's orthant handling when `alpha > 0`. Line search per step. |
 | `adam` | Full-batch Adam with an L1 proximal step. No objective evaluation, no line search. |
 
-Stress test: `bench/arena/solver_stress.py`, 18 configurations (standardise
+Stress test: `zig build tools -- solver-stress` (formerly `bench/arena/solver_stress.py`), 18 configurations (standardise
 on/off x alpha in {0, 0.001, 0.1} x lambda in {0, 1, 100}) on a 60k-row
 subsample, scored on 40k held-out rows.
 

@@ -18,6 +18,8 @@ charged to neither.
     python bench/arena/linear_models.py
 """
 import re, statistics, subprocess, time
+import tempfile
+TMP = tempfile.mkdtemp(prefix="zarbor-bench-")  # private scratch, honours $TMPDIR
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +68,7 @@ def ms(out, key):
 
 
 def zarbor(task, solver):
-    mp = f"/tmp/lm_{solver}.zm"
+    mp = f"{TMP}/lm_{solver}.zm"
     fits, reads, bins, state = [], [], [], "ok"
     for i in range(REPEATS):
         cmd = [str(ZGBDT), str(task["train"]), f"--label={task['label']}",
@@ -89,11 +91,11 @@ def zarbor(task, solver):
     preads, pbins, ppred = [], [], []
     for _ in range(REPEATS):
         r = subprocess.run([str(ZGBDT), "predict", str(task["valid"]),
-                            f"--model={mp}", "--out=/tmp/lm.csv",
+                            f"--model={mp}", f"--out={TMP}/lm.csv",
                             f"--n_threads={THREADS}"], capture_output=True, text=True)
         o = r.stdout + r.stderr
         preads.append(ms(o, "read")); pbins.append(ms(o, "bin")); ppred.append(ms(o, "predict"))
-    p = pd.read_csv("/tmp/lm.csv").iloc[:, -1].values
+    p = pd.read_csv(f"{TMP}/lm.csv").iloc[:, -1].values
     return dict(read=med(reads) + med(preads), prepare=med(bins) + med(pbins),
                 fit=med(fits), predict=med(ppred), state=state, pred=p)
 

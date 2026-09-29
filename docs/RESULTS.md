@@ -2,8 +2,9 @@
 
 Measured against `PROTOCOL.md`, which was committed before `src/` was touched.
 Raw runs: `bench/baseline_old.tsv`, `bench/f1_on.tsv`, `bench/f2_on.tsv`,
-`bench/f2_on_scaled.tsv`. Reproduce with `bench/run.py` and compare with
-`bench/summarise.py`.
+`bench/f2_on_scaled.tsv`. Reproduce with `zig build tools -- grid` and compare
+with `zig build tools -- summarise` (formerly `bench/run.py` / `bench/summarise.py`;
+the Zig port reproduces the old scripts' output byte for byte on these files).
 
 Read `|d|/sd` as the pre-registered test: the effect counts only above 2.
 

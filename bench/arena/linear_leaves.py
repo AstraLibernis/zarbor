@@ -16,6 +16,8 @@ picking one for the reference would be handicapping it.
     python bench/arena/linear_leaves.py
 """
 import re, subprocess, time
+import tempfile
+TMP = tempfile.mkdtemp(prefix="zarbor-bench-")  # private scratch, honours $TMPDIR
 from pathlib import Path
 
 import numpy as np
@@ -43,10 +45,10 @@ def zarbor(extra, repeats=3):
     for i in range(repeats):
         cmd = [str(ZGBDT), str(TRAIN), "--label=y", *ZFLAGS, *extra]
         if i == 0:
-            cmd.append("--save=/tmp/llb.zm")
+            cmd.append(f"--save={TMP}/llb.zm")
         o = subprocess.run(cmd, capture_output=True, text=True)
         fits.append(int(re.search(r"^train\s+(\d+) ms", o.stdout, re.M).group(1)))
-    p = subprocess.run([str(ZGBDT), "predict", str(VALID), "--model=/tmp/llb.zm",
+    p = subprocess.run([str(ZGBDT), "predict", str(VALID), f"--model={TMP}/llb.zm",
                         "--label=y", "--n_threads=16"], capture_output=True, text=True)
     return float(re.search(r"rmse=([0-9.]+)", p.stdout).group(1)), int(np.median(fits))
 

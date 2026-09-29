@@ -13,6 +13,8 @@ Linear leaves is deliberately excluded: it is measured on california, and a
 16k-row fit sitting beside a 535k-row fit would make the bars lie.
 """
 import json, re, statistics, subprocess, time
+import tempfile
+TMP = tempfile.mkdtemp(prefix="zarbor-bench-")  # private scratch, honours $TMPDIR
 from pathlib import Path
 
 import numpy as np, pandas as pd
@@ -44,15 +46,15 @@ def linear_regression_row():
                "--algo=linear", "--objective=squared_error", "--lambda=0",
                "--alpha=0", "--verbose_eval=0", "--n_threads=16"]
         if i == 0:
-            cmd.append("--save=/tmp/sb.zm")
+            cmd.append(f"--save={TMP}/sb.zm")
         o = subprocess.run(cmd, capture_output=True, text=True)
         out = o.stdout + o.stderr
         fits.append(int(re.search(r"^train\s+(\d+) ms", out, re.M).group(1)))
         preps.append(ms(out, "bin"))
     pp = []
     for _ in range(R):
-        o = subprocess.run([str(ZGBDT), "predict", str(va), "--model=/tmp/sb.zm",
-                            "--out=/tmp/sb.csv", f"--label={lab}", "--n_threads=16"],
+        o = subprocess.run([str(ZGBDT), "predict", str(va), f"--model={TMP}/sb.zm",
+                            f"--out={TMP}/sb.csv", f"--label={lab}", "--n_threads=16"],
                            capture_output=True, text=True)
         out = o.stdout + o.stderr
         pp.append(ms(out, "predict")); preps.append(ms(out, "bin"))
@@ -70,7 +72,7 @@ def linear_regression_row():
         m = LinearRegression()
         t0 = time.perf_counter(); m.fit(A, ytr); sfit.append((time.perf_counter()-t0)*1000)
         t0 = time.perf_counter(); p = m.predict(B); spred.append((time.perf_counter()-t0)*1000)
-    zp = pd.read_csv("/tmp/sb.csv").iloc[:, -1].values
+    zp = pd.read_csv(f"{TMP}/sb.csv").iloc[:, -1].values
     return dict(
         key="linear regression", reference="sklearn LinearRegression",
         kind="family", metric="rmse",

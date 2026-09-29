@@ -474,7 +474,7 @@ pub const LabelEncoder = struct {
 
         const levels = src.levels[col];
         if (levels.len == 0) return error.EmptyTarget;
-        // zmodels is binary-only. Three classes encoded as 0/1/2 would train
+        // zarbor is binary-only. Three classes encoded as 0/1/2 would train
         // and score without complaint, which is precisely the failure mode
         // this type exists to remove.
         if (levels.len == 1) return error.SingleClassTarget;

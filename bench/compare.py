@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 AstraLibernis
 
-"""Compare zmodels against the reference Python implementations, 1:1.
+"""Compare zarbor against the reference Python implementations, 1:1.
 
 Fairness rests on three things:
 
@@ -26,13 +26,15 @@ Fairness rests on three things:
     wrong. This script builds ReleaseFast itself and refuses to time anything
     that does not report a release mode.
 
-What it cannot control for: binning is not identical (zmodels uses quantile
+What it cannot control for: binning is not identical (zarbor uses quantile
 edges over u8 bins; XGBoost and LightGBM have their own sketching), and
 categorical handling differs. Read the AUC column as "same ballpark or not",
 not as a claim of algorithmic equivalence.
 """
 
 import argparse, json, re, subprocess, sys, time
+import tempfile
+TMP = tempfile.mkdtemp(prefix="zarbor-bench-")  # private scratch, honours $TMPDIR
 from pathlib import Path
 
 import numpy as np
@@ -60,7 +62,7 @@ def load(csv, label, drop, valid_frac, seed):
     for c in drop:
         if c in df.columns:
             df = df.drop(columns=c)
-    # zmodels encodes a string target by sorted class order, which is what
+    # zarbor encodes a string target by sorted class order, which is what
     # sklearn's LabelEncoder does, so the two sides agree without a
     # translation table. (It did once use the dictionary's first-appearance
     # ids, which made the target depend on row order; both sides are on the
@@ -70,7 +72,7 @@ def load(csv, label, drop, valid_frac, seed):
         uniques = np.sort(ycol.unique())
         if len(uniques) != 2:
             raise SystemExit(f"label {label!r} has {len(uniques)} classes; "
-                             "zmodels fits binary targets only")
+                             "zarbor fits binary targets only")
         y = (ycol.to_numpy() == uniques[1]).astype(np.float32)
         print(f"label {label!r} encoded by sorted class order: "
               + ", ".join(f"{v!r}->{i}" for i, v in enumerate(uniques)))
@@ -92,15 +94,15 @@ def write_split_csv(df, is_valid, path):
 
 
 def encode(X):
-    """Ordinal codes for tree models (which is how zmodels splits categoricals)
-    and a one-hot matrix for the linear model (which is how zmodels builds its
+    """Ordinal codes for tree models (which is how zarbor splits categoricals)
+    and a one-hot matrix for the linear model (which is how zarbor builds its
     design matrix)."""
     cat = [c for c in X.columns if X[c].dtype == object or str(X[c].dtype) == "str"]
     num = [c for c in X.columns if c not in cat]
 
     ordinal = X.copy()
     for c in cat:
-        # factorize, not Categorical: first-appearance ids are what zmodels
+        # factorize, not Categorical: first-appearance ids are what zarbor
         # assigns, and for a tree splitting on `bin <= threshold` the id order
         # changes which partitions are even reachable.
         ordinal[c] = pd.factorize(ordinal[c])[0].astype(np.float32)
@@ -217,7 +219,7 @@ def main():
         build_release(Path(__file__).parent.parent)
 
     df, X, y, is_valid, label = load(a.csv, a.label, a.drop, a.valid_frac, a.seed)
-    split_csv = Path("/tmp/zbench_split.csv")
+    split_csv = Path(TMP) / "zbench_split.csv"
     write_split_csv(df, is_valid, split_csv)
     mode = check_release(a.binary, split_csv, label)
 
@@ -249,7 +251,7 @@ def main():
             # than leave it at 20 against xgboost's hessian-only constraint.
             "--min_child_samples=1", "--min_child_weight=1",
             "--grow_policy=depthwise"], a.repeat)
-        add("GBDT (level-wise)", "zmodels", auc, fit_s, err or binnote(bin_s))
+        add("GBDT (level-wise)", "zarbor", auc, fit_s, err or binnote(bin_s))
 
         m = xgb.XGBClassifier(n_estimators=N_ROUNDS, learning_rate=LR, max_depth=MAX_DEPTH,
                               reg_lambda=L2, max_bin=MAX_BIN, tree_method="hist",
@@ -264,7 +266,7 @@ def main():
             f"--n_rounds={N_ROUNDS}", f"--learning_rate={LR}", "--max_depth=0",
             f"--max_leaves={MAX_LEAVES}", f"--lambda={L2}", f"--max_bin={MAX_BIN}",
             f"--n_threads={a.threads}", "--grow_policy=lossguide", "--sampling=goss"], a.repeat)
-        add("GBDT (leaf-wise + GOSS)", "zmodels", auc, fit_s, err or binnote(bin_s))
+        add("GBDT (leaf-wise + GOSS)", "zarbor", auc, fit_s, err or binnote(bin_s))
 
         m = lgb.LGBMClassifier(n_estimators=N_ROUNDS, learning_rate=LR, num_leaves=MAX_LEAVES,
                                max_depth=-1, reg_lambda=L2, max_bin=MAX_BIN,
@@ -278,7 +280,7 @@ def main():
         auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
             "--algo=random_forest", f"--n_rounds={RF_TREES}", f"--max_leaves={RF_LEAVES}",
             f"--max_bin={MAX_BIN}", f"--n_threads={a.threads}"], a.repeat)
-        add("RandomForest", "zmodels", auc, fit_s, err or binnote(bin_s))
+        add("RandomForest", "zarbor", auc, fit_s, err or binnote(bin_s))
 
         m = RandomForestClassifier(n_estimators=RF_TREES, max_leaf_nodes=RF_LEAVES,
                                    max_features="sqrt", bootstrap=True, n_jobs=a.threads,
@@ -290,7 +292,7 @@ def main():
         # ---- Linear ----------------------------------------------------------
         auc, fit_s, bin_s, err = run_zgbdt(a.binary, split_csv, label, [
             "--algo=linear", "--lin_epochs=300", f"--lambda={L2}", f"--n_threads={a.threads}"], a.repeat)
-        add("Linear (logistic)", "zmodels", auc, fit_s, err or binnote(bin_s))
+        add("Linear (logistic)", "zarbor", auc, fit_s, err or binnote(bin_s))
 
         m = LogisticRegression(max_iter=1000, C=1.0)  # n_jobs is a no-op since 1.8
         _, s = timed_fit(lambda: m.fit(onehot[tr], ytr), a.repeat)
@@ -309,7 +311,7 @@ def main():
         if z["auc"] is not None and p["auc"] is not None:
             d = z["auc"] - p["auc"]
             sp = p["fit_s"] / z["fit_s"] if z["fit_s"] else float("nan")
-            print(f"{'':<{w}} {'->':<10} {d:>+9.6f} {sp:>8.2f}x   AUC delta, zmodels speed vs reference")
+            print(f"{'':<{w}} {'->':<10} {d:>+9.6f} {sp:>8.2f}x   AUC delta, zarbor speed vs reference")
         print()
 
     if a.json:

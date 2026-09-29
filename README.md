@@ -1,9 +1,20 @@
-# zmodels
+# zarbor
 
 Gradient-boosted trees, random forests and regularised linear models for
 tabular CSV data, in Zig with no dependencies. Plus cross-validation and
 hyperparameter search as first-class subcommands, so the whole loop runs in
 one process instead of a Python harness shelling out per fold.
+
+## Status (v0.5.0)
+
+Working and tested (99 tests). Since v0.4.0: linear leaves and optimal
+categorical splits (both off by default, measured against pre-registered
+protocols in `docs/RESULTS.md`), grouped folds, and a CSV loader rebuilt on a
+vendored copy of [zsift](https://github.com/AstraLibernis/zsift): quoted
+fields may hold newlines and escaped quotes, there is no column limit, and it
+loads 1.5-1.7x faster than before, byte-identically. The benchmark glue is Zig
+(`zig build tools`); Python remains only where a reference library runs.
+Still open: merging the two comparison harnesses (see Benchmarks).
 
     zig build -Doptimize=ReleaseFast
 
@@ -172,7 +183,8 @@ Both are off by default, both were pre-registered before they were written,
 and neither met the bar it was given. `docs/PROTOCOL.md` fixes the datasets,
 the fixed hyperparameters and the success criterion; `docs/RESULTS.md` has the
 numbers; `docs/categorical-splits.md` and `docs/linear-leaves.md` carry the
-derivations. `bench/run.py` reproduces the grid.
+derivations. `zig build tools -- grid <zgbdt> <tag>` reproduces the grid and
+`zig build tools -- summarise <base.tsv> <new.tsv>` pairs two runs.
 
     --cat_split=optimal    partition a categorical by gradient order rather
                            than by a cut on its dictionary id
@@ -226,10 +238,11 @@ predict on both sides. Parsing belongs to no model and is measured on its own.
 Three findings worth the reading: the GOSS row's gap turned out to be
 LightGBM ranking rows by `|g*h|` where the paper says `|g|` (`docs/goss.md`); LightGBM's leafwise fit is genuinely faster
 than zarbor's once binning is charged symmetrically; and forest *prediction*
-(279 ms against sklearn's 87) is the largest single deficit measured.
+was the largest single deficit measured (279 ms against sklearn's 87) until
+trees-outer prediction (`38ea68f`) brought it to 109 ms, bit-identically.
 
 `bench/arena/scoreboard.py` merges every model-vs-counterpart comparison onto
-one dataset and one machine, and `bench/arena/make_figure.py` renders it as a
+one dataset and one machine, and `zig build tools -- figure` renders it as a
 standalone interactive figure (`bench/arena/scoreboard.html`, previewed in
 `bench/arena/fig_light.png`) -- dumbbell for time on a log axis, a companion
 panel for the accuracy gap with the leading side named, a full table view and
@@ -237,7 +250,9 @@ light/dark modes.
 
 ![zarbor against the standard implementation of each model](bench/arena/fig_light.png)
 
-The two harnesses overlap and should be consolidated.
+The two harnesses overlap -- both compare every model with its reference --
+and merging them is still open: `compare.py` is the one-shot check on any CSV,
+`arena.py` the pre-registered protocol behind `docs/arena.md`.
 
 ## License
 

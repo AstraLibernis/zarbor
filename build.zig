@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
     if (b.args) |args| run.addArgs(args);
-    b.step("run", "Train/predict with the zmodels GBDT").dependOn(&run.step);
+    b.step("run", "Train/predict with the zarbor GBDT").dependOn(&run.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -52,6 +52,22 @@ pub fn build(b: *std.Build) void {
 
     b.step("bench-widecat", "Measure what a wide categorical column costs")
         .dependOn(&b.addRunArtifact(wc).step);
+
+    // Benchmark glue in Zig (bench/tools.zig; replaces the non-baseline Python/shell).
+    const tools_paths = b.addOptions();
+    tools_paths.addOption([]const u8, "root", b.pathFromRoot("."));
+    const tools_mod = b.createModule(.{
+        .root_source_file = b.path("bench/tools.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zarbor", .module = lib }},
+    });
+    tools_mod.addOptions("tools_paths", tools_paths);
+    const tools = b.addExecutable(.{ .name = "tools", .root_module = tools_mod });
+    b.installArtifact(tools);
+    const run_tools = b.addRunArtifact(tools);
+    if (b.args) |args| run_tools.addArgs(args);
+    b.step("tools", "Benchmark glue: `zig build tools -- summarise|figure|grid|controls|solver-stress ...`").dependOn(&run_tools.step);
 
     // Standalone microbenchmarks, each answering one recorded question (see its header).
     const pool_mod = b.createModule(.{ .root_source_file = b.path("src/pool.zig"), .target = target, .optimize = optimize });

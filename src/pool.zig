@@ -154,7 +154,7 @@ pub const Pool = struct {
         var spins: u32 = 0;
         while (p.done.load(.acquire) < p.threads.len) {
             spins +%= 1;
-            if (spins < spin_budget) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
+            if (spins < spin_budget) std.atomic.spinLoopHint() else std.Thread.yield() catch {}; // zsnag:ok — a failed yield just means spin again
         }
     }
 };
@@ -190,7 +190,7 @@ fn workerMain(p: *Pool, id: usize) void {
                 continue;
             }
             if (!can_park) {
-                std.Thread.yield() catch {};
+                std.Thread.yield() catch {}; // zsnag:ok — a failed yield just means spin again
                 continue;
             }
 
