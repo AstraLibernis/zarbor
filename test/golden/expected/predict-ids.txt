@@ -1,0 +1,12 @@
+$ zgbdt predict titanic3.csv --model=f.zm --id-col=name --pred-col=p_survive --n_threads=2 --out=pi.csv
+exit 0
+--- stdout
+rows    1309
+models  1
+read # ms
+bin # ms
+predict # ms
+wrote   pi.csv
+--- stderr
+--- files
+pi.csv  48615 bytes  sha256 514500d969932377cd7e34cb1d4349594cffaabc04fd365cab94cc24dffd20c8

@@ -1,0 +1,22 @@
+$ zgbdt predict titanic3.csv --model=l.zm
+exit 0
+--- stdout
+rows    1309
+models  1
+read # ms
+bin # ms
+predict # ms
+
+first 10 predictions
+  0.997575
+  0.001279
+  0.016547
+  0.000324
+  0.005626
+  0.993748
+  0.995217
+  0.004048
+  0.995812
+  0.120838
+--- stderr
+--- files

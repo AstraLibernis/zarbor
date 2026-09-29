@@ -1,0 +1,32 @@
+$ zgbdt tune titanic3.csv --label=survived --search=random --trials=4 --folds=2 --seed=3 --param=max_depth=2,4 --param=lambda=0.5..8:log --param=n_rounds=20..60:int --confirm=2 --confirm-seeds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+data     titanic3.csv
+rows     1309   feats 8   (label "survived")
+algo     gbdt
+search   random
+space    3 params
+folds    2  (seed 1)
+threads  4
+prep # ms  (read + bin, paid once for the whole search)
+
+  max_depth            choice  [2, 4]
+  lambda               log_uniform  0.5 .. 8
+  n_rounds             int_uniform  20 .. 60
+
+   1  0.841115  2f #ms  max_depth=2 lambda=6.683197 n_rounds=46  <- best
+   2  0.842499  2f #ms  max_depth=4 lambda=3.280522 n_rounds=24  <- best
+   3  0.846755  2f #ms  max_depth=2 lambda=2.063352 n_rounds=47  <- best
+   4  0.838517  2f #ms  max_depth=2 lambda=2.456002 n_rounds=26
+
+best     0.846755   4 trials
+  max_depth=2 lambda=2.063352 n_rounds=47
+verified 0.846755   (winner re-ran identically)
+
+confirming the top 2 on 2 unseen fold seed(s)
+
+ rank   searched  seed2        seed3         mean new
+    1   0.846755     0.851095     0.842576   0.846836
+    2   0.842499     0.841719     0.837384   0.839552
+--- stderr
+--- files

@@ -1,0 +1,7 @@
+$ zgbdt profile
+exit 1
+--- stdout
+usage: zgbdt profile <data.csv> [--max-bytes=N]
+--- stderr
+error: NoCsvPath
+--- files

@@ -1,0 +1,39 @@
+$ zgbdt tune
+exit 1
+--- stdout
+usage: zgbdt tune <train.csv> --label=<column> [options]
+
+  --search=NAME       grid | random | bayes | bandit   (default random)
+  --trials=N          evaluations, or the starting population for
+                      bandit (default 40)
+  --param=NAME=SPEC   what to vary; repeatable. SPEC is either a
+                      comma-separated list of values, or LO..HI with
+                      optional :int and :log suffixes, e.g.
+                        --param=max_depth=4,5,6,7
+                        --param=lambda=0.1..50:log
+                        --param=n_rounds=200..800:int
+                      With no --param the default space for the chosen
+                      --algo is used.
+  --folds=N           folds per evaluation (default 5)
+  --fold-seed=N       seed for the fold assignment (default 1)
+  --group-col=NAME    keep rows sharing this column's value in the
+                      same fold, and drop it as a feature. Required
+                      whenever a unit appears more than once (a panel,
+                      repeated measures) or CV measures memory, not
+                      generalisation.
+  --seed=N            seed for the search itself (default 1)
+  --confirm=N         re-score the top N on unseen fold seeds
+  --confirm-seeds=N   how many unseen seeds to use (default 2)
+  --out=FILE          write every trial as CSV
+  --grid-steps=N      points per continuous axis for grid (default 5)
+  --warmup=N          random trials before bayes starts modelling (12)
+  --candidates=N      proposals bayes scores per trial (default 24)
+  --gamma=F           best fraction bayes treats as "good" (default 0.25)
+  --eta=N             bandit's cull factor per rung (default 3)
+  --min-folds=N       bandit's cheapest rung (default 2)
+
+Any Config flag pins a value for the whole search:
+  zgbdt tune t.csv --label=y --algo=linear --search=bayes --trials=80
+--- stderr
+error: NoInput
+--- files

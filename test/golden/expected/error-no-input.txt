@@ -1,0 +1,44 @@
+$ zgbdt
+exit 1
+--- stdout
+usage: zgbdt <train.csv> --label=<column> [options]
+
+  --algo=NAME         gbdt | random_forest | linear   (default gbdt)
+  --label=NAME        target column (required)
+  --pos-label=NAME    class of a string target to encode as 1
+                      (default: classes sorted, so "No"<"Yes" -> Yes=1)
+  --drop=NAME         exclude a column; repeatable
+  --valid-frac=F      fraction held out for validation (default 0.2)
+  --split-seed=N      seed for the validation split (default 1)
+  --max-bytes=N       CSV size cap in bytes (default 1<<31)
+  --split-col=NAME    column assigning rows to train(0)/valid(nonzero);
+                      overrides --valid-frac, and is dropped as a feature
+  --save=FILE         write the trained model to FILE
+
+other commands:
+  zgbdt predict <data.csv> --model=M.zm [--out=P.csv] [--id-col=id]
+  zgbdt blend   <data.csv> --models=A.zm,B.zm [--weights=1,2] [--out=P.csv]
+  zgbdt info    --model=M.zm
+  zgbdt profile <data.csv>   what is in the file, before any model
+  zgbdt cv      <train.csv> --label=<column> [--folds=5]
+  zgbdt tune    <train.csv> --label=<column> [--search=random]
+
+predict and blend bin the new data with the schema stored in the model,
+so categorical levels map to the same bins they did in training. Pass
+--label=NAME as well to score against a labelled holdout; it is decoded
+with the model's own class order, not the holdout file's.
+
+Any Config field is also a flag, e.g.:
+  --n_rounds=800 --learning_rate=0.05 --max_depth=7 --lambda=2.0
+  --grow_policy=lossguide --max_leaves=64 --subsample=0.8
+  --colsample_bytree=0.8 --early_stopping_rounds=50 --n_threads=16
+
+XGBoost-style is the default; LightGBM-style is:
+  --grow_policy=lossguide --max_leaves=64 --sampling=goss
+
+Each algo sets its own defaults for anything you do not pass:
+  --algo=random_forest   bagged, unshrunk, 1024-leaf trees, sqrt(p)/split
+  --algo=linear          L-BFGS + L1/L2 on the binned design matrix
+--- stderr
+error: NoInput
+--- files

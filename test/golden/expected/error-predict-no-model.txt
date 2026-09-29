@@ -1,0 +1,6 @@
+$ zgbdt predict titanic3.csv
+exit 1
+--- stdout
+--- stderr
+error: NoModel
+--- files

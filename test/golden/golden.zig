@@ -47,7 +47,23 @@ const cases = [_]Case{
     .{ .name = "tune-bayes", .args = &.{ "tune", data_file, "--label=survived", "--search=bayes", "--trials=6", "--warmup=3", "--folds=2" } },
     .{ .name = "tune-bandit", .args = &.{ "tune", data_file, "--label=survived", "--search=bandit", "--trials=6", "--folds=2" } },
     .{ .name = "tune-grid-linear", .args = &.{ "tune", data_file, "--label=survived", "--algo=linear", "--search=grid", "--grid-steps=2", "--folds=2" } },
+    .{ .name = "train-split-col", .args = &.{ data_file, "--label=survived", "--split-col=parch", "--n_rounds=40", "--profile=0" } },
+    .{ .name = "train-valid-frac", .args = &.{ data_file, "--label=survived", "--valid-frac=0.35", "--split-seed=9", "--n_rounds=40", "--max-bytes=200000" } },
+    .{ .name = "predict-ids", .train_flags = false, .args = &.{ "predict", data_file, "--model=f.zm", "--id-col=name", "--pred-col=p_survive", "--n_threads=2", "--out=pi.csv" }, .files = &.{"pi.csv"} },
+    .{ .name = "predict-stdout", .train_flags = false, .args = &.{ "predict", data_file, "--model=l.zm" } },
+    .{ .name = "profile-max-bytes", .train_flags = false, .args = &.{ "profile", data_file, "--max-bytes=150000" } },
+    .{ .name = "cv-repeats-quiet", .args = &.{ "cv", data_file, "--label=survived", "--folds=3", "--repeats=3", "--quiet=1", "--n_rounds=40", "--oof=oofr.csv" }, .files = &.{"oofr.csv"} },
+    .{ .name = "cv-group", .args = &.{ "cv", data_file, "--label=survived", "--folds=3", "--group-col=sibsp", "--fold-seed=5", "--algo=linear" } },
+    .{ .name = "tune-params", .args = &.{ "tune", data_file, "--label=survived", "--search=random", "--trials=4", "--folds=2", "--seed=3", "--param=max_depth=2,4", "--param=lambda=0.5..8:log", "--param=n_rounds=20..60:int", "--confirm=2", "--confirm-seeds=2" } },
     .{ .name = "error-too-wide", .train_flags = false, .args = &.{ data_file, "--label=survived" } },
+    .{ .name = "error-unknown-flag", .args = &.{ data_file, "--label=survived", "--no_such_flag=1" } },
+    .{ .name = "error-flag-no-value", .args = &.{ data_file, "--label" } },
+    .{ .name = "error-cv-unknown-flag", .args = &.{ "cv", data_file, "--label=survived", "--nope=2" } },
+    .{ .name = "error-tune-no-input", .train_flags = false, .args = &.{"tune"} },
+    .{ .name = "error-predict-no-model", .train_flags = false, .args = &.{ "predict", data_file } },
+    .{ .name = "error-info-no-model", .train_flags = false, .args = &.{ "info", "g.zm" } },
+    .{ .name = "error-profile-no-path", .train_flags = false, .args = &.{"profile"} },
+    .{ .name = "error-no-input", .train_flags = false, .args = &.{} },
 };
 
 pub fn main(init: std.process.Init) !void {
