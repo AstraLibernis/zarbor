@@ -21,10 +21,39 @@ const data = @import("data.zig");
 const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const tree = @import("tree.zig");
-const config = @import("config.zig");
 const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
+
+/// A forest's settings. Its tree defaults are what make it a random forest:
+/// deep, bootstrapped, unshrunk, leaf-capped so the histogram budget stays
+/// bounded. `colsample_bynode` gets Breiman's sqrt(p) (or p/3) from
+/// `config.Config.applyForestFeatureDefault` once p is known.
+pub const Params = struct {
+    /// Number of bagged trees, fitted independently.
+    n_rounds: u32 = 300,
+    objective: Objective = .logistic,
+    /// Print per-round metrics every N rounds. 0 silences training.
+    verbose_eval: u32 = 10,
+    tree: tree.Params = .{
+        .learning_rate = 1.0,
+        .bootstrap = true,
+        .max_depth = 0,
+        .max_leaves = 1024,
+        .min_child_samples = 1,
+        .min_child_weight = 0.0,
+        .lambda = 0.0,
+    },
+
+    pub fn validate(p: Params) !void {
+        if (p.n_rounds == 0) return error.NoRounds;
+        // `train` forces the step to 1, so only that value is checked.
+        var t = p.tree;
+        t.learning_rate = 1.0;
+        try t.validate();
+        try p.tree.validateCapacity();
+    }
+};
 
 pub const Forest = struct {
     gpa: std.mem.Allocator,
@@ -107,13 +136,13 @@ pub fn train(
     pool: *Pool,
     ds: *const Dataset,
     valid: ?*const Dataset,
-    cfg_in: config.Config,
+    cfg_in: Params,
     log: ?*std.Io.Writer,
 ) !TrainResult {
     var cfg = cfg_in;
     // Averaging is the variance control; shrinking each member as well would
     // just produce a weak ensemble scaled by eta.
-    cfg.learning_rate = 1.0;
+    cfg.tree.learning_rate = 1.0;
     try cfg.validate();
     if (ds.labels.len == 0) return error.NoLabels;
 
@@ -140,7 +169,7 @@ pub fn train(
     defer if (valid_sum.len != 0) gpa.free(valid_sum);
     defer if (valid_scratch.len != 0) gpa.free(valid_scratch);
 
-    var builder = try tree.Builder.init(gpa, pool, ds, cfg);
+    var builder = try tree.Builder.init(gpa, pool, ds, cfg.tree);
     defer builder.deinit();
 
     var score: f64 = std.math.nan(f64);

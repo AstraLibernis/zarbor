@@ -25,7 +25,6 @@ const std = @import("std");
 const Pool = @import("pool.zig").Pool;
 const data = @import("data.zig");
 const Dataset = data.Dataset;
-const config = @import("config.zig");
 const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
@@ -46,6 +45,42 @@ pub const LinSolver = enum {
     /// evaluation and so no line search, which makes each pass cheaper — but
     /// it takes far more of them to reach the same coefficients.
     adam,
+};
+
+/// The linear model's settings. `objective` picks the model: logistic
+/// regression or linear regression (see objective.zig).
+pub const Params = struct {
+    objective: Objective = .logistic,
+    /// Multiplier on positive-class gradients. >1 upweights the minority
+    /// class for imbalanced binary problems.
+    scale_pos_weight: f32 = 1.0,
+    /// L2 penalty on the coefficients (ridge). The intercept is unpenalised.
+    lambda: f32 = 1.0,
+    /// L1 penalty on the coefficients (lasso). The intercept is unpenalised.
+    alpha: f32 = 0.0,
+    /// Which optimiser fits the coefficients. Linear only.
+    lin_solver: LinSolver = .lbfgs,
+    /// Maximum full-batch iterations. `lbfgs` normally converges in a few
+    /// dozen and stops on `lin_tol` well short of this; `adam` usually needs
+    /// all of them. Linear only.
+    lin_epochs: u32 = 300,
+    /// Adam step size. Ignored by `lbfgs`, which gets its step length from a
+    /// line search rather than from a constant. Linear only.
+    lin_lr: f32 = 0.05,
+    /// Stop when the largest absolute coefficient change in an iteration
+    /// falls below this. Same units for both solvers.
+    lin_tol: f32 = 1e-7,
+    /// Standardise each design column to zero mean and unit variance before
+    /// fitting. Off makes the penalties scale-dependent and is rarely right.
+    lin_standardize: bool = true,
+    /// Print per-round metrics every N rounds. 0 silences training.
+    verbose_eval: u32 = 10,
+
+    pub fn validate(p: Params) !void {
+        if (p.lin_epochs == 0) return error.NoEpochs;
+        if (p.lin_lr <= 0) return error.BadLinearLr;
+        if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
+    }
 };
 
 /// Ceiling on one-hot expansion. A categorical with thousands of levels would
@@ -531,7 +566,7 @@ pub const Fit = struct {
 fn fitLbfgs(
     gpa: std.mem.Allocator,
     pr: *Problem,
-    cfg: config.Config,
+    cfg: Params,
     log: ?*std.Io.Writer,
 ) !Fit {
     var fit: Fit = .{ .iters = 0 };
@@ -706,7 +741,7 @@ inline fn softThreshold(v: f64, t: f64) f64 {
 fn fitAdam(
     gpa: std.mem.Allocator,
     pr: *Problem,
-    cfg: config.Config,
+    cfg: Params,
     log: ?*std.Io.Writer,
 ) !Fit {
     const n = pr.theta.len;
@@ -797,7 +832,7 @@ pub fn train(
     pool: *Pool,
     ds: *const Dataset,
     valid: ?*const Dataset,
-    cfg: config.Config,
+    cfg: Params,
     log: ?*std.Io.Writer,
 ) !TrainResult {
     try cfg.validate();

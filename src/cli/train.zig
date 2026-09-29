@@ -97,8 +97,6 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         return error.NoLabel;
     };
 
-    cfg.applyAlgoDefaults(explicit.items);
-
     const pool = try pool_mod.Pool.init(gpa, cfg.n_threads);
     defer pool.deinit();
 
@@ -140,13 +138,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     };
     defer enc.deinit();
 
-    var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
-        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.max_bin, drops.items);
+    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin.max_bin, drops.items);
         try explainLabel(out, err, target);
         return err;
     };
     defer full.deinit();
-    enc.validate(full.labels, cfg.objective) catch |err| {
+    enc.validate(full.labels, cfg.objective()) catch |err| {
         try explainLabel(out, err, target);
         return err;
     };
@@ -235,9 +233,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const t_train0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     const valid_ptr: ?*const data.Dataset = if (valid_ds) |*v| v else null;
 
+    try cfg.validate();
     switch (cfg.algo) {
         .gbdt => {
-            var res = try booster.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            var res = try booster.train(gpa, pool, &train_ds, valid_ptr, cfg.gbdt, out);
             defer res.model.deinit();
             try printTiming(out, io, t_train0, "tree", res.n_rounds, res.valid_ns);
             if (save_path) |sp| {
@@ -253,11 +252,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 // Raw log-odds: AUC is rank-based so the link does not matter,
                 // and logloss wants the raw scale anyway.
                 res.model.predictRaw(pool, v, scores);
-                try report(gpa, out, cfg.objective, scores, v.labels, .raw);
+                try report(gpa, out, cfg.objective(), scores, v.labels, .raw);
             }
         },
         .random_forest => {
-            var res = try forest.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            var res = try forest.train(gpa, pool, &train_ds, valid_ptr, cfg.random_forest, out);
             defer res.model.deinit();
             try printTiming(out, io, t_train0, "tree", res.n_trees, res.valid_ns);
             if (save_path) |sp| {
@@ -271,11 +270,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 const scores = try gpa.alloc(f32, v.n_rows);
                 defer gpa.free(scores);
                 res.model.predict(pool, v, scores);
-                try report(gpa, out, cfg.objective, scores, v.labels, .natural);
+                try report(gpa, out, cfg.objective(), scores, v.labels, .natural);
             }
         },
         .linear => {
-            var res = try linear.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+            var res = try linear.train(gpa, pool, &train_ds, valid_ptr, cfg.linear, out);
             defer res.model.deinit();
             try printTiming(out, io, t_train0, "epoch", res.epochs, res.valid_ns);
             try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
@@ -292,7 +291,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                         \\        coefficients are not a fitted model.
                         \\
                     , .{ res.fit.g_last, res.fit.g_first });
-                    if (!cfg.lin_standardize)
+                    if (!cfg.linear.lin_standardize)
                         try out.writeAll(
                             \\        The usual cause is unscaled columns. Try
                             \\        --lin_standardize=true.
@@ -302,7 +301,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                     // move"; it just runs out of schedule. A gradient still
                     // this large after the budget is as likely to mean the
                     // budget was short as that the problem is ill-scaled.
-                    if (cfg.lin_solver == .adam)
+                    if (cfg.linear.lin_solver == .adam)
                         try out.writeAll(
                             \\        adam needs far more epochs than lbfgs. Try
                             \\        --lin_epochs=30000, or --lin_solver=lbfgs.
@@ -321,7 +320,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                     .gpa = gpa,
                     .kind = .linear,
                     .schema = try data.Schema.fromDataset(gpa, &full),
-                    .objective = cfg.objective,
+                    .objective = cfg.objective(),
                     .lin = res.model,
                 };
                 // Dropping the borrowed model first lets the normal deinit
@@ -338,7 +337,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 const scores = try gpa.alloc(f32, v.n_rows);
                 defer gpa.free(scores);
                 res.model.predict(pool, v, scores);
-                try report(gpa, out, cfg.objective, scores, v.labels, .natural);
+                try report(gpa, out, cfg.objective(), scores, v.labels, .natural);
             }
         },
     }

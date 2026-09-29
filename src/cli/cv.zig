@@ -120,10 +120,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     };
     if (n_folds < 2) return error.TooFewFolds;
 
-    cfg.applyAlgoDefaults(explicit.items);
     // Per-round validation output would be one block per fold and says
     // nothing the fold summary does not.
-    cfg.verbose_eval = 0;
+    cfg.set("verbose_eval", 0);
 
     const pool = try pool_mod.Pool.init(gpa, cfg.n_threads);
     defer pool.deinit();
@@ -154,12 +153,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // Bin once. Every fold is a `subset` of this matrix, which also means all
     // folds share one set of bin edges -- the edges are derived from feature
     // values only, never the label, so this leaks nothing.
-    var full = data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
-        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.max_bin, drops.items);
+    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin.max_bin, drops.items);
         return err;
     };
     defer full.deinit();
-    try enc.validate(full.labels, cfg.objective);
+    try enc.validate(full.labels, cfg.objective());
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
@@ -175,11 +174,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             \\
             \\
         , .{
-            path,                                                                                           full.n_rows,
-            full.n_features,                                                                                target,
-            n_folds,                                                                                        fold_seed,
-            if (group_col != null) ", grouped" else if (cfg.objective == .logistic) ", stratified" else "", pool.workerCount(),
-            @tagName(builtin.mode),                                                                         @divTrunc(t_bin - t0, 1_000_000),
+            path,                                                                                             full.n_rows,
+            full.n_features,                                                                                  target,
+            n_folds,                                                                                          fold_seed,
+            if (group_col != null) ", grouped" else if (cfg.objective() == .logistic) ", stratified" else "", pool.workerCount(),
+            @tagName(builtin.mode),                                                                           @divTrunc(t_bin - t0, 1_000_000),
         });
         try out.flush();
     }
@@ -211,7 +210,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         const fold_of = if (group_idx) |gi|
             try assignGroupFolds(gpa, frame.values[gi], n_folds, seed)
         else
-            try assignFolds(gpa, full.labels, n_folds, seed, cfg.objective == .logistic);
+            try assignFolds(gpa, full.labels, n_folds, seed, cfg.objective() == .logistic);
         var keep_this = false;
         defer if (!keep_this) gpa.free(fold_of);
 

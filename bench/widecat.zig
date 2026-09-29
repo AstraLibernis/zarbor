@@ -123,7 +123,6 @@ fn halfA(gpa: std.mem.Allocator, pool: *Pool, n_rows: usize, n_trees: usize) !vo
             var b = try tree.Builder.init(gpa, pool, &ds, .{
                 .max_depth = 6,
                 .cat_split = mode,
-                .verbose_eval = 0,
             });
             defer b.deinit();
             slot_kib = @as(f64, @floatFromInt(b.bank.slotLen() * @sizeOf(hist.Bin))) / 1024.0;

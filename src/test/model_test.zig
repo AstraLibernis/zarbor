@@ -189,13 +189,13 @@ test "per-node feature sampling does not corrupt sibling subtraction" {
     var ds = try synth(gpa, 4000, 11);
     defer ds.deinit();
 
-    var res = try booster.train(gpa, pool, &ds, null, .{
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 60,
         .max_depth = 4,
         .colsample_bynode = 0.34,
         .colsample_bylevel = 0.5,
         .verbose_eval = 0,
-    }, null);
+    }).gbdt, null);
     defer res.model.deinit();
 
     const pred = try gpa.alloc(f32, ds.n_rows);
@@ -215,14 +215,14 @@ test "goss trains and keeps the raw scores of unsampled rows current" {
     var ds = try synth(gpa, 6000, 13);
     defer ds.deinit();
 
-    var res = try booster.train(gpa, pool, &ds, null, .{
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 60,
         .max_depth = 4,
         .sampling = .goss,
         .top_rate = 0.2,
         .other_rate = 0.1,
         .verbose_eval = 0,
-    }, null);
+    }).gbdt, null);
     defer res.model.deinit();
 
     const pred = try gpa.alloc(f32, ds.n_rows);
@@ -235,12 +235,11 @@ test "the forest defaults pick sqrt(p) features and the fixture honours them" {
     // What this uniquely covered was `applyForestFeatureDefault`, not that a
     // forest can learn -- the fixture asserts that. Keeping the defaults check
     // and dropping the second fit of the same thing.
-    var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 40, .verbose_eval = 0 };
-    cfg.applyAlgoDefaults(&.{});
+    var cfg = config.Config.from(.{ .algo = .random_forest, .n_rounds = 40, .verbose_eval = 0 });
     cfg.applyForestFeatureDefault(9, &.{});
-    try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), cfg.colsample_bynode, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), cfg.random_forest.tree.colsample_bynode, 1e-6);
     // A forest averages unshrunk trees, so shrinkage must be off.
-    try testing.expectEqual(@as(f32, 1.0), cfg.learning_rate);
+    try testing.expectEqual(@as(f32, 1.0), cfg.random_forest.tree.learning_rate);
 }
 
 test "linear model learns the signal and L1 drives coefficients to zero" {
@@ -251,11 +250,11 @@ test "linear model learns the signal and L1 drives coefficients to zero" {
     var ds = try synth(gpa, 4000, 23);
     defer ds.deinit();
 
-    var res = try linear.train(gpa, pool, &ds, null, .{
+    var res = try linear.train(gpa, pool, &ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_epochs = 400,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer res.model.deinit();
 
     const pred = try gpa.alloc(f32, ds.n_rows);
@@ -264,12 +263,12 @@ test "linear model learns the signal and L1 drives coefficients to zero" {
     try testing.expect(try aucOf(gpa, pred, ds.labels) > 0.80);
 
     // Heavy L1 should zero out the three noise features.
-    var sparse = try linear.train(gpa, pool, &ds, null, .{
+    var sparse = try linear.train(gpa, pool, &ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_epochs = 400,
         .alpha = 5000.0,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer sparse.model.deinit();
     try testing.expect(sparse.model.nZero() > 0);
 }
@@ -402,17 +401,16 @@ fn shared() !*const Fixture {
     const pool = try Pool.init(gpa, 2);
     var ds = try synth(gpa, 3000, 31);
 
-    var gb = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 25, .max_depth = 4, .verbose_eval = 0 }, null);
+    var gb = try booster.train(gpa, pool, &ds, null, config.Config.from(.{ .n_rounds = 25, .max_depth = 4, .verbose_eval = 0 }).gbdt, null);
     const a = try model_mod.fromBooster(gpa, &gb.model, try data.Schema.fromDataset(gpa, &ds));
     gb.model.deinit();
 
-    var cfg: config.Config = .{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 };
-    cfg.applyAlgoDefaults(&.{});
-    var rf = try forest.train(gpa, pool, &ds, null, cfg, null);
+    const cfg = config.Config.from(.{ .algo = .random_forest, .n_rounds = 15, .verbose_eval = 0 });
+    var rf = try forest.train(gpa, pool, &ds, null, cfg.random_forest, null);
     const b = try model_mod.fromForest(gpa, &rf.model, try data.Schema.fromDataset(gpa, &ds));
     rf.model.deinit();
 
-    const lr = try linear.train(gpa, pool, &ds, null, .{ .algo = .linear, .lin_epochs = 60, .verbose_eval = 0 }, null);
+    const lr = try linear.train(gpa, pool, &ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 60, .verbose_eval = 0 }).linear, null);
     const c = model_mod.Bundle{
         .gpa = gpa,
         .kind = .linear,
@@ -492,13 +490,13 @@ test "cat_l2 penalises the children and not the parent" {
     for ([2]f32{ 0.0, 1e9 }, 0..) |l2, i| {
         var schema = try data.Schema.fromDataset(gpa, &ds);
         errdefer schema.deinit();
-        var res = try booster.train(gpa, pool, &ds, null, .{
+        var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 15,
             .max_depth = 4,
             .cat_split = .optimal,
             .cat_l2 = l2,
             .verbose_eval = 0,
-        }, null);
+        }).gbdt, null);
         defer res.model.deinit();
         var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
         defer bundle.deinit();
@@ -589,12 +587,12 @@ test "optimal categorical splits actually fire, and ordinal ones never do" {
     for ([2]tree.CatSplit{ .ordinal, .optimal }) |mode| {
         var schema = try data.Schema.fromDataset(gpa, &ds);
         errdefer schema.deinit();
-        var res = try booster.train(gpa, pool, &ds, null, .{
+        var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 30,
             .max_depth = 4,
             .cat_split = mode,
             .verbose_eval = 0,
-        }, null);
+        }).gbdt, null);
         defer res.model.deinit();
         var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
         defer bundle.deinit();
@@ -616,12 +614,12 @@ test "a model carrying categorical subset splits round trips exactly" {
     var schema = try data.Schema.fromDataset(gpa, &ds);
     errdefer schema.deinit();
 
-    var res = try booster.train(gpa, pool, &ds, null, .{
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 30,
         .max_depth = 4,
         .cat_split = .optimal,
         .verbose_eval = 0,
-    }, null);
+    }).gbdt, null);
     defer res.model.deinit();
     var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
     defer bundle.deinit();
@@ -662,7 +660,7 @@ test "linear leaves fire, stay off by default, and round trip exactly" {
     {
         var schema = try data.Schema.fromDataset(gpa, &ds);
         errdefer schema.deinit();
-        var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }, null);
+        var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }).gbdt, null);
         defer res.model.deinit();
         var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
         defer bundle.deinit();
@@ -671,12 +669,12 @@ test "linear leaves fire, stay off by default, and round trip exactly" {
 
     var schema = try data.Schema.fromDataset(gpa, &ds);
     errdefer schema.deinit();
-    var res = try booster.train(gpa, pool, &ds, null, .{
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 20,
         .max_depth = 4,
         .linear_leaves = true,
         .verbose_eval = 0,
-    }, null);
+    }).gbdt, null);
     defer res.model.deinit();
     var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
     defer bundle.deinit();
@@ -711,12 +709,12 @@ test "a linear leaf beats its own constant leaf on the training objective" {
 
     var loss: [2]f64 = undefined;
     for ([2]bool{ false, true }, 0..) |lin, i| {
-        var res = try booster.train(gpa, pool, &ds, null, .{
+        var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 40,
             .max_depth = 4,
             .linear_leaves = lin,
             .verbose_eval = 0,
-        }, null);
+        }).gbdt, null);
         defer res.model.deinit();
         const out = try gpa.alloc(f32, ds.n_rows);
         defer gpa.free(out);
@@ -747,12 +745,12 @@ test "a linear leaf is invariant to rescaling a column" {
         defer ds.deinit();
         for (ds.edges[0]) |*e| e.* *= scale;
 
-        var res = try booster.train(gpa, pool, &ds, null, .{
+        var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 30,
             .max_depth = 4,
             .linear_leaves = true,
             .verbose_eval = 0,
-        }, null);
+        }).gbdt, null);
         defer res.model.deinit();
         out[i] = try gpa.alloc(f32, ds.n_rows);
         res.model.predict(pool, &ds, out[i]);
@@ -816,7 +814,7 @@ test "a corrupt or truncated model file is rejected, not read past" {
     defer pool.deinit();
     var ds = try synth(gpa, 800, 41);
     defer ds.deinit();
-    var res = try booster.train(gpa, pool, &ds, null, .{ .n_rounds = 5, .max_depth = 3, .verbose_eval = 0 }, null);
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{ .n_rounds = 5, .max_depth = 3, .verbose_eval = 0 }).gbdt, null);
     defer res.model.deinit();
     var bundle = try model_mod.fromBooster(gpa, &res.model, try data.Schema.fromDataset(gpa, &ds));
     defer bundle.deinit();
@@ -1164,12 +1162,12 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     var lds = try data.quantise(gpa, pool, &lf, .{ .max_bin = 3 }, .{ .col = 0, .enc = &enc }, &.{});
     defer lds.deinit();
 
-    var res = try linear.train(gpa, pool, &lds, null, .{
+    var res = try linear.train(gpa, pool, &lds, null, config.Config.from(.{
         .algo = .linear,
         .lin_epochs = 5,
         .lin_standardize = false,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer res.model.deinit();
     try testing.expectEqualSlices(f32, lds.means[0], res.model.design.repr[0]);
 }

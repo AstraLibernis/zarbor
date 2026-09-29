@@ -249,27 +249,27 @@ pub const Binner = struct {
     max_bin: u16,
     /// Tracked like `max_bin`, because it changes the binning and a cached
     /// matrix built under a different value is the wrong matrix.
-    max_cat_levels: u32 = (config.Config{}).max_cat_levels,
+    max_cat_levels: u32 = (data.BinParams{}).max_cat_levels,
     policy: data.BinPolicy,
     rebins: usize = 0,
 
     pub fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
-        if (cfg.max_bin != b.max_bin or cfg.bin_policy != b.policy or
-            cfg.max_cat_levels != b.max_cat_levels)
+        if (cfg.bin.max_bin != b.max_bin or cfg.bin.bin_policy != b.policy or
+            cfg.bin.max_cat_levels != b.max_cat_levels)
         {
             const next = try data.quantise(
                 b.gpa,
                 b.pool,
                 b.frame,
-                cfg,
+                cfg.bin,
                 .{ .col = b.label_col, .enc = b.enc },
                 b.drops,
             );
             b.ds.deinit();
             b.ds = next;
-            b.max_bin = cfg.max_bin;
-            b.policy = cfg.bin_policy;
-            b.max_cat_levels = cfg.max_cat_levels;
+            b.max_bin = cfg.bin.max_bin;
+            b.policy = cfg.bin.bin_policy;
+            b.max_cat_levels = cfg.bin.max_cat_levels;
             b.rebins += 1;
         }
         return &b.ds;

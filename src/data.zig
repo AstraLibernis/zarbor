@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
-const config = @import("config.zig");
 
 /// A bin index. Was `u8`, which capped a categorical column at 255 levels and
 /// put ZIP3, city and metro names out of reach entirely. Measured at
@@ -38,6 +37,27 @@ pub const BinPolicy = enum {
     /// spread over what is left -- so a column that is 92% one value spends
     /// its cuts on the other 8% instead of collapsing them all onto the mode.
     greedy,
+};
+
+/// How `quantise` turns columns into bins. Shared by every model.
+pub const BinParams = struct {
+    bin_policy: BinPolicy = .quantile,
+    /// Rows a bin must hold under `greedy` before a cut is placed after it.
+    /// LightGBM's `min_data_in_bin`.
+    min_data_in_bin: u32 = 3,
+    /// Bins per feature. Capped at 256 because bins are stored as u8, which
+    /// is what keeps the feature matrix inside L3.
+    max_bin: u16 = 256,
+    /// Cardinality above which a categorical column is refused outright. The
+    /// bin index can hold far more; this exists so a free-text column cannot
+    /// turn into a histogram nobody can afford. 255 is what the `u8` bin used
+    /// to enforce, and is kept as the default so widening the index changes
+    /// no existing run on its own.
+    max_cat_levels: u32 = 255,
+
+    pub fn validate(p: BinParams) !void {
+        if (p.max_bin < 2 or p.max_bin > 256) return error.BadMaxBin;
+    }
 };
 
 /// Parsing lives in `csv.zig`. Re-exported here because `Frame` and
@@ -655,7 +675,7 @@ pub fn quantise(
     gpa: std.mem.Allocator,
     pool: *Pool,
     src: *const Frame,
-    cfg: config.Config,
+    cfg: BinParams,
     label: ?LabelSpec,
     skip: []const []const u8,
 ) !Dataset {

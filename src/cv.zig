@@ -211,6 +211,7 @@ pub fn crossValidate(
     n_folds: u32,
     opts: Opts,
 ) !Outcome {
+    try cfg.validate();
     const run_folds = if (opts.use_folds == 0) n_folds else @min(opts.use_folds, n_folds);
 
     const perm = try gpa.alloc(u32, full.n_rows);
@@ -250,17 +251,17 @@ pub fn crossValidate(
 
         switch (cfg.algo) {
             .gbdt => {
-                var res = try booster.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                var res = try booster.train(gpa, pool, &train_ds, null, cfg.gbdt, opts.progress);
                 defer res.model.deinit();
                 res.model.predict(pool, &valid_ds, scores);
             },
             .random_forest => {
-                var res = try forest.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                var res = try forest.train(gpa, pool, &train_ds, null, cfg.random_forest, opts.progress);
                 defer res.model.deinit();
                 res.model.predict(pool, &valid_ds, scores);
             },
             .linear => {
-                var res = try linear.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+                var res = try linear.train(gpa, pool, &train_ds, null, cfg.linear, opts.progress);
                 defer res.model.deinit();
                 res.model.predict(pool, &valid_ds, scores);
             },
@@ -271,14 +272,14 @@ pub fn crossValidate(
         };
         try scored.appendSlice(gpa, perm[head..]);
 
-        per_fold[k] = switch (cfg.objective) {
+        per_fold[k] = switch (cfg.objective()) {
             .logistic => try metric.auc(gpa, scores, valid_ds.labels),
             .squared_error => metric.rmse(scores, valid_ds.labels),
         };
         if (opts.progress) |w| {
             try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}\n", .{
                 k,               head,
-                valid_ds.n_rows, if (cfg.objective == .logistic) "auc" else "rmse",
+                valid_ds.n_rows, if (cfg.objective() == .logistic) "auc" else "rmse",
                 per_fold[k],
             });
             try w.flush();
@@ -306,7 +307,7 @@ pub fn crossValidate(
         ps[i] = src[row];
         ys[i] = full.labels[row];
     }
-    const pooled = switch (cfg.objective) {
+    const pooled = switch (cfg.objective()) {
         .logistic => try metric.auc(gpa, ps, ys),
         .squared_error => metric.rmse(ps, ys),
     };

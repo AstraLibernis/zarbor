@@ -63,7 +63,7 @@ test "rendered values round-trip through the config flag parser" {
     var buf: [64]u8 = undefined;
     const s = try p.render(7.4, &buf);
     try testing.expect(try config.applyFlag(&cfg, p.name, s));
-    try testing.expectEqual(@as(u32, 7), cfg.max_depth);
+    try testing.expectEqual(@as(u32, 7), cfg.gbdt.tree.max_depth);
 }
 
 test "grid points span the whole axis inclusively" {
@@ -315,7 +315,7 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
         .drops = &.{},
         .ds = try data.quantise(gpa, p, &frame, .{ .max_bin = 64 }, null, &.{}),
         .max_bin = 64,
-        .policy = (config.Config{}).bin_policy,
+        .policy = (data.BinParams{}).bin_policy,
     };
     defer b.ds.deinit();
 
@@ -325,7 +325,7 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
     // 40 levels. A limit of 32 cannot admit them.
     try testing.expectError(
         error.CategoricalTooWide,
-        b.get(.{ .max_bin = 64, .max_cat_levels = 32 }),
+        b.get(config.Config.from(.{ .max_bin = 64, .max_cat_levels = 32 })),
     );
 
     // The cache must be untouched: same rows, and still the width we loaded.
@@ -333,7 +333,7 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
     try testing.expectEqual(before, b.ds.n_rows);
 
     // And a later valid request must still rebin normally.
-    const ds = try b.get(.{ .max_bin = 128 });
+    const ds = try b.get(config.Config.from(.{ .max_bin = 128 }));
     try testing.expectEqual(before, ds.n_rows);
     try testing.expectEqual(@as(usize, 1), b.rebins);
 }

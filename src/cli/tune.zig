@@ -166,8 +166,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     if (n_folds < 2) return error.TooFewFolds;
     if (eta < 2) return error.EtaTooSmall;
 
-    cfg.applyAlgoDefaults(explicit.items);
-    cfg.verbose_eval = 0;
+    cfg.set("verbose_eval", 0);
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -208,15 +207,15 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         .label_col = label_col,
         .enc = &enc,
         .drops = drops.items,
-        .ds = try data.quantise(gpa, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items),
-        .max_bin = cfg.max_bin,
-        .policy = cfg.bin_policy,
+        .ds = try data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items),
+        .max_bin = cfg.bin.max_bin,
+        .policy = cfg.bin.bin_policy,
     };
     defer binner.ds.deinit();
     // Row order, labels and feature count do not change with binning, so a
     // view taken now stays correct across every re-bin.
     const full = &binner.ds;
-    try enc.validate(full.labels, cfg.objective);
+    try enc.validate(full.labels, cfg.objective());
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
     const prep_ms = @divTrunc(
         std.Io.Timestamp.now(io, .awake).toNanoseconds() - t0,
@@ -228,7 +227,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const fold_of = if (group_idx) |gi|
         try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fold_seed)
     else
-        try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective == .logistic);
+        try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective() == .logistic);
     defer gpa.free(fold_of);
     const oof = try gpa.alloc(f32, full.n_rows);
     defer gpa.free(oof);
@@ -352,7 +351,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             while (done < @min(total, trials_want)) : (done += 1) {
                 for (x, axes, digit) |*v, ax, d| v.* = ax[d];
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective);
+                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
                 var d: usize = 0;
                 while (d < digit.len) : (d += 1) {
                     digit[d] += 1;
@@ -366,7 +365,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             for (0..trials_want) |_| {
                 for (x, space) |*v, p| v.* = p.sample(r);
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective);
+                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
             }
         },
         .bayes => {
@@ -375,10 +374,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 if (i < warmup or results.items.len < 4) {
                     for (x, space) |*v, p| v.* = p.sample(r);
                 } else {
-                    try tpe.propose(gpa, r, space, results.items, cfg.objective, x);
+                    try tpe.propose(gpa, r, space, results.items, cfg.objective(), x);
                 }
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective);
+                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
             }
         },
         .bandit => {
@@ -409,7 +408,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                         // Only a full-fidelity result is comparable with the
                         // other strategies, so only those are recorded.
                         if (o.folds_run == n_folds)
-                            try record(arena, out, ev, &results, &best, xs, o, cfg.objective);
+                            try record(arena, out, ev, &results, &best, xs, o, cfg.objective());
                     }
                 }
                 if (scored.items.len == 0) break;
@@ -420,7 +419,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                         return cv.better(c.obj, a.s, b.s);
                     }
                 };
-                std.sort.pdq(Scored, scored.items, S{ .obj = cfg.objective }, S.lessThan);
+                std.sort.pdq(Scored, scored.items, S{ .obj = cfg.objective() }, S.lessThan);
 
                 if (rung_folds >= n_folds) break;
                 const keep = @max(@as(usize, 1), scored.items.len / eta);
@@ -448,7 +447,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             return cv.better(c.obj, c.t[a].score, c.t[b].score);
         }
     };
-    std.sort.pdq(u32, order, Ctx{ .t = results.items, .obj = cfg.objective }, Ctx.lessThan);
+    std.sort.pdq(u32, order, Ctx{ .t = results.items, .obj = cfg.objective() }, Ctx.lessThan);
 
     const win = results.items[order[0]];
     try out.print("\nbest     {d:.6}   {d} trials", .{ win.score, results.items.len });
@@ -495,7 +494,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 const folds2 = if (group_idx) |gi|
                     try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fs)
                 else
-                    try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.objective == .logistic);
+                    try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.objective() == .logistic);
                 defer gpa.free(folds2);
                 var ev2 = ev;
                 ev2.fold_of = folds2;

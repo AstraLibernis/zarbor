@@ -8,13 +8,11 @@
 //! names for the same reason.
 
 const std = @import("std");
+const data = @import("data.zig");
+const booster = @import("booster.zig");
+const forest = @import("forest.zig");
+const linear = @import("linear.zig");
 const Objective = @import("objective.zig").Objective;
-const GrowPolicy = @import("tree.zig").GrowPolicy;
-const CatSplit = @import("tree.zig").CatSplit;
-const BinPolicy = @import("data.zig").BinPolicy;
-const Sampling = @import("booster.zig").Sampling;
-const GossRank = @import("booster.zig").GossRank;
-const LinSolver = @import("linear.zig").LinSolver;
 
 /// Which model to fit. All three share the binning, missing-value and
 /// categorical handling in `data.zig`; they differ in what they do with it.
@@ -39,240 +37,119 @@ fn parseInto(comptime T: type, val: []const u8) !T {
     };
 }
 
-/// Set a field by name from its string form. Returns false when `key` names
-/// no field, which lets a caller fall through to its own flags.
+/// Set a field by name from its string form, in every group that has it
+/// (`lambda` reaches the trees of both ensembles and the linear model).
+/// Returns false when `key` names no field, which lets a caller fall through
+/// to its own flags.
 ///
 /// Every command that accepts hyperparameters goes through this, so the flag
-/// surface cannot drift from the struct -- and a tuner can set a field it has
+/// surface cannot drift from the structs -- and a tuner can set a field it has
 /// never heard of by rendering a value and passing the name straight through.
 pub fn applyFlag(cfg: *Config, key: []const u8, val: []const u8) !bool {
-    inline for (@typeInfo(Config).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, key)) {
-            @field(cfg, f.name) = try parseInto(f.type, val);
-            return true;
+    return applyIn(cfg, key, val);
+}
+
+fn applyIn(ptr: anytype, key: []const u8, val: []const u8) !bool {
+    var found = false;
+    inline for (@typeInfo(@TypeOf(ptr.*)).@"struct".fields) |f| {
+        if (@typeInfo(f.type) == .@"struct") {
+            if (try applyIn(&@field(ptr, f.name), key, val)) found = true;
+        } else if (std.mem.eql(u8, f.name, key)) {
+            @field(ptr, f.name) = try parseInto(f.type, val);
+            found = true;
         }
     }
-    return false;
+    return found;
 }
 
 /// Whether `key` names a Config field at all, without setting it.
 pub fn hasField(key: []const u8) bool {
-    inline for (@typeInfo(Config).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, key)) return true;
+    return hasIn(Config, key);
+}
+
+fn hasIn(comptime T: type, key: []const u8) bool {
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        if (@typeInfo(f.type) == .@"struct") {
+            if (hasIn(f.type, key)) return true;
+        } else if (std.mem.eql(u8, f.name, key)) return true;
     }
     return false;
 }
 
+/// Every setting, grouped by who reads it. Each model's group carries that
+/// model's own defaults; a flag sets its name in every group that has it.
 pub const Config = struct {
-    // ---- which model -------------------------------------------------
     algo: Algo = .gbdt,
-
-    // ---- ensemble ----------------------------------------------------
-    /// Number of boosting rounds (trees) to fit. For `random_forest` this is
-    /// the number of bagged trees, fitted independently.
-    n_rounds: u32 = 500,
-    /// Shrinkage applied to each tree's leaf values. XGBoost's `eta`.
-    /// Forced to 1.0 for `random_forest`, which averages instead of shrinking.
-    learning_rate: f32 = 0.1,
-    /// Initial raw score for every row. For logistic this is a log-odds.
-    /// Null means "derive from the training label mean", which is what you
-    /// almost always want.
-    base_score: ?f32 = null,
-
-    // ---- tree shape --------------------------------------------------
-    grow_policy: GrowPolicy = .depthwise,
-    /// Hard depth cap. 0 disables the cap, which is only safe when
-    /// `max_leaves` is set — otherwise the histogram budget is unbounded.
-    max_depth: u32 = 6,
-    /// Leaf cap. 0 disables.
-    max_leaves: u32 = 0,
-    /// Minimum number of training rows that must land in a leaf.
-    min_child_samples: u32 = 20,
-    /// Minimum summed hessian in a leaf. For logistic this is a measure of
-    /// confidence mass, not row count, and is the more principled of the two.
-    min_child_weight: f32 = 1.0,
-
-    // ---- categorical splits -------------------------------------------
-    /// How a categorical column's levels are partitioned. Defaults to
-    /// `ordinal`, which is what every model written before this existed used.
-    cat_split: CatSplit = .ordinal,
-    /// Added to a level's hessian in the sort key, so a level carrying little
-    /// mass cannot reach an extreme of the order on a handful of rows.
-    cat_smooth: f32 = 10.0,
-    /// Extra L2 applied to the gain of a categorical split only. A K-way
-    /// choice has more ways to fit noise than a single threshold does.
-    cat_l2: f32 = 10.0,
-    /// Cap on how many levels may land in the left child. Further bounded by
-    /// half the levels that took part, as LightGBM does.
-    max_cat_threshold: u32 = 32,
-    /// A categorical with no more bins than this is split one level against
-    /// the rest instead of by a sorted partition, and without `cat_l2`. At
-    /// four levels or fewer the partition search has little to search.
-    max_cat_to_onehot: u32 = 4,
-    /// Rows that must accumulate since the last evaluated cut before another
-    /// is considered, and a floor on the right child. This paces the scan; it
-    /// is not a filter on which levels take part, which is what `cat_smooth`
-    /// does.
-    min_data_per_group: u32 = 100,
-    /// Cardinality above which a categorical column is refused outright. The
-    /// bin index can hold far more; this exists so a free-text column cannot
-    /// turn into a histogram nobody can afford. 255 is what the `u8` bin used
-    /// to enforce, and is kept as the default so widening the index changes
-    /// no existing run on its own.
-    max_cat_levels: u32 = 255,
-
-    // ---- linear leaves -------------------------------------------------
-    /// Fit an affine function of the root-to-leaf path's numeric features in
-    /// each leaf instead of emitting a constant. Off by default: a constant
-    /// leaf is what every model written before this existed used.
-    linear_leaves: bool = false,
-    /// Ridge on the leaf's slope terms. The intercept is left unpenalised, so
-    /// setting this very high recovers the constant leaf rather than shrinking
-    /// the leaf toward zero.
-    lin_leaf_lambda: f32 = 1.0,
-    /// Cap on how many path features enter one leaf's fit.
-    lin_leaf_max_terms: u32 = 8,
-
-    // ---- regularisation ----------------------------------------------
-    /// L2 penalty on leaf weights. Appears as lambda in the gain formula.
-    lambda: f32 = 1.0,
-    /// L1 penalty on leaf weights, applied by soft-thresholding the gradient.
-    alpha: f32 = 0.0,
-    /// Minimum gain required to accept a split. XGBoost's `gamma`.
-    min_split_gain: f32 = 0.0,
-    /// Cap on the absolute leaf weight. 0 disables. Stabilises logistic loss
-    /// on heavily imbalanced data.
-    max_delta_step: f32 = 0.0,
-
-    // ---- sampling ----------------------------------------------------
-    /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
-    sampling: Sampling = .uniform,
-    /// Ranking key for GOSS. Defaults to the paper's `|g|`, which measures
-    /// better here; `gradient_hessian` is LightGBM's. Ignored unless
-    /// `sampling = .goss`.
-    goss_rank: GossRank = .gradient,
-    /// Fraction of rows sampled per tree. Without replacement unless
-    /// `bootstrap` is set. Ignored when `sampling = .goss`.
-    subsample: f32 = 1.0,
-    /// Sample rows *with* replacement. This is what makes a bagged ensemble a
-    /// random forest rather than a subsample ensemble; on by default for
-    /// `random_forest` and off for everything else.
-    bootstrap: bool = false,
-    /// GOSS: fraction of rows kept for having the largest |gradient|.
-    top_rate: f32 = 0.2,
-    /// GOSS: fraction of the *remaining* rows sampled uniformly.
-    other_rate: f32 = 0.1,
-    /// Fraction of features sampled once per tree.
-    colsample_bytree: f32 = 1.0,
-    /// Fraction of the per-tree features sampled again at each depth level.
-    colsample_bylevel: f32 = 1.0,
-    /// Fraction of the per-level features sampled again at each split.
-    colsample_bynode: f32 = 1.0,
-
-    // ---- binning -----------------------------------------------------
-    bin_policy: BinPolicy = .quantile,
-    /// Rows a bin must hold under `greedy` before a cut is placed after it.
-    /// LightGBM's `min_data_in_bin`.
-    min_data_in_bin: u32 = 3,
-    /// Bins per feature. Capped at 256 because bins are stored as u8, which
-    /// is what keeps the feature matrix inside L3.
-    max_bin: u16 = 256,
-
-    // ---- objective ---------------------------------------------------
-    objective: Objective = .logistic,
-    /// Multiplier on positive-class gradients. >1 upweights the minority
-    /// class for imbalanced binary problems.
-    scale_pos_weight: f32 = 1.0,
-
-    // ---- linear model ------------------------------------------------
-    /// Which optimiser fits the coefficients. Linear only.
-    lin_solver: LinSolver = .lbfgs,
-    /// Maximum full-batch iterations. `lbfgs` normally converges in a few
-    /// dozen and stops on `lin_tol` well short of this; `adam` usually needs
-    /// all of them. Linear only.
-    lin_epochs: u32 = 300,
-    /// Adam step size. Ignored by `lbfgs`, which gets its step length from a
-    /// line search rather than from a constant. Linear only.
-    lin_lr: f32 = 0.05,
-    /// Stop when the largest absolute coefficient change in an iteration
-    /// falls below this. Same units for both solvers.
-    lin_tol: f32 = 1e-7,
-    /// Standardise each design column to zero mean and unit variance before
-    /// fitting. Off makes the penalties scale-dependent and is rarely right.
-    lin_standardize: bool = true,
-
-    // ---- control -----------------------------------------------------
-    /// Stop when the validation metric has not improved for this many rounds.
-    /// 0 disables early stopping. Not meaningful for `random_forest`, whose
-    /// trees are independent, or for `linear`.
-    early_stopping_rounds: u32 = 0,
-    seed: u64 = 0,
     /// Worker threads. 0 means "one per logical core".
     n_threads: u32 = 0,
-    /// Print per-round metrics every N rounds. 0 silences training.
-    verbose_eval: u32 = 10,
+    bin: data.BinParams = .{},
+    gbdt: booster.Params = .{},
+    random_forest: forest.Params = .{},
+    linear: linear.Params = .{},
 
-    /// Apply the defaults that define each algorithm, for any field the user
-    /// left at the shared default. Call once, before `validate`.
+    /// A Config from flat `name = value` pairs, set as flags would be:
+    /// `Config.from(.{ .algo = .linear, .lambda = 2 })`.
+    pub fn from(flat: anytype) Config {
+        var c: Config = .{};
+        inline for (@typeInfo(@TypeOf(flat)).@"struct".fields) |f| c.set(f.name, @field(flat, f.name));
+        return c;
+    }
+
+    /// Set `name` in every group that has it, as `applyFlag` does.
+    pub fn set(c: *Config, comptime name: []const u8, value: anytype) void {
+        comptime if (!hasIn(Config, name)) @compileError("no config field named " ++ name);
+        setIn(c, name, value);
+    }
+
+    fn setIn(ptr: anytype, comptime name: []const u8, value: anytype) void {
+        inline for (@typeInfo(@TypeOf(ptr.*)).@"struct".fields) |f| {
+            if (comptime @typeInfo(f.type) == .@"struct") {
+                if (comptime hasIn(f.type, name)) setIn(&@field(ptr, f.name), name, value);
+            } else if (comptime std.mem.eql(u8, f.name, name)) {
+                @field(ptr, f.name) = value;
+            }
+        }
+    }
+
+    pub fn objective(c: Config) Objective {
+        return switch (c.algo) {
+            .gbdt => c.gbdt.objective,
+            .random_forest => c.random_forest.objective,
+            .linear => c.linear.objective,
+        };
+    }
+
     /// The standard name of the model this configuration fits, so the run
     /// says what it is instead of making the reader reassemble it from
     /// flags. `linear` is the case that needed it: `--objective` silently
     /// switches between the two textbook simple models.
     pub fn modelName(c: Config) []const u8 {
+        const l = c.linear;
         return switch (c.algo) {
-            .gbdt => switch (c.grow_policy) {
+            .gbdt => switch (c.gbdt.tree.grow_policy) {
                 .depthwise => "gradient-boosted trees (depthwise, XGBoost-style)",
                 .lossguide => "gradient-boosted trees (leafwise, LightGBM-style)",
             },
             .random_forest => "random forest (bagged unshrunk trees)",
-            .linear => switch (c.objective) {
-                .logistic => if (c.alpha > 0 and c.lambda > 0)
+            .linear => switch (l.objective) {
+                .logistic => if (l.alpha > 0 and l.lambda > 0)
                     "logistic regression (elastic net)"
-                else if (c.alpha > 0)
+                else if (l.alpha > 0)
                     "logistic regression (L1 / lasso)"
-                else if (c.lambda > 0)
+                else if (l.lambda > 0)
                     "logistic regression (L2 / ridge)"
                 else
                     "logistic regression (unpenalised)",
-                .squared_error => if (c.alpha > 0 and c.lambda > 0)
+                .squared_error => if (l.alpha > 0 and l.lambda > 0)
                     "linear regression (elastic net)"
-                else if (c.alpha > 0)
+                else if (l.alpha > 0)
                     "linear regression (L1 / lasso)"
-                else if (c.lambda > 0)
+                else if (l.lambda > 0)
                     "linear regression (L2 / ridge)"
                 else
                     "linear regression (ordinary least squares)",
             },
         };
-    }
-
-    pub fn applyAlgoDefaults(c: *Config, explicit: []const []const u8) void {
-        const set = struct {
-            fn has(ex: []const []const u8, name: []const u8) bool {
-                for (ex) |e| if (std.mem.eql(u8, e, name)) return true;
-                return false;
-            }
-        };
-        switch (c.algo) {
-            .gbdt, .linear => {},
-            .random_forest => {
-                // A forest averages full-strength trees; shrinking them would
-                // make it a very slow boosted model with no boosting.
-                if (!set.has(explicit, "learning_rate")) c.learning_rate = 1.0;
-                if (!set.has(explicit, "bootstrap")) c.bootstrap = true;
-                // Forests want deep, low-bias trees; the ensemble average is
-                // what controls variance. Leaf-capped so the histogram budget
-                // stays bounded.
-                if (!set.has(explicit, "max_depth")) c.max_depth = 0;
-                if (!set.has(explicit, "max_leaves")) c.max_leaves = 1024;
-                if (!set.has(explicit, "min_child_samples")) c.min_child_samples = 1;
-                if (!set.has(explicit, "min_child_weight")) c.min_child_weight = 0.0;
-                if (!set.has(explicit, "lambda")) c.lambda = 0.0;
-                // sqrt(p) features per split is the classic Breiman default;
-                // applied per node by the caller, which knows p.
-                if (!set.has(explicit, "n_rounds")) c.n_rounds = 300;
-            },
-        }
     }
 
     /// Breiman's per-split feature default, which needs the feature count and
@@ -287,54 +164,20 @@ pub const Config = struct {
         for (explicit) |e| if (std.mem.eql(u8, e, "colsample_bynode")) return;
         if (n_features == 0) return;
         const p_f: f32 = @floatFromInt(n_features);
-        const want: f32 = switch (c.objective) {
+        const want: f32 = switch (c.random_forest.objective) {
             .logistic => @sqrt(p_f),
             .squared_error => p_f / 3.0,
         };
-        c.colsample_bynode = std.math.clamp(want / p_f, 1.0 / p_f, 1.0);
+        c.random_forest.tree.colsample_bynode = std.math.clamp(want / p_f, 1.0 / p_f, 1.0);
     }
 
+    /// Binning plus the chosen model's own checks.
     pub fn validate(c: Config) !void {
-        if (c.n_rounds == 0) return error.NoRounds;
-        if (c.max_bin < 2 or c.max_bin > 256) return error.BadMaxBin;
-
-        if (c.algo == .linear) {
-            if (c.lin_epochs == 0) return error.NoEpochs;
-            if (c.lin_lr <= 0) return error.BadLinearLr;
-            if (c.lambda < 0 or c.alpha < 0) return error.NegativeRegularisation;
-            return;
+        try c.bin.validate();
+        switch (c.algo) {
+            .gbdt => try c.gbdt.validate(),
+            .random_forest => try c.random_forest.validate(),
+            .linear => try c.linear.validate(),
         }
-
-        if (c.learning_rate <= 0 or c.learning_rate > 1) return error.BadLearningRate;
-        if (c.subsample <= 0 or c.subsample > 1) return error.BadSubsample;
-        if (c.colsample_bytree <= 0 or c.colsample_bytree > 1) return error.BadColsample;
-        if (c.colsample_bylevel <= 0 or c.colsample_bylevel > 1) return error.BadColsample;
-        if (c.colsample_bynode <= 0 or c.colsample_bynode > 1) return error.BadColsample;
-        if (c.lambda < 0 or c.alpha < 0) return error.NegativeRegularisation;
-
-        // Bagging with replacement makes a row's gradient contribute more
-        // than once, which is meaningless when the next round's gradient is
-        // computed from a single accumulated score per row.
-        if (c.bootstrap and c.algo == .gbdt) return error.BootstrapWithBoosting;
-
-        if (c.sampling == .goss) {
-            if (c.top_rate <= 0 or c.top_rate >= 1) return error.BadTopRate;
-            if (c.other_rate <= 0 or c.other_rate >= 1) return error.BadOtherRate;
-            if (c.top_rate + c.other_rate > 1) return error.GossRatesExceedOne;
-            if (c.bootstrap) return error.GossWithBootstrap;
-        }
-
-        // An unbounded tree is only safe if *something* caps its leaves.
-        if (c.max_depth == 0 and c.max_leaves == 0) return error.UnboundedTree;
-        if (c.grow_policy == .lossguide and c.max_leaves == 0 and c.max_depth == 0)
-            return error.UnboundedLossguide;
-    }
-
-    /// Upper bound on leaves for allocation sizing.
-    pub fn leafBudget(c: Config) u32 {
-        if (c.max_leaves != 0) return c.max_leaves;
-        // depthwise with a depth cap: 2^depth leaves, clamped to something sane.
-        const d = @min(c.max_depth, 20);
-        return @as(u32, 1) << @intCast(d);
     }
 };

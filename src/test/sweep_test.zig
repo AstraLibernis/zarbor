@@ -113,10 +113,10 @@ const Fix = struct {
         f.ds.deinit();
         f.pool.deinit();
     }
-    fn fit(f: *Fix, cfg: config.Config) !booster.TrainResult {
-        var c = cfg;
-        c.verbose_eval = 0;
-        return booster.train(f.gpa, f.pool, &f.ds, null, c, null);
+    fn fit(f: *Fix, cfg: anytype) !booster.TrainResult {
+        var c = if (@TypeOf(cfg) == config.Config) cfg else config.Config.from(cfg);
+        c.set("verbose_eval", 0);
+        return booster.train(f.gpa, f.pool, &f.ds, null, c.gbdt, null);
     }
     fn auc(f: *Fix, m: *const booster.Model) !f64 {
         const p = try f.gpa.alloc(f32, f.ds.n_rows);
@@ -367,12 +367,12 @@ test "early_stopping_rounds: stops before n_rounds on unlearnable noise" {
     var prng: std.Random.DefaultPrng = .init(99);
     prng.random().shuffle(f32, valid_ds.labels);
 
-    var r = try booster.train(gpa, pool, &train_ds, &valid_ds, .{
+    var r = try booster.train(gpa, pool, &train_ds, &valid_ds, config.Config.from(.{
         .n_rounds = 300,
         .max_depth = 4,
         .early_stopping_rounds = 5,
         .verbose_eval = 0,
-    }, null);
+    }).gbdt, null);
     defer r.model.deinit();
     // `rounds_run` is the one that proves stopping fired; `n_rounds` alone is
     // also satisfied by the post-hoc trim, which a mutation test caught.
@@ -383,23 +383,23 @@ test "early_stopping_rounds: stops before n_rounds on unlearnable noise" {
 test "seed: different seeds give different models, same seed is repeatable" {
     var f = try Fix.init(testing.allocator, 3000, 19);
     defer f.deinit();
-    const base = config.Config{ .n_rounds = 5, .max_depth = 4, .subsample = 0.5, .verbose_eval = 0 };
+    const base = config.Config.from(.{ .n_rounds = 5, .max_depth = 4, .subsample = 0.5, .verbose_eval = 0 });
 
     var a = try f.fit(blk: {
         var c = base;
-        c.seed = 1;
+        c.set("seed", 1);
         break :blk c;
     });
     defer a.model.deinit();
     var b = try f.fit(blk: {
         var c = base;
-        c.seed = 2;
+        c.set("seed", 2);
         break :blk c;
     });
     defer b.model.deinit();
     var a2 = try f.fit(blk: {
         var c = base;
-        c.seed = 1;
+        c.set("seed", 1);
         break :blk c;
     });
     defer a2.model.deinit();
@@ -415,13 +415,13 @@ test "n_threads: thread count changes nothing about the result" {
     var ds = try synth(gpa, 5000, 20);
     defer ds.deinit();
 
-    const cfg = config.Config{ .n_rounds = 25, .max_depth = 5, .verbose_eval = 0 };
+    const cfg = config.Config.from(.{ .n_rounds = 25, .max_depth = 5, .verbose_eval = 0 });
 
     var weights: [2][]f32 = undefined;
     for ([_]u32{ 1, 8 }, 0..) |nt, i| {
         const pool = try Pool.init(gpa, nt);
         defer pool.deinit();
-        var r = try booster.train(gpa, pool, &ds, null, cfg, null);
+        var r = try booster.train(gpa, pool, &ds, null, cfg.gbdt, null);
         defer r.model.deinit();
         var list: std.ArrayList(f32) = .empty;
         for (r.model.trees.items) |t| for (t.nodes) |n| {
@@ -443,9 +443,9 @@ test "lin_epochs and lin_tol: more budget converges further, a loose tol stops e
     var f = try Fix.init(gpa, 3000, 21);
     defer f.deinit();
 
-    var short = try linear.train(gpa, f.pool, &f.ds, null, .{ .algo = .linear, .lin_epochs = 5, .verbose_eval = 0 }, null);
+    var short = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 5, .verbose_eval = 0 }).linear, null);
     defer short.model.deinit();
-    var long = try linear.train(gpa, f.pool, &f.ds, null, .{ .algo = .linear, .lin_epochs = 400, .verbose_eval = 0 }, null);
+    var long = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 400, .verbose_eval = 0 }).linear, null);
     defer long.model.deinit();
 
     const ps = try gpa.alloc(f32, f.ds.n_rows);
@@ -457,7 +457,7 @@ test "lin_epochs and lin_tol: more budget converges further, a loose tol stops e
     try testing.expect(metric.loglossProb(pl, f.ds.labels) < metric.loglossProb(ps, f.ds.labels));
 
     // A tolerance this loose must trip the convergence break immediately.
-    var early = try linear.train(gpa, f.pool, &f.ds, null, .{ .algo = .linear, .lin_epochs = 400, .lin_tol = 1e9, .verbose_eval = 0 }, null);
+    var early = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 400, .lin_tol = 1e9, .verbose_eval = 0 }).linear, null);
     defer early.model.deinit();
     try testing.expect(early.epochs < 400);
 }
@@ -466,10 +466,10 @@ test "lin_lr: a larger step moves the coefficients further in one Adam epoch" {
     const gpa = testing.allocator;
     var f = try Fix.init(gpa, 2000, 22);
     defer f.deinit();
-    const base = config.Config{ .algo = .linear, .lin_solver = .adam, .lin_epochs = 1, .verbose_eval = 0 };
-    var slow = try linear.train(gpa, f.pool, &f.ds, null, mix(base, 0.001), null);
+    const base = config.Config.from(.{ .algo = .linear, .lin_solver = .adam, .lin_epochs = 1, .verbose_eval = 0 });
+    var slow = try linear.train(gpa, f.pool, &f.ds, null, mix(base, 0.001).linear, null);
     defer slow.model.deinit();
-    var fast = try linear.train(gpa, f.pool, &f.ds, null, mix(base, 0.5), null);
+    var fast = try linear.train(gpa, f.pool, &f.ds, null, mix(base, 0.5).linear, null);
     defer fast.model.deinit();
 
     var s: f32 = 0;
@@ -481,7 +481,7 @@ test "lin_lr: a larger step moves the coefficients further in one Adam epoch" {
 
 fn mix(base: config.Config, lr: f32) config.Config {
     var c = base;
-    c.lin_lr = lr;
+    c.set("lin_lr", lr);
     return c;
 }
 
@@ -497,19 +497,19 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
 
     // Adam gets the same 40 passes L-BFGS gets. The whole point of a
     // curvature estimate is that those passes go much further.
-    var adam = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var adam = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .adam,
         .lin_epochs = 40,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer adam.model.deinit();
-    var lb = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var lb = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .lbfgs,
         .lin_epochs = 40,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer lb.model.deinit();
     adam.model.predict(f.pool, &f.ds, p);
     lb.model.predict(f.pool, &f.ds, q);
@@ -520,12 +520,12 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
     // times the budget must find nothing further and the solver must stop on
     // its own. Steepest descent with the same line search converges linearly
     // and would still be moving here.
-    var plenty = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var plenty = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .lbfgs,
         .lin_epochs = 400,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer plenty.model.deinit();
     try testing.expect(plenty.epochs < 400);
     const r = try gpa.alloc(f32, f.ds.n_rows);
@@ -538,13 +538,13 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
     // `lin_lr` is an Adam knob. A solver that takes its step from a line
     // search must produce the same coefficients whatever it is set to --
     // otherwise the flag is lying about what it controls.
-    var other = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var other = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .lbfgs,
         .lin_epochs = 40,
         .lin_lr = 0.5,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer other.model.deinit();
     for (lb.model.w, other.model.w) |a, b| try testing.expectEqual(a, b);
     try testing.expectEqual(lb.model.intercept, other.model.intercept);
@@ -595,13 +595,13 @@ test "alpha under lbfgs lands on a genuine L1 optimum" {
 
     var saw_partial = false;
     for ([_]f32{ 25, 50, 100, 200 }) |alpha| {
-        var r = try linear.train(gpa, fx.pool, &fx.ds, null, .{
+        var r = try linear.train(gpa, fx.pool, &fx.ds, null, config.Config.from(.{
             .algo = .linear,
             .lin_epochs = 600,
             .alpha = alpha,
             .lambda = lambda,
             .verbose_eval = 0,
-        }, null);
+        }).linear, null);
         defer r.model.deinit();
 
         const nz = r.model.nZero();
@@ -683,7 +683,7 @@ test "goss_rank makes no difference on squared error, where h is 1" {
     const gpa = testing.allocator;
     var f = try Fix.init(gpa, 4000, 77);
     defer f.deinit();
-    const cfg = config.Config{
+    const cfg = config.Config.from(.{
         .objective = .squared_error,
         .n_rounds = 60,
         .learning_rate = 0.1,
@@ -692,10 +692,10 @@ test "goss_rank makes no difference on squared error, where h is 1" {
         .top_rate = 0.2,
         .other_rate = 0.1,
         .verbose_eval = 0,
-    };
-    var a = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds, .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth, .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate, .goss_rank = .gradient });
+    });
+    var a = try f.fit(.{ .objective = cfg.gbdt.objective, .n_rounds = cfg.gbdt.n_rounds, .learning_rate = cfg.gbdt.tree.learning_rate, .max_depth = cfg.gbdt.tree.max_depth, .sampling = .goss, .top_rate = cfg.gbdt.top_rate, .other_rate = cfg.gbdt.other_rate, .goss_rank = .gradient });
     defer a.model.deinit();
-    var b = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds, .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth, .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate, .goss_rank = .gradient_hessian });
+    var b = try f.fit(.{ .objective = cfg.gbdt.objective, .n_rounds = cfg.gbdt.n_rounds, .learning_rate = cfg.gbdt.tree.learning_rate, .max_depth = cfg.gbdt.tree.max_depth, .sampling = .goss, .top_rate = cfg.gbdt.top_rate, .other_rate = cfg.gbdt.other_rate, .goss_rank = .gradient_hessian });
     defer b.model.deinit();
     const p1 = try gpa.alloc(f32, f.ds.n_rows);
     defer gpa.free(p1);
@@ -711,12 +711,12 @@ test "lin_standardize: both settings learn" {
     var f = try Fix.init(gpa, 3000, 24);
     defer f.deinit();
     for ([_]bool{ true, false }) |std_on| {
-        var r = try linear.train(gpa, f.pool, &f.ds, null, .{
+        var r = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
             .algo = .linear,
             .lin_epochs = 300,
             .lin_standardize = std_on,
             .verbose_eval = 0,
-        }, null);
+        }).linear, null);
         defer r.model.deinit();
         const p = try gpa.alloc(f32, f.ds.n_rows);
         defer gpa.free(p);
@@ -729,21 +729,21 @@ test "lin_standardize: both settings learn" {
 
 test "validate rejects every documented impossible combination" {
     const bad = [_]config.Config{
-        .{ .n_rounds = 0 },
-        .{ .learning_rate = 0 },
-        .{ .learning_rate = 1.5 },
-        .{ .max_bin = 1 },
-        .{ .subsample = 0 },
-        .{ .subsample = 1.5 },
-        .{ .colsample_bytree = 0 },
-        .{ .lambda = -1 },
-        .{ .alpha = -1 },
-        .{ .max_depth = 0, .max_leaves = 0 },
-        .{ .algo = .gbdt, .bootstrap = true },
-        .{ .sampling = .goss, .top_rate = 0.9, .other_rate = 0.9 },
-        .{ .sampling = .goss, .top_rate = 0 },
-        .{ .algo = .linear, .lin_epochs = 0 },
-        .{ .algo = .linear, .lin_lr = 0 },
+        config.Config.from(.{ .n_rounds = 0 }),
+        config.Config.from(.{ .learning_rate = 0 }),
+        config.Config.from(.{ .learning_rate = 1.5 }),
+        config.Config.from(.{ .max_bin = 1 }),
+        config.Config.from(.{ .subsample = 0 }),
+        config.Config.from(.{ .subsample = 1.5 }),
+        config.Config.from(.{ .colsample_bytree = 0 }),
+        config.Config.from(.{ .lambda = -1 }),
+        config.Config.from(.{ .alpha = -1 }),
+        config.Config.from(.{ .max_depth = 0, .max_leaves = 0 }),
+        config.Config.from(.{ .algo = .gbdt, .bootstrap = true }),
+        config.Config.from(.{ .sampling = .goss, .top_rate = 0.9, .other_rate = 0.9 }),
+        config.Config.from(.{ .sampling = .goss, .top_rate = 0 }),
+        config.Config.from(.{ .algo = .linear, .lin_epochs = 0 }),
+        config.Config.from(.{ .algo = .linear, .lin_lr = 0 }),
     };
     for (bad, 0..) |c, i| {
         c.validate() catch continue;
@@ -752,23 +752,21 @@ test "validate rejects every documented impossible combination" {
     }
 }
 
-test "applyAlgoDefaults respects explicit choices and fills the rest" {
-    var c = config.Config{ .algo = .random_forest, .learning_rate = 0.3 };
-    c.applyAlgoDefaults(&.{"learning_rate"});
-    try testing.expectEqual(@as(f32, 0.3), c.learning_rate); // explicit, kept
-    try testing.expect(c.bootstrap); // implicit, filled
+test "forest defaults respect explicit choices and fill the rest" {
+    const c = config.Config.from(.{ .algo = .random_forest, .learning_rate = 0.3 });
+    try testing.expectEqual(@as(f32, 0.3), c.random_forest.tree.learning_rate); // explicit, kept
+    try testing.expect(c.random_forest.tree.bootstrap); // implicit, filled
 
-    var d = config.Config{ .algo = .random_forest };
-    d.applyAlgoDefaults(&.{});
-    try testing.expectEqual(@as(f32, 1.0), d.learning_rate); // implicit, overridden
+    const d = config.Config.from(.{ .algo = .random_forest });
+    try testing.expectEqual(@as(f32, 1.0), d.random_forest.tree.learning_rate); // implicit, the forest's own
 
     // sqrt(p)/p for classification.
-    var e = config.Config{ .algo = .random_forest, .objective = .logistic };
+    var e = config.Config.from(.{ .algo = .random_forest, .objective = .logistic });
     e.applyForestFeatureDefault(16, &.{});
-    try testing.expectApproxEqAbs(@as(f32, 0.25), e.colsample_bynode, 1e-6);
-    var g = config.Config{ .algo = .random_forest };
+    try testing.expectApproxEqAbs(@as(f32, 0.25), e.random_forest.tree.colsample_bynode, 1e-6);
+    var g = config.Config.from(.{ .algo = .random_forest });
     g.applyForestFeatureDefault(16, &.{"colsample_bynode"});
-    try testing.expectEqual(@as(f32, 1.0), g.colsample_bynode); // explicit, kept
+    try testing.expectEqual(@as(f32, 1.0), g.random_forest.tree.colsample_bynode); // explicit, kept
 }
 
 test "a solver stalled by bad scaling is not reported as converged" {
@@ -782,12 +780,12 @@ test "a solver stalled by bad scaling is not reported as converged" {
     defer f.deinit();
     for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
 
-    var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var bad = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_standardize = false,
         .lin_epochs = 300,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer bad.model.deinit();
     try testing.expect(bad.fit.stalled());
     // The tell is a large gradient at the stop, not simply a short run.
@@ -796,12 +794,12 @@ test "a solver stalled by bad scaling is not reported as converged" {
     // Standardising the same design removes the conditioning problem, so the
     // identical data must now arrive. Without this half the test would pass
     // against a `stalled()` that always returns true.
-    var good = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var good = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_standardize = true,
         .lin_epochs = 300,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer good.model.deinit();
     try testing.expect(!good.fit.stalled());
 }
@@ -818,13 +816,13 @@ test "adam reports a stall too, and does not cry wolf on a good design" {
     defer f.deinit();
     for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
 
-    var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var bad = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .adam,
         .lin_standardize = false,
         .lin_epochs = 300,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer bad.model.deinit();
     try testing.expect(bad.fit.stalled());
     // Gradients must actually be recorded now; the old code left them zero,
@@ -835,13 +833,13 @@ test "adam reports a stall too, and does not cry wolf on a good design" {
     // The other half: the same data, standardised, must not trip the check.
     // Without this the test would pass against a `stalled()` that always
     // returns true, which is the mutation that kills the lbfgs test above.
-    var good = try linear.train(gpa, f.pool, &f.ds, null, .{
+    var good = try linear.train(gpa, f.pool, &f.ds, null, config.Config.from(.{
         .algo = .linear,
         .lin_solver = .adam,
         .lin_standardize = true,
         .lin_epochs = 20_000,
         .verbose_eval = 0,
-    }, null);
+    }).linear, null);
     defer good.model.deinit();
     try testing.expect(!good.fit.stalled());
 }

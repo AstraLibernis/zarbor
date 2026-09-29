@@ -13,7 +13,6 @@ const data = @import("data.zig");
 const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const tree = @import("tree.zig");
-const config = @import("config.zig");
 const metric = @import("metric.zig");
 const prof = @import("prof.zig");
 const Objective = @import("objective.zig").Objective;
@@ -45,6 +44,53 @@ pub const GossRank = enum {
     /// for parity with LightGBM; on squared error the two are identical,
     /// because `h` is 1.
     gradient_hessian,
+};
+
+/// Everything gradient boosting needs; the trees' own settings are in `tree`.
+pub const Params = struct {
+    /// Number of boosting rounds (trees) to fit. For `random_forest` this is
+    /// the number of bagged trees, fitted independently.
+    n_rounds: u32 = 500,
+    /// Initial raw score for every row. For logistic this is a log-odds.
+    /// Null means "derive from the training label mean", which is what you
+    /// almost always want.
+    base_score: ?f32 = null,
+    objective: Objective = .logistic,
+    /// Multiplier on positive-class gradients. >1 upweights the minority
+    /// class for imbalanced binary problems.
+    scale_pos_weight: f32 = 1.0,
+    /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
+    sampling: Sampling = .uniform,
+    /// Ranking key for GOSS. Defaults to the paper's `|g|`, which measures
+    /// better here; `gradient_hessian` is LightGBM's. Ignored unless
+    /// `sampling = .goss`.
+    goss_rank: GossRank = .gradient,
+    /// GOSS: fraction of rows kept for having the largest |gradient|.
+    top_rate: f32 = 0.2,
+    /// GOSS: fraction of the *remaining* rows sampled uniformly.
+    other_rate: f32 = 0.1,
+    /// Stop when the validation metric has not improved for this many rounds.
+    /// 0 disables early stopping. Not meaningful for `random_forest`, whose
+    /// trees are independent, or for `linear`.
+    early_stopping_rounds: u32 = 0,
+    /// Print per-round metrics every N rounds. 0 silences training.
+    verbose_eval: u32 = 10,
+    tree: tree.Params = .{},
+
+    pub fn validate(p: Params) !void {
+        if (p.n_rounds == 0) return error.NoRounds;
+        try p.tree.validate();
+        // Bagging with replacement makes a row's gradient contribute more
+        // than once, which is meaningless when the next round's gradient is
+        // computed from a single accumulated score per row.
+        if (p.tree.bootstrap) return error.BootstrapWithBoosting;
+        if (p.sampling == .goss) {
+            if (p.top_rate <= 0 or p.top_rate >= 1) return error.BadTopRate;
+            if (p.other_rate <= 0 or p.other_rate >= 1) return error.BadOtherRate;
+            if (p.top_rate + p.other_rate > 1) return error.GossRatesExceedOne;
+        }
+        try p.tree.validateCapacity();
+    }
 };
 
 const min_hessian: f32 = 1e-6;
@@ -464,7 +510,7 @@ pub fn train(
     pool: *Pool,
     ds: *const Dataset,
     valid: ?*const Dataset,
-    cfg: config.Config,
+    cfg: Params,
     log: ?*std.Io.Writer,
 ) !TrainResult {
     try cfg.validate();
@@ -524,9 +570,9 @@ pub fn train(
     defer if (goss_others.len != 0) gpa.free(goss_others);
     defer if (goss_mask.len != 0) gpa.free(goss_mask);
     defer if (goss_rows.len != 0) gpa.free(goss_rows);
-    var goss_rng: std.Random.DefaultPrng = .init(cfg.seed +% 0x9E3779B97F4A7C15);
+    var goss_rng: std.Random.DefaultPrng = .init(cfg.tree.seed +% 0x9E3779B97F4A7C15);
 
-    var builder = try tree.Builder.init(gpa, pool, ds, cfg);
+    var builder = try tree.Builder.init(gpa, pool, ds, cfg.tree);
     defer builder.deinit();
 
     const better = higherIsBetter(cfg.objective);
@@ -563,7 +609,7 @@ pub fn train(
         const t_ap = prof.start();
         // A linear leaf has no single constant to add to a whole span, so
         // the span fast path is only valid for constant leaves.
-        if (builder.activeRows().len == ds.n_rows and !cfg.linear_leaves) {
+        if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
             var actx = ApplyCtx{
                 .spans = builder.leafSpans(),
                 .rows = builder.rows,
