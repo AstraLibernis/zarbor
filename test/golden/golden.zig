@@ -70,6 +70,7 @@ const cases = [_]Case{
     .{ .name = "error-bad-max-bin", .args = &.{ data_file, "--label=survived", "--max_bin=300" } },
     .{ .name = "error-bad-subsample", .args = &.{ data_file, "--label=survived", "--subsample=0" } },
     .{ .name = "error-unbounded-tree", .args = &.{ data_file, "--label=survived", "--max_depth=0" } },
+    .{ .name = "error-unbounded-lossguide", .args = &.{ data_file, "--label=survived", "--grow_policy=lossguide", "--max_depth=0" } },
     .{ .name = "error-goss-bootstrap", .args = &.{ data_file, "--label=survived", "--sampling=goss", "--bootstrap=true" } },
     .{ .name = "error-boost-bootstrap", .args = &.{ data_file, "--label=survived", "--bootstrap=true" } },
     .{ .name = "error-forest-no-rounds", .args = &.{ data_file, "--label=survived", "--algo=random_forest", "--n_rounds=0" } },

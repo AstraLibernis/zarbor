@@ -102,8 +102,6 @@ pub const Params = struct {
     /// An unbounded tree is only safe if *something* caps its leaves.
     pub fn validateCapacity(p: Params) !void {
         if (p.max_depth == 0 and p.max_leaves == 0) return error.UnboundedTree;
-        if (p.grow_policy == .lossguide and p.max_leaves == 0 and p.max_depth == 0)
-            return error.UnboundedLossguide;
     }
 };
 
