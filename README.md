@@ -24,6 +24,10 @@ Still open: merging the two comparison harnesses (see Benchmarks).
     ./zig-out/bin/zgbdt tune train.csv --label=y --search=bayes --trials=60
     ./zig-out/bin/zgbdt profile train.csv
 
+    zig build test      # unit tests
+    zig build golden    # CLI end to end on real data vs test/golden/expected
+    zig build check     # compile every artifact, test and benchmark
+
 ## Is this worth using instead of LightGBM?
 
 Sometimes, and `docs/why.md` answers it with measurements rather than

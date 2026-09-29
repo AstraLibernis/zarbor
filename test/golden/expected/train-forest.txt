@@ -1,0 +1,27 @@
+$ zgbdt titanic3.csv --label=survived --algo=random_forest --n_rounds=40 --save=f.zm --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   random forest (bagged unshrunk trees)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] trees=1 valid=0.779632
+[  10] trees=11 valid=0.875723
+[  20] trees=21 valid=0.878678
+[  30] trees=31 valid=0.883062
+[  39] trees=40 valid=0.884523
+
+rounds  40
+train # ms  ( # ms/tree)
+saved   f.zm
+valid   auc=0.884523  logloss=0.406839
+--- stderr
+--- files
+f.zm  356064 bytes  sha256 0922c50501e49040073c780671e7bdbff9a579892090b8c65ecc9898ffb67d7e

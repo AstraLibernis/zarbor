@@ -1,0 +1,12 @@
+$ zgbdt blend titanic3.csv --models=g.zm,f.zm,l.zm --weights=2,1,1 --out=b.csv
+exit 0
+--- stdout
+rows    1309
+models  3
+read # ms
+bin # ms
+predict # ms
+wrote   b.csv
+--- stderr
+--- files
+b.csv  11792 bytes  sha256 e190cd5915db37eb852312d66b41201e717304b4f83d50941ea2e91f572f9218

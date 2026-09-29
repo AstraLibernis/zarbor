@@ -1,0 +1,36 @@
+$ zgbdt titanic3.csv --label=pclass --objective=squared_error --n_rounds=150 --early_stopping_rounds=20 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "pclass")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.763644  best=0.763644 @0
+[  10] valid=0.373213  best=0.373213 @10
+[  20] valid=0.271950  best=0.271950 @20
+[  30] valid=0.247396  best=0.247396 @30
+[  40] valid=0.235416  best=0.235416 @40
+[  50] valid=0.231658  best=0.231415 @49
+[  60] valid=0.229975  best=0.229712 @59
+[  70] valid=0.227088  best=0.227088 @70
+[  80] valid=0.224829  best=0.224829 @80
+[  90] valid=0.222340  best=0.222340 @90
+[ 100] valid=0.219615  best=0.219615 @100
+[ 110] valid=0.217600  best=0.217600 @110
+[ 120] valid=0.216270  best=0.216270 @120
+[ 130] valid=0.215529  best=0.215529 @130
+[ 140] valid=0.214292  best=0.214147 @136
+[ 149] valid=0.213368  best=0.213368 @149
+
+rounds  150
+train # ms  ( # ms/tree)
+valid   rmse=0.213368
+--- stderr
+--- files

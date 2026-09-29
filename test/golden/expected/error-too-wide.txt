@@ -1,0 +1,16 @@
+$ zgbdt titanic3.csv --label=survived
+exit 1
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+error: a categorical column has more levels than a bin can address
+       (limit 256, set by --max_bin; a bin is stored as a u8)
+  name                         1307 levels
+  ticket                       929 levels
+  home.dest                    369 levels
+
+Either --drop the column, or replace it with something numeric --
+for a high-cardinality group, a statistic of that group (its mean
+target, size, or rank) is usually more useful than its identity.
+--- stderr
+error: CategoricalTooWide
+--- files

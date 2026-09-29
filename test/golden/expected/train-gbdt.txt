@@ -1,0 +1,73 @@
+$ zgbdt titanic3.csv --label=survived --save=g.zm --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.870916  best=0.870916 @0
+[  10] valid=0.881016  best=0.881016 @10
+[  20] valid=0.890953  best=0.890953 @20
+[  30] valid=0.887576  best=0.890953 @20
+[  40] valid=0.885237  best=0.890953 @20
+[  50] valid=0.888810  best=0.890953 @20
+[  60] valid=0.887608  best=0.890953 @20
+[  70] valid=0.887478  best=0.890953 @20
+[  80] valid=0.886991  best=0.890953 @20
+[  90] valid=0.888745  best=0.890953 @20
+[ 100] valid=0.890498  best=0.890953 @20
+[ 110] valid=0.890076  best=0.890953 @20
+[ 120] valid=0.889232  best=0.890953 @20
+[ 130] valid=0.888647  best=0.890953 @20
+[ 140] valid=0.887868  best=0.890953 @20
+[ 150] valid=0.888387  best=0.890953 @20
+[ 160] valid=0.886504  best=0.890953 @20
+[ 170] valid=0.887348  best=0.890953 @20
+[ 180] valid=0.886958  best=0.890953 @20
+[ 190] valid=0.886829  best=0.890953 @20
+[ 200] valid=0.885010  best=0.890953 @20
+[ 210] valid=0.883192  best=0.890953 @20
+[ 220] valid=0.883192  best=0.890953 @20
+[ 230] valid=0.882477  best=0.890953 @20
+[ 240] valid=0.882022  best=0.890953 @20
+[ 250] valid=0.882867  best=0.890953 @20
+[ 260] valid=0.882412  best=0.890953 @20
+[ 270] valid=0.882542  best=0.890953 @20
+[ 280] valid=0.883256  best=0.890953 @20
+[ 290] valid=0.882737  best=0.890953 @20
+[ 300] valid=0.882737  best=0.890953 @20
+[ 310] valid=0.882087  best=0.890953 @20
+[ 320] valid=0.880009  best=0.890953 @20
+[ 330] valid=0.880724  best=0.890953 @20
+[ 340] valid=0.880269  best=0.890953 @20
+[ 350] valid=0.879554  best=0.890953 @20
+[ 360] valid=0.879100  best=0.890953 @20
+[ 370] valid=0.878450  best=0.890953 @20
+[ 380] valid=0.877346  best=0.890953 @20
+[ 390] valid=0.877541  best=0.890953 @20
+[ 400] valid=0.877736  best=0.890953 @20
+[ 410] valid=0.877281  best=0.890953 @20
+[ 420] valid=0.876827  best=0.890953 @20
+[ 430] valid=0.876502  best=0.890953 @20
+[ 440] valid=0.875982  best=0.890953 @20
+[ 450] valid=0.875787  best=0.890953 @20
+[ 460] valid=0.875917  best=0.890953 @20
+[ 470] valid=0.877411  best=0.890953 @20
+[ 480] valid=0.875723  best=0.890953 @20
+[ 490] valid=0.875787  best=0.890953 @20
+[ 499] valid=0.875528  best=0.890953 @20
+
+rounds  500
+train # ms  ( # ms/tree)
+saved   g.zm
+valid   auc=0.875528  logloss=0.513917
+--- stderr
+--- files
+g.zm  480004 bytes  sha256 d84d6915e091f1102380e1632bb4f45e502f2329f6681808dd35caadf2cc6342

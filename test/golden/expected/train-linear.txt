@@ -1,0 +1,27 @@
+$ zgbdt titanic3.csv --label=survived --algo=linear --save=l.zm --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   logistic regression (L2 / ridge)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] f=0.50418721 |g|max=2.589e-1
+[  10] f=0.37676314 |g|max=2.478e-3
+[  20] f=0.37673309 |g|max=2.348e-5
+[  30] f=0.37673278 |g|max=2.043e-5
+
+rounds  35
+train # ms  ( # ms/epoch)
+coefs   196 (25 zero)
+saved   l.zm
+valid   auc=0.830974  logloss=0.511979
+--- stderr
+--- files
+l.zm  7116 bytes  sha256 c610307893a8a8dc3d86dbdb29616ff92793314b43e109ba16864daac8830200

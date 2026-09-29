@@ -1,0 +1,33 @@
+$ zgbdt tune titanic3.csv --label=survived --search=bayes --trials=6 --warmup=3 --folds=2 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+data     titanic3.csv
+rows     1309   feats 8   (label "survived")
+algo     gbdt
+search   bayes
+space    8 params
+folds    2  (seed 1)
+threads  4
+prep # ms  (read + bin, paid once for the whole search)
+
+  n_rounds             choice  [200, 300, 500, 800]
+  learning_rate        log_uniform  0.02 .. 0.2
+  max_depth            choice  [3, 4, 5, 6, 7, 8]
+  lambda               log_uniform  0.1 .. 50
+  min_child_weight     log_uniform  0.1 .. 100
+  subsample            uniform  0.5 .. 1
+  colsample_bytree     uniform  0.5 .. 1
+  max_bin              choice  [64, 128, 256]
+
+   1  0.841949  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=128  <- best
+   2  0.844021  2f #ms  n_rounds=200 learning_rate=0.027192 max_depth=8 lambda=2.168301 min_child_weight=0.206572 subsample=0.650217 colsample_bytree=0.549356 max_bin=64  <- best
+   3  0.846433  2f #ms  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128  <- best
+   4  0.837880  2f #ms  n_rounds=200 learning_rate=0.182754 max_depth=4 lambda=12.482805 min_child_weight=15.783605 subsample=0.869288 colsample_bytree=0.797336 max_bin=128
+   5  0.837120  2f #ms  n_rounds=500 learning_rate=0.020673 max_depth=8 lambda=0.131023 min_child_weight=0.102566 subsample=0.534136 colsample_bytree=0.504447 max_bin=64
+   6  0.843009  2f #ms  n_rounds=200 learning_rate=0.023358 max_depth=8 lambda=2.410064 min_child_weight=0.608385 subsample=0.632094 colsample_bytree=0.523904 max_bin=64
+
+best     0.846433   6 trials   (4 re-bins)
+  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128
+verified 0.846433   (winner re-ran identically)
+--- stderr
+--- files

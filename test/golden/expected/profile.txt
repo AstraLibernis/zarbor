@@ -1,0 +1,32 @@
+$ zgbdt profile titanic3.csv
+exit 0
+--- stdout
+file    titanic3.csv
+read # ms
+profile # ms
+rows    1309
+cols    14
+
+column                  kind    missing  miss% distinct          min       median          max  far out
+pclass                  num           0   0.0%        3       1.0000       3.0000       3.0000        0
+survived                num           0   0.0%        2       0.0000       0.0000       1.0000        0
+name                    cat           0   0.0%     1307            -            -            -        -
+sex                     cat           0   0.0%        2            -            -            -        -
+age                     num         263  20.1%       98       0.1700      28.0000      80.0000        0
+sibsp                   num           0   0.0%        7       0.0000       0.0000       8.0000       15
+parch                   num           0   0.0%        8       0.0000       0.0000       9.0000        0
+ticket                  cat           0   0.0%      929            -            -            -        -
+fare                    num           1   0.1%      281       0.0000      14.4542     512.3292       84
+cabin                   cat        1014  77.5%      186            -            -            -        -
+embarked                cat           2   0.2%        3            -            -            -        -
+boat                    cat         823  62.9%       27            -            -            -        -
+body                    num        1188  90.8%      121       1.0000     155.0000     328.0000        0
+home.dest               cat         564  43.1%      369            -            -            -        -
+
+Categorical columns too wide for a u8 bin. These must be dropped or
+replaced with a numeric summary before training:
+  name                    1307 levels
+  ticket                  929 levels
+  home.dest               369 levels
+--- stderr
+--- files

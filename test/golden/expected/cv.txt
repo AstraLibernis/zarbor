@@ -1,0 +1,20 @@
+$ zgbdt cv titanic3.csv --label=survived --folds=3 --n_rounds=100 --oof=oof.csv --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+folds   3  (seed 1, stratified)
+threads 4
+prep # ms  (read + bin, paid once for all folds)
+
+fold 0  872 train / 437 valid   auc=0.832080
+fold 1  873 train / 436 valid   auc=0.850322
+fold 2  873 train / 436 valid   auc=0.851394
+
+oof     0.843375   mean 0.844599   sd 0.008863 # ms
+wrote   oof.csv
+--- stderr
+--- files
+oof.csv  19657 bytes  sha256 84d47c6dfbda34c6bd9994fb33318ad4e1ace8951b0d7c8662323399bff1b47b

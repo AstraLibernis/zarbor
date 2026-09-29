@@ -1,0 +1,13 @@
+$ zgbdt predict titanic3.csv --model=g.zm --label=survived --out=p.csv
+exit 0
+--- stdout
+rows    1309
+models  1
+read # ms
+bin # ms
+predict # ms
+score   auc=0.969241  logloss=0.222175
+wrote   p.csv
+--- stderr
+--- files
+p.csv  11792 bytes  sha256 28971d1e9caeb2a9f70e9bf6ba83d6513bff6e2a15e2c41b85079a8ce5f37432

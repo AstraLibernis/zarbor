@@ -1,0 +1,28 @@
+$ zgbdt titanic3.csv --label=survived --algo=linear --lin_solver=adam --lin_epochs=100 --alpha=0.01 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   logistic regression (elastic net)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] |dw|max=5.000e-2  |g|max=2.589e-1
+[  99] |dw|max=1.226e-3  |g|max=4.821e-4
+
+rounds  100
+train # ms  ( # ms/epoch)
+coefs   196 (25 zero)
+STALLED the solver stopped moving while the gradient was still
+        large (4.82e-4, from 2.59e-1 at the start). These
+        coefficients are not a fitted model.
+        adam needs far more epochs than lbfgs. Try
+        --lin_epochs=30000, or --lin_solver=lbfgs.
+valid   auc=0.830584  logloss=0.514195
+--- stderr
+--- files

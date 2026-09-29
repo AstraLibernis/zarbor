@@ -1,0 +1,9 @@
+$ zgbdt titanic3.csv --label=fare --objective=squared_error --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 1
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+
+label column "fare" has missing values. A missing target cannot be guessed, and
+treating it as the negative class would bias the fit.
+--- stderr
+--- files

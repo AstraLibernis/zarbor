@@ -1,0 +1,29 @@
+$ zgbdt titanic3.csv --label=survived --linear_leaves=true --n_rounds=80 --subsample=0.8 --seed=7 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.864616  best=0.864616 @0
+[  10] valid=0.884620  best=0.884620 @10
+[  20] valid=0.887576  best=0.887576 @20
+[  30] valid=0.888647  best=0.888647 @30
+[  40] valid=0.895661  best=0.895661 @40
+[  50] valid=0.898259  best=0.898259 @50
+[  60] valid=0.897220  best=0.898259 @50
+[  70] valid=0.897935  best=0.898259 @50
+[  79] valid=0.896895  best=0.898259 @50
+
+rounds  80
+train # ms  ( # ms/tree)
+valid   auc=0.896895  logloss=0.399656
+--- stderr
+--- files

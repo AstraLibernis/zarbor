@@ -30,6 +30,27 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
 
+    // End-to-end regression fence: the CLI on real data vs test/golden/expected/.
+    const golden = b.addExecutable(.{ .name = "golden", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/golden/golden.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_golden = b.addRunArtifact(golden);
+    run_golden.addArtifactArg(exe);
+    run_golden.addArg(b.pathFromRoot("test/golden"));
+    _ = run_golden.addOutputDirectoryArg("scratch");
+    run_golden.has_side_effects = true;
+    if (b.args) |args| run_golden.addArgs(args);
+    b.step("golden", "Compare CLI output with test/golden/expected (-- --update to re-baseline)")
+        .dependOn(&run_golden.step);
+
+    // Compile everything without running it, so no file escapes the compiler.
+    const check = b.step("check", "Compile every artifact, test and benchmark");
+    check.dependOn(&exe.step);
+    check.dependOn(&tests.step);
+    check.dependOn(&golden.step);
+
     // Cost prototype for widening the bin type; see docs/wide-categoricals.md.
     const lib = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -49,6 +70,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zarbor", .module = lib }},
     }) });
     b.step("bench-sz", "Print hot struct sizes").dependOn(&b.addRunArtifact(sz).step);
+    check.dependOn(&sz.step);
+    check.dependOn(&wc.step);
 
     b.step("bench-widecat", "Measure what a wide categorical column costs")
         .dependOn(&b.addRunArtifact(wc).step);
@@ -64,6 +87,7 @@ pub fn build(b: *std.Build) void {
     });
     tools_mod.addOptions("tools_paths", tools_paths);
     const tools = b.addExecutable(.{ .name = "tools", .root_module = tools_mod });
+    check.dependOn(&tools.step);
     b.installArtifact(tools);
     const run_tools = b.addRunArtifact(tools);
     if (b.args) |args| run_tools.addArgs(args);
@@ -82,6 +106,7 @@ pub fn build(b: *std.Build) void {
         const micro_mod = b.createModule(.{ .root_source_file = b.path(m.file), .target = target, .optimize = optimize, .link_libc = m.libc });
         if (m.pool) micro_mod.addImport("pool", pool_mod);
         const exe_m = b.addExecutable(.{ .name = m.step, .root_module = micro_mod });
+        check.dependOn(&exe_m.step);
         b.step(m.step, m.desc).dependOn(&b.addRunArtifact(exe_m).step);
     }
 }
