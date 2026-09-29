@@ -16,5 +16,6 @@ pub const forest = @import("forest.zig");
 pub const linear = @import("linear.zig");
 pub const objective = @import("objective.zig");
 pub const model = @import("model.zig");
+pub const fitted = @import("fitted.zig");
 pub const cv = @import("cv.zig");
 pub const tune = @import("tune.zig");

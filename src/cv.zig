@@ -23,11 +23,9 @@ const std = @import("std");
 const config = @import("config.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
-const booster = @import("booster.zig");
-const forest = @import("forest.zig");
-const linear = @import("linear.zig");
 const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
+const Fitted = @import("fitted.zig").Fitted;
 
 /// Assign every row a fold. For logistic the assignment is stratified: the
 /// two classes are shuffled and dealt out separately, so a fold cannot draw
@@ -249,23 +247,9 @@ pub fn crossValidate(
         const scores = try gpa.alloc(f32, valid_ds.n_rows);
         defer gpa.free(scores);
 
-        switch (cfg.algo) {
-            .gbdt => {
-                var res = try booster.train(gpa, pool, &train_ds, null, cfg.gbdt, opts.progress);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-            .random_forest => {
-                var res = try forest.train(gpa, pool, &train_ds, null, cfg.random_forest, opts.progress);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-            .linear => {
-                var res = try linear.train(gpa, pool, &train_ds, null, cfg.linear, opts.progress);
-                defer res.model.deinit();
-                res.model.predict(pool, &valid_ds, scores);
-            },
-        }
+        var res = try Fitted.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+        defer res.model.deinit();
+        res.model.predict(pool, &valid_ds, scores);
 
         if (opts.oof) |o| for (perm[head..], scores) |row, s| {
             o[row] = s;

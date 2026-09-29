@@ -10,14 +10,12 @@ const args = @import("args.zig");
 const config = zarbor.config;
 const data = zarbor.data;
 const pool_mod = zarbor.pool;
-const booster = zarbor.booster;
-const forest = zarbor.forest;
 const linear = zarbor.linear;
 const metric = zarbor.metric;
 const prof = zarbor.prof;
-const model_mod = zarbor.model;
 const csv = zarbor.csv;
 const common = @import("common.zig");
+const Fitted = zarbor.fitted.Fitted;
 const explainLabel = common.explainLabel;
 const usage = @import("main.zig").usage;
 
@@ -234,112 +232,19 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const valid_ptr: ?*const data.Dataset = if (valid_ds) |*v| v else null;
 
     try cfg.validate();
-    switch (cfg.algo) {
-        .gbdt => {
-            var res = try booster.train(gpa, pool, &train_ds, valid_ptr, cfg.gbdt, out);
-            defer res.model.deinit();
-            try printTiming(out, io, t_train0, "tree", res.n_rounds, res.valid_ns);
-            if (save_path) |sp| {
-                var b = try model_mod.fromBooster(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
-                defer b.deinit();
-                try b.setLabel(target, &enc);
-                try model_mod.save(gpa, io, sp, &b);
-                try out.print("saved   {s}\n", .{sp});
-            }
-            if (valid_ds) |*v| {
-                const scores = try gpa.alloc(f32, v.n_rows);
-                defer gpa.free(scores);
-                // Raw log-odds: AUC is rank-based so the link does not matter,
-                // and logloss wants the raw scale anyway.
-                res.model.predictRaw(pool, v, scores);
-                try report(gpa, out, cfg.objective(), scores, v.labels, .raw);
-            }
-        },
-        .random_forest => {
-            var res = try forest.train(gpa, pool, &train_ds, valid_ptr, cfg.random_forest, out);
-            defer res.model.deinit();
-            try printTiming(out, io, t_train0, "tree", res.n_trees, res.valid_ns);
-            if (save_path) |sp| {
-                var b = try model_mod.fromForest(gpa, &res.model, try data.Schema.fromDataset(gpa, &full));
-                defer b.deinit();
-                try b.setLabel(target, &enc);
-                try model_mod.save(gpa, io, sp, &b);
-                try out.print("saved   {s}\n", .{sp});
-            }
-            if (valid_ds) |*v| {
-                const scores = try gpa.alloc(f32, v.n_rows);
-                defer gpa.free(scores);
-                res.model.predict(pool, v, scores);
-                try report(gpa, out, cfg.objective(), scores, v.labels, .natural);
-            }
-        },
-        .linear => {
-            var res = try linear.train(gpa, pool, &train_ds, valid_ptr, cfg.linear, out);
-            defer res.model.deinit();
-            try printTiming(out, io, t_train0, "epoch", res.epochs, res.valid_ns);
-            try out.print("coefs   {d} ({d} zero)\n", .{ res.model.w.len, res.model.nZero() });
-            {
-                if (res.fit.stalled()) {
-                    // Silence here used to mean "fitted". It did not: with
-                    // `--lin_standardize=false` on a column reaching 188,000,
-                    // the coefficient steps fall under `lin_tol` after four
-                    // iterations while the gradient is still enormous, and the
-                    // result ranks by that one column and nothing else.
-                    try out.print(
-                        \\STALLED the solver stopped moving while the gradient was still
-                        \\        large ({e:.2}, from {e:.2} at the start). These
-                        \\        coefficients are not a fitted model.
-                        \\
-                    , .{ res.fit.g_last, res.fit.g_first });
-                    if (!cfg.linear.lin_standardize)
-                        try out.writeAll(
-                            \\        The usual cause is unscaled columns. Try
-                            \\        --lin_standardize=true.
-                            \\
-                        );
-                    // Adam has no line search, so it cannot report "could not
-                    // move"; it just runs out of schedule. A gradient still
-                    // this large after the budget is as likely to mean the
-                    // budget was short as that the problem is ill-scaled.
-                    if (cfg.linear.lin_solver == .adam)
-                        try out.writeAll(
-                            \\        adam needs far more epochs than lbfgs. Try
-                            \\        --lin_epochs=30000, or --lin_solver=lbfgs.
-                            \\
-                        );
-                } else {
-                    try out.print("fit     converged, |g|max {e:.2} from {e:.2}\n", .{
-                        res.fit.g_last, res.fit.g_first,
-                    });
-                }
-            }
-            if (save_path) |sp| {
-                // The bundle borrows the fitted model's design and weights
-                // rather than copying, so it must not free them.
-                var b = model_mod.Bundle{
-                    .gpa = gpa,
-                    .kind = .linear,
-                    .schema = try data.Schema.fromDataset(gpa, &full),
-                    .objective = cfg.objective(),
-                    .lin = res.model,
-                };
-                // Dropping the borrowed model first lets the normal deinit
-                // clean up everything the bundle does own.
-                defer {
-                    b.lin = null;
-                    b.deinit();
-                }
-                try b.setLabel(target, &enc);
-                try model_mod.save(gpa, io, sp, &b);
-                try out.print("saved   {s}\n", .{sp});
-            }
-            if (valid_ds) |*v| {
-                const scores = try gpa.alloc(f32, v.n_rows);
-                defer gpa.free(scores);
-                res.model.predict(pool, v, scores);
-                try report(gpa, out, cfg.objective(), scores, v.labels, .natural);
-            }
-        },
+    var res = try Fitted.train(gpa, pool, &train_ds, valid_ptr, cfg, out);
+    defer res.model.deinit();
+    try printTiming(out, io, t_train0, res.model.stepName(), res.steps, res.valid_ns);
+    if (res.lin_fit) |fit| try reportLinearFit(out, cfg.linear, &res.model.linear, fit);
+    if (save_path) |sp| {
+        try res.model.save(gpa, io, sp, try data.Schema.fromDataset(gpa, &full), target, &enc);
+        try out.print("saved   {s}\n", .{sp});
+    }
+    if (valid_ds) |*v| {
+        const scores = try gpa.alloc(f32, v.n_rows);
+        defer gpa.free(scores);
+        const scale = res.model.predictForReport(pool, v, scores);
+        try report(gpa, out, cfg.objective(), scores, v.labels, scale);
     }
     try prof.report(out);
     try out.flush();
@@ -353,7 +258,7 @@ fn printTiming(
     out: *std.Io.Writer,
     io: std.Io,
     t0: i128,
-    comptime unit: []const u8,
+    unit: []const u8,
     n: u32,
     valid_ns: u64,
 ) !void {
@@ -363,18 +268,18 @@ fn printTiming(
     try out.print(
         \\
         \\rounds  {d}
-        \\train   {d} ms  ({d:.2} ms/
-    ++ unit ++ ")\n", .{
+        \\train   {d} ms  ({d:.2} ms/{s})
+        \\
+    , .{
         n,
         ms,
         @as(f64, @floatFromInt(ms)) / @as(f64, @floatFromInt(@max(n, 1))),
+        unit,
     });
     if (vms != 0) try out.print("fit     {d} ms  (+{d} ms validating)\n", .{ fit, vms });
 }
 
-/// Which scale the predictions are on. The booster reports raw log-odds; the
-/// forest and the linear model already apply their own link.
-const Scale = enum { raw, natural };
+const Scale = zarbor.fitted.Scale;
 
 fn report(
     gpa: std.mem.Allocator,
@@ -412,4 +317,43 @@ fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
         try out.print("\"{s}\"={d}", .{ c, i });
     }
     try out.writeAll("\n");
+}
+
+/// The linear model's coefficient count, and whether its solver converged:
+/// a stall prints why and what to try.
+fn reportLinearFit(out: *std.Io.Writer, p: linear.Params, m: *const linear.Linear, fit: linear.Fit) !void {
+    try out.print("coefs   {d} ({d} zero)\n", .{ m.w.len, m.nZero() });
+    if (fit.stalled()) {
+        // Silence here used to mean "fitted". It did not: with
+        // `--lin_standardize=false` on a column reaching 188,000,
+        // the coefficient steps fall under `lin_tol` after four
+        // iterations while the gradient is still enormous, and the
+        // result ranks by that one column and nothing else.
+        try out.print(
+            \\STALLED the solver stopped moving while the gradient was still
+            \\        large ({e:.2}, from {e:.2} at the start). These
+            \\        coefficients are not a fitted model.
+            \\
+        , .{ fit.g_last, fit.g_first });
+        if (!p.lin_standardize)
+            try out.writeAll(
+                \\        The usual cause is unscaled columns. Try
+                \\        --lin_standardize=true.
+                \\
+            );
+        // Adam has no line search, so it cannot report "could not
+        // move"; it just runs out of schedule. A gradient still
+        // this large after the budget is as likely to mean the
+        // budget was short as that the problem is ill-scaled.
+        if (p.lin_solver == .adam)
+            try out.writeAll(
+                \\        adam needs far more epochs than lbfgs. Try
+                \\        --lin_epochs=30000, or --lin_solver=lbfgs.
+                \\
+            );
+    } else {
+        try out.print("fit     converged, |g|max {e:.2} from {e:.2}\n", .{
+            fit.g_last, fit.g_first,
+        });
+    }
 }
