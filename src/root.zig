@@ -7,6 +7,7 @@ pub const config = @import("config.zig");
 pub const csv = @import("csv.zig");
 pub const data = @import("data.zig");
 pub const hist = @import("hist.zig");
+pub const split = @import("split.zig");
 pub const metric = @import("metric.zig");
 pub const pool = @import("pool.zig");
 pub const prof = @import("prof.zig");

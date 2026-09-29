@@ -18,6 +18,7 @@ const data = @import("data.zig");
 const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const prof = @import("prof.zig");
+const split = @import("split.zig");
 
 /// How a tree is expanded once its root histogram exists.
 pub const GrowPolicy = enum {
@@ -165,7 +166,7 @@ pub const Node = extern struct {
     /// than comparing against `threshold`.
     is_cat: bool = false,
     /// How many level ids this split sends left. Bounded by
-    /// `hist.max_cat_ids`, which is why a byte is enough.
+    /// `split.max_cat_ids`, which is why a byte is enough.
     n_cat: u8 = 0,
     /// Slope terms this leaf carries. 0 is a plain constant leaf, which is
     /// every leaf unless `linear_leaves` is on.
@@ -216,7 +217,7 @@ pub const Tree = struct {
             const go_left = if (b == 0)
                 n.missing_left
             else if (n.is_cat)
-                hist.catContains(t.cat_ids[n.cat_ofs..][0..n.n_cat], b)
+                split.catContains(t.cat_ids[n.cat_ofs..][0..n.n_cat], b)
             else
                 b <= n.threshold;
             i = if (go_left) n.left else n.right;
@@ -250,7 +251,7 @@ const Work = struct {
     depth: u32,
     total: hist.Bin,
     slot: u32,
-    split: hist.Split,
+    split: split.Split,
     /// Distinct numeric features tested between the root and this node.
     /// Empty unless `linear_leaves` is on -- tracking it otherwise is pure
     /// cost for something nothing reads.
@@ -516,7 +517,7 @@ pub const Builder = struct {
         return b.node_features[0..k];
     }
 
-    fn splitParams(b: *const Builder) hist.SplitParams {
+    fn splitParams(b: *const Builder) split.SplitParams {
         return .{
             .lambda = b.cfg.lambda,
             .alpha = b.cfg.alpha,
@@ -553,9 +554,9 @@ pub const Builder = struct {
     /// inline, and this runs once per row per partition pass. Reading the
     /// decision through it put partition at 2.2x; the element width of the
     /// bin, which is what two earlier guesses blamed, was worth nothing.
-    inline fn goesLeft(bin: data.BinIdx, t: hist.SplitTest) bool {
+    inline fn goesLeft(bin: data.BinIdx, t: split.SplitTest) bool {
         if (bin == 0) return t.missing_left;
-        if (t.is_cat) return hist.catContains(t.ids, bin);
+        if (t.is_cat) return split.catContains(t.ids, bin);
         return bin <= t.threshold;
     }
 
@@ -567,7 +568,7 @@ pub const Builder = struct {
     /// and time scaled with tree *depth* rather than node count. It is now a
     /// count / prefix-sum / scatter, which is three parallel passes instead of
     /// one serial one.
-    fn partition(b: *Builder, start: usize, end: usize, sp: hist.Split) usize {
+    fn partition(b: *Builder, start: usize, end: usize, sp: split.Split) usize {
         if (b.ds.isWide(sp.feature))
             return b.partitionOn(data.BinIdx, b.ds.columnWide(sp.feature), start, end, sp);
         return b.partitionOn(u8, b.ds.columnNarrow(sp.feature), start, end, sp);
@@ -579,7 +580,7 @@ pub const Builder = struct {
         col: []const C,
         start: usize,
         end: usize,
-        sp: hist.Split,
+        sp: split.Split,
     ) usize {
         const n = end - start;
         if (n < parallel_partition_min or b.pool.workerCount() == 1)
@@ -594,7 +595,7 @@ pub const Builder = struct {
             .rows = b.rows,
             .rows_out = b.rows_out,
             .col = col,
-            .sp = hist.SplitTest.of(&sp),
+            .sp = split.SplitTest.of(&sp),
             .start = start,
             .chunk = csize,
             .counts = b.part_counts[0..used],
@@ -643,10 +644,10 @@ pub const Builder = struct {
         col: []const C,
         start: usize,
         end: usize,
-        sp: hist.Split,
+        sp: split.Split,
     ) usize {
         const rows = b.rows[start..end];
-        const t = hist.SplitTest.of(&sp);
+        const t = split.SplitTest.of(&sp);
         var n_left: usize = 0;
         for (rows) |row| n_left += @intFromBool(goesLeft(col[row], t));
 
@@ -667,7 +668,7 @@ pub const Builder = struct {
         const p = b.splitParams();
         // Shrinkage is applied here, so a finished tree's output is already
         // its contribution to the ensemble and no caller has to remember eta.
-        const raw = hist.leafWeight(w.total.g, w.total.h, p);
+        const raw = split.leafWeight(w.total.g, w.total.h, p);
         const weight: f32 = @floatCast(raw * b.cfg.learning_rate);
         var n_lin: u8 = 0;
         var lin_ofs: u32 = 0;
@@ -902,7 +903,7 @@ pub const Builder = struct {
         );
         prof.stop(.hist_build, t_rh);
         const t_rs = prof.start();
-        const root_split = hist.bestSplit(&b.bank, b.slot(root_slot), b.ds, root_search, root_total, p);
+        const root_split = split.bestSplit(&b.bank, b.slot(root_slot), b.ds, root_search, root_total, p);
         prof.stop(.best_split, t_rs);
         try b.queue.append(b.gpa, .{
             .node = 0,
@@ -1007,8 +1008,8 @@ pub const Builder = struct {
             // the builder's RNG, and skipping them would shift every later
             // sample and change the trees under `colsample_bylevel/bynode`.
             const t_bs = prof.start();
-            var left_split: hist.Split = .{};
-            var right_split: hist.Split = .{};
+            var left_split: split.Split = .{};
+            var right_split: split.Split = .{};
             // Draw, use, draw, use. `featuresFor` hands back a slice of one
             // shared buffer, so hoisting both draws above both searches makes
             // them alias and the left child gets searched with the right
@@ -1018,10 +1019,10 @@ pub const Builder = struct {
             // later sample.
             const left_search = b.featuresFor(w.depth + 1);
             if (!children_are_leaves)
-                left_split = hist.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
+                left_split = split.bestSplit(&b.bank, b.slot(slot_l), b.ds, left_search, w.split.left, p);
             const right_search = b.featuresFor(w.depth + 1);
             if (!children_are_leaves)
-                right_split = hist.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
+                right_split = split.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
             prof.stop(.best_split, t_bs);
 
             // Children inherit the path and add the feature just tested,
@@ -1154,7 +1155,7 @@ fn PartCtx(comptime C: type) type {
         rows: []u32,
         rows_out: []u32,
         col: []const C,
-        sp: hist.SplitTest,
+        sp: split.SplitTest,
         start: usize,
         chunk: usize,
         counts: []usize,

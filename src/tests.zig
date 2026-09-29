@@ -28,6 +28,7 @@ test {
     std.testing.refAllDecls(@import("forest.zig"));
     std.testing.refAllDecls(@import("fitted.zig"));
     std.testing.refAllDecls(@import("hist.zig"));
+    std.testing.refAllDecls(@import("split.zig"));
     std.testing.refAllDecls(@import("linear.zig"));
     std.testing.refAllDecls(@import("metric.zig"));
     std.testing.refAllDecls(@import("model.zig"));

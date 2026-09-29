@@ -22,6 +22,7 @@ const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const Pool = @import("pool.zig").Pool;
 const Objective = @import("objective.zig").Objective;
+const split = @import("split.zig");
 
 pub const magic = "ZMDL";
 /// 2 added the label encoding. A version-1 file still loads; it simply has
@@ -302,7 +303,7 @@ fn expandV3Masks(
         var bin: usize = 1;
         while (bin < 256) : (bin += 1) {
             if ((m[bin >> 6] >> @intCast(bin & 63)) & 1 == 0) continue;
-            if (ids.items.len - start >= hist.max_cat_ids) return error.BadModelFile;
+            if (ids.items.len - start >= split.max_cat_ids) return error.BadModelFile;
             try ids.append(gpa, @intCast(bin));
         }
         n.cat_ofs = @intCast(start);

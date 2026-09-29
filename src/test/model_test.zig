@@ -276,6 +276,7 @@ test "linear model learns the signal and L1 drives coefficients to zero" {
 // --------------------------------------------------------- save / load / blend
 
 const model_mod = @import("../model.zig");
+const split = @import("../split.zig");
 
 /// Builds a Frame by hand so a test can control the dictionary order, which is
 /// the whole point of the schema.
@@ -513,15 +514,15 @@ test "catContains agrees with a linear scan, on every set it can hold" {
     // against itself and a trained model simply routes every row right.
     var prng: std.Random.DefaultPrng = .init(5);
     const r = prng.random();
-    var ids: [hist.max_cat_ids]data.BinIdx = undefined;
+    var ids: [split.max_cat_ids]data.BinIdx = undefined;
     for (0..200) |_| {
         var present = [_]bool{false} ** 512;
-        const n = r.uintLessThan(usize, hist.max_cat_ids) + 1;
+        const n = r.uintLessThan(usize, split.max_cat_ids) + 1;
         var k: usize = 0;
         while (k < n) : (k += 1) present[r.uintLessThan(u32, 512)] = true;
         var m: usize = 0;
         for (present, 0..) |p, v| {
-            if (!p or m == hist.max_cat_ids) continue;
+            if (!p or m == split.max_cat_ids) continue;
             ids[m] = @intCast(v);
             m += 1;
         }
@@ -530,7 +531,7 @@ test "catContains agrees with a linear scan, on every set it can hold" {
             const bin: data.BinIdx = @intCast(v);
             var want = false;
             for (ids[0..m]) |x| want = want or x == bin;
-            try testing.expectEqual(want, hist.catContains(ids[0..m], bin));
+            try testing.expectEqual(want, split.catContains(ids[0..m], bin));
         }
     }
 }
