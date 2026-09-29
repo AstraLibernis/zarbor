@@ -144,11 +144,6 @@ pub const Dataset = struct {
         return d.wide_cols[f];
     }
 
-    /// Every feature's bin for one row, contiguous.
-    pub inline fn row(d: *const Dataset, r: usize) []const u8 {
-        return d.bins_rm[r * d.n_features ..][0..d.n_features];
-    }
-
     /// Largest bin count across features; sizes the histogram allocation.
     pub fn maxBins(d: *const Dataset) u16 {
         var m: u16 = 0;
