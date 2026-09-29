@@ -11,14 +11,14 @@
 //! test below therefore asserts on *achieved accuracy*, not merely on "it ran".
 
 const std = @import("std");
-const data = @import("data.zig");
-const config = @import("config.zig");
-const booster = @import("booster.zig");
-const forest = @import("forest.zig");
-const linear = @import("linear.zig");
-const hist = @import("hist.zig");
-const Pool = @import("pool.zig").Pool;
-const metric = @import("metric.zig");
+const data = @import("../data.zig");
+const config = @import("../config.zig");
+const booster = @import("../booster.zig");
+const forest = @import("../forest.zig");
+const linear = @import("../linear.zig");
+const hist = @import("../hist.zig");
+const Pool = @import("../pool.zig").Pool;
+const metric = @import("../metric.zig");
 
 const testing = std.testing;
 
@@ -275,7 +275,7 @@ test "linear model learns the signal and L1 drives coefficients to zero" {
 
 // --------------------------------------------------------- save / load / blend
 
-const model_mod = @import("model.zig");
+const model_mod = @import("../model.zig");
 
 /// Builds a Frame by hand so a test can control the dictionary order, which is
 /// the whole point of the schema.

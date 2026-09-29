@@ -81,12 +81,12 @@ pub const usage =
 
 // ----- the search space
 
-const Kind = enum { choice, uniform, log_uniform, int_uniform, int_log };
+pub const Kind = enum { choice, uniform, log_uniform, int_uniform, int_log };
 
 /// One axis. Values are carried as f64 so every strategy can treat the space
 /// uniformly; `render` turns a coordinate back into the string the config
 /// flag parser expects, which is what keeps this generic over any field.
-const Param = struct {
+pub const Param = struct {
     name: []const u8,
     kind: Kind,
     choices: []const []const u8 = &.{},
@@ -99,7 +99,7 @@ const Param = struct {
 
     /// Bounds in the *encoded* space -- log-scaled axes are searched in logs,
     /// so that a step near 0.1 counts for as much as a step near 50.
-    fn bounds(p: Param) struct { lo: f64, hi: f64 } {
+    pub fn bounds(p: Param) struct { lo: f64, hi: f64 } {
         return switch (p.kind) {
             .choice => .{ .lo = 0, .hi = @floatFromInt(p.choices.len - 1) },
             .uniform, .int_uniform => .{ .lo = p.lo, .hi = p.hi },
@@ -107,7 +107,7 @@ const Param = struct {
         };
     }
 
-    fn sample(p: Param, r: std.Random) f64 {
+    pub fn sample(p: Param, r: std.Random) f64 {
         const b = p.bounds();
         return switch (p.kind) {
             .choice => @floatFromInt(r.uintLessThan(usize, p.choices.len)),
@@ -134,7 +134,7 @@ const Param = struct {
         return std.math.clamp(v, b.lo, b.hi);
     }
 
-    fn render(p: Param, x: f64, buf: []u8) ![]const u8 {
+    pub fn render(p: Param, x: f64, buf: []u8) ![]const u8 {
         return switch (p.kind) {
             .choice => blk: {
                 const i: usize = @intFromFloat(@round(std.math.clamp(
@@ -154,7 +154,7 @@ const Param = struct {
     /// Lattice points for `grid`. A continuous axis has no natural set, so it
     /// is cut into `steps` points from end to end -- in the encoded space, so
     /// a log axis is cut geometrically.
-    fn gridPoints(p: Param, gpa: std.mem.Allocator, steps: usize) ![]f64 {
+    pub fn gridPoints(p: Param, gpa: std.mem.Allocator, steps: usize) ![]f64 {
         if (p.kind == .choice) {
             const xs = try gpa.alloc(f64, p.choices.len);
             for (xs, 0..) |*v, i| v.* = @floatFromInt(i);
@@ -171,7 +171,7 @@ const Param = struct {
 };
 
 /// `name=spec`, where spec is `a,b,c` or `lo..hi` with `:int` / `:log`.
-fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
+pub fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
     const eq = std.mem.findScalar(u8, text, '=') orelse return error.ParamNeedsValue;
     const name = text[0..eq];
     if (!config.hasField(name)) return error.UnknownConfigField;
@@ -216,7 +216,7 @@ fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
 /// A space worth searching for each model, so `tune` is useful with no
 /// `--param` at all. Ranges bracket the shipped defaults rather than centring
 /// on them, so a search can move in either direction.
-fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
+pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const specs: []const []const u8 = switch (algo) {
         .gbdt => &.{
             "n_rounds=200,300,500,800",
@@ -249,7 +249,7 @@ fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
 
 // ----- trials
 
-const Trial = struct {
+pub const Trial = struct {
     x: []f64,
     score: f64,
     folds: u32,
@@ -266,7 +266,7 @@ const Trial = struct {
 /// a value it never actually used -- which is exactly what happened: sixty
 /// trials printed `max_bin=64` while every one of them fitted the 256-bin
 /// matrix, and the winning config did not reproduce when run through `cv`.
-fn affectsBinning(name: []const u8) bool {
+pub fn affectsBinning(name: []const u8) bool {
     return std.mem.eql(u8, name, "max_bin") or
         std.mem.eql(u8, name, "bin_policy") or
         std.mem.eql(u8, name, "max_cat_levels");
@@ -275,7 +275,7 @@ fn affectsBinning(name: []const u8) bool {
 /// Holds the binned matrix, and rebuilds it when a trial asks for binning that
 /// differs from what is loaded. Re-binning costs ~200 ms against seconds of
 /// fitting, so doing it on change is cheap; doing it never was wrong.
-const Binner = struct {
+pub const Binner = struct {
     gpa: std.mem.Allocator,
     pool: *pool_mod.Pool,
     frame: *data.Frame,
@@ -290,7 +290,7 @@ const Binner = struct {
     policy: config.BinPolicy,
     rebins: usize = 0,
 
-    fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
+    pub fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
         if (cfg.max_bin != b.max_bin or cfg.bin_policy != b.policy or
             cfg.max_cat_levels != b.max_cat_levels)
         {
@@ -384,7 +384,7 @@ const Evaluator = struct {
 /// Modelling each axis independently is the "tree-structured" simplification:
 /// it cannot represent "a deep tree wants a bigger lambda", but it costs
 /// nothing and is what makes the estimator usable at this trial count.
-const Tpe = struct {
+pub const Tpe = struct {
     gamma: f64,
     candidates: usize,
 
@@ -438,7 +438,7 @@ const Tpe = struct {
         return @log(@max(acc, 1e-300) / (n_eff * @sqrt(2.0 * std.math.pi)));
     }
 
-    fn propose(
+    pub fn propose(
         t: Tpe,
         gpa: std.mem.Allocator,
         r: std.Random,
@@ -977,328 +977,4 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try out.print("\nwrote    {s}\n", .{op});
     }
     try out.flush();
-}
-
-// ----- tests
-
-const testing = std.testing;
-
-test "a choice spec keeps its values and its order" {
-    const p = try parseParam(testing.allocator, "max_depth=4,5,6");
-    defer testing.allocator.free(p.choices);
-    try testing.expectEqual(Kind.choice, p.kind);
-    try testing.expectEqual(@as(usize, 3), p.choices.len);
-    try testing.expectEqualStrings("4", p.choices[0]);
-    try testing.expectEqualStrings("6", p.choices[2]);
-}
-
-test "range specs pick up their int and log suffixes in either order" {
-    const a = try parseParam(testing.allocator, "lambda=0.1..50");
-    try testing.expectEqual(Kind.uniform, a.kind);
-    const b = try parseParam(testing.allocator, "lambda=0.1..50:log");
-    try testing.expectEqual(Kind.log_uniform, b.kind);
-    const c = try parseParam(testing.allocator, "n_rounds=200..800:int");
-    try testing.expectEqual(Kind.int_uniform, c.kind);
-    const d = try parseParam(testing.allocator, "n_rounds=200..800:int:log");
-    try testing.expectEqual(Kind.int_log, d.kind);
-    const e = try parseParam(testing.allocator, "n_rounds=200..800:log:int");
-    try testing.expectEqual(Kind.int_log, e.kind);
-}
-
-test "a spec naming no config field is rejected" {
-    try testing.expectError(error.UnknownConfigField, parseParam(testing.allocator, "not_a_field=1,2"));
-    try testing.expectError(error.EmptyParamRange, parseParam(testing.allocator, "lambda=50..1"));
-    try testing.expectError(error.LogRangeNeedsPositiveLow, parseParam(testing.allocator, "lambda=0..50:log"));
-}
-
-test "a log axis is searched geometrically, not linearly" {
-    const p = try parseParam(testing.allocator, "lambda=1..100:log");
-    const pts = try p.gridPoints(testing.allocator, 3);
-    defer testing.allocator.free(pts);
-    var buf: [64]u8 = undefined;
-    // Encoded midpoint of log(1)..log(100) is log(10), so the middle lattice
-    // point must be 10 -- a linear axis would have put 50.5 there.
-    const mid = try p.render(pts[1], &buf);
-    try testing.expectEqualStrings("10.000000", mid);
-}
-
-test "rendered values round-trip through the config flag parser" {
-    var cfg: config.Config = .{};
-    const p = try parseParam(testing.allocator, "max_depth=3..9:int");
-    var buf: [64]u8 = undefined;
-    const s = try p.render(7.4, &buf);
-    try testing.expect(try config.applyFlag(&cfg, p.name, s));
-    try testing.expectEqual(@as(u32, 7), cfg.max_depth);
-}
-
-test "grid points span the whole axis inclusively" {
-    const p = try parseParam(testing.allocator, "subsample=0.5..1.0");
-    const pts = try p.gridPoints(testing.allocator, 5);
-    defer testing.allocator.free(pts);
-    try testing.expectEqual(@as(usize, 5), pts.len);
-    try testing.expectApproxEqAbs(@as(f64, 0.5), pts[0], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), pts[4], 1e-12);
-}
-
-test "sampling stays inside the declared bounds" {
-    var prng: std.Random.DefaultPrng = .init(4);
-    const r = prng.random();
-    const specs = [_][]const u8{
-        "lambda=0.1..50:log",
-        "subsample=0.5..1.0",
-        "n_rounds=200..800:int",
-        "max_depth=4,5,6",
-    };
-    for (specs) |s| {
-        const p = try parseParam(testing.allocator, s);
-        defer if (p.kind == .choice) testing.allocator.free(p.choices);
-        const b = p.bounds();
-        for (0..200) |_| {
-            const v = p.sample(r);
-            try testing.expect(v >= b.lo - 1e-9 and v <= b.hi + 1e-9);
-        }
-    }
-}
-
-test "TPE proposes where good outnumbers bad, not merely where it has looked" {
-    const gpa = testing.allocator;
-    const p = try parseParam(gpa, "subsample=0.0..1.0");
-    const space = [_]Param{p};
-
-    // Twenty observations whose score rises with the parameter. A proposal
-    // drawn from the good density must land in the upper part of the range;
-    // a sampler ignoring the scores would average out near the middle.
-    var trials: std.ArrayList(Trial) = .empty;
-    defer trials.deinit(gpa);
-    var xs: [20][1]f64 = undefined;
-    for (&xs, 0..) |*slot, i| {
-        slot[0] = @as(f64, @floatFromInt(i)) / 19.0;
-        try trials.append(gpa, .{
-            .x = slot,
-            .score = slot[0],
-            .folds = 5,
-            .ms = 1,
-            .text = "",
-        });
-    }
-
-    var prng: std.Random.DefaultPrng = .init(9);
-    const tpe = Tpe{ .gamma = 0.25, .candidates = 32 };
-    var hits: usize = 0;
-    var outv: [1]f64 = undefined;
-    for (0..40) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
-        if (outv[0] > 0.6) hits += 1;
-    }
-    try testing.expect(hits > 30);
-}
-
-test "the default space covers every model" {
-    inline for (.{ config.Algo.gbdt, .random_forest, .linear }) |a| {
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const s = try defaultSpace(arena.allocator(), a);
-        try testing.expect(s.len >= 4);
-        // Every default axis must name a real field, or `tune` would fail
-        // only once someone ran it without --param.
-        for (s) |p| try testing.expect(config.hasField(p.name));
-    }
-}
-
-test "TPE keeps exploring when the good set collapses onto one point" {
-    const gpa = testing.allocator;
-    const p = try parseParam(gpa, "lambda=0.1..50:log");
-    const space = [_]Param{p};
-
-    // Every observation identical, and at the top of the range: the pathology
-    // that produced seven repeated trials with lambda pinned to 50. A Parzen
-    // estimate with no prior has zero density everywhere else, so the ratio
-    // cannot prefer anywhere else and the proposal freezes.
-    var trials: std.ArrayList(Trial) = .empty;
-    defer trials.deinit(gpa);
-    var xs: [24][1]f64 = undefined;
-    for (&xs, 0..) |*slot, i| {
-        slot[0] = p.bounds().hi;
-        try trials.append(gpa, .{
-            .x = slot,
-            .score = if (i < 6) 0.99 else 0.10,
-            .folds = 5,
-            .ms = 1,
-            .text = "",
-        });
-    }
-
-    var prng: std.Random.DefaultPrng = .init(21);
-    const tpe = Tpe{ .gamma = 0.25, .candidates = 32 };
-    var seen: std.ArrayList(f64) = .empty;
-    defer seen.deinit(gpa);
-    var outv: [1]f64 = undefined;
-    for (0..60) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
-        try seen.append(gpa, outv[0]);
-    }
-
-    var distinct: usize = 0;
-    for (seen.items, 0..) |v, i| {
-        var dup = false;
-        for (seen.items[0..i]) |w| if (@abs(v - w) < 1e-9) {
-            dup = true;
-        };
-        if (!dup) distinct += 1;
-    }
-    // Before the prior was added this was exactly 1.
-    try testing.expect(distinct > 5);
-}
-
-test "TPE does not pile proposals onto a boundary" {
-    const gpa = testing.allocator;
-    const p = try parseParam(gpa, "subsample=0.5..1.0");
-    const space = [_]Param{p};
-
-    // Good points sit near the top edge, so jitter pushes past it and gets
-    // clamped. Clamping alone would stack proposals exactly on the bound.
-    var trials: std.ArrayList(Trial) = .empty;
-    defer trials.deinit(gpa);
-    var xs: [20][1]f64 = undefined;
-    for (&xs, 0..) |*slot, i| {
-        slot[0] = if (i < 5) 0.99 else 0.55;
-        try trials.append(gpa, .{
-            .x = slot,
-            .score = if (i < 5) 0.9 else 0.1,
-            .folds = 5,
-            .ms = 1,
-            .text = "",
-        });
-    }
-
-    var prng: std.Random.DefaultPrng = .init(5);
-    const tpe = Tpe{ .gamma = 0.25, .candidates = 32 };
-    var on_bound: usize = 0;
-    var outv: [1]f64 = undefined;
-    for (0..60) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
-        if (@abs(outv[0] - 1.0) < 1e-12) on_bound += 1;
-    }
-    try testing.expect(on_bound < 30);
-}
-
-test "binning parameters are recognised as such" {
-    // If a new binning knob is added to Config and not listed here, `tune`
-    // will silently report a value it never applied. That failure is invisible
-    // in the output, so the list is asserted rather than assumed.
-    try testing.expect(affectsBinning("max_bin"));
-    try testing.expect(affectsBinning("bin_policy"));
-    try testing.expect(!affectsBinning("max_depth"));
-    try testing.expect(!affectsBinning("lambda"));
-    try testing.expect(!affectsBinning("n_rounds"));
-}
-
-// ----- regression tests
-
-/// Two categorical columns and a numeric target, built directly so the test
-/// stays hermetic. `wide` controls how many distinct levels the categorical
-/// carries, which is what decides the `max_bin` it can be binned under.
-fn testFrame(gpa: std.mem.Allocator, wide: usize, n_rows: usize) !data.Frame {
-    var levels_list: std.ArrayList([]u8) = .empty;
-    errdefer levels_list.deinit(gpa);
-    const cat = try gpa.alloc(f32, n_rows);
-    const num = try gpa.alloc(f32, n_rows);
-    for (0..wide) |i| {
-        var buf: [16]u8 = undefined;
-        try levels_list.append(gpa, try gpa.dupe(u8, try std.fmt.bufPrint(&buf, "L{d}", .{i})));
-    }
-    for (cat, num, 0..) |*c, *y, i| {
-        c.* = @floatFromInt(i % wide);
-        y.* = @floatFromInt(i % 7);
-    }
-    const names = try gpa.alloc([]u8, 2);
-    names[0] = try gpa.dupe(u8, "cat");
-    names[1] = try gpa.dupe(u8, "y");
-    const kinds = try gpa.alloc(data.ColumnKind, 2);
-    kinds[0] = .categorical;
-    kinds[1] = .numeric;
-    const vals = try gpa.alloc([]f32, 2);
-    vals[0] = cat;
-    vals[1] = num;
-    const levels = try gpa.alloc([][]u8, 2);
-    levels[0] = try levels_list.toOwnedSlice(gpa);
-    levels[1] = &.{};
-    return .{
-        .gpa = gpa,
-        .n_rows = n_rows,
-        .names = names,
-        .kinds = kinds,
-        .values = vals,
-        .levels = levels,
-    };
-}
-
-test "Binner: a rebin too narrow for a categorical leaves the cached matrix intact" {
-    // A `max_cat_levels` below the widest categorical column cannot be binned
-    // at all, and a search space that offers it as a choice will propose one.
-    // That has to be a skipped trial, not a failure.
-    //
-    // This used to be provoked through `max_bin`, which doubled as the
-    // categorical width limit. The two are separate now -- `max_bin` cuts
-    // numeric columns and has nothing to say about how many levels a
-    // categorical has -- so the same path is reached through the knob that
-    // actually governs it.
-    //
-    // It used to be fatal, and the escaping error then ran BOTH
-    // `defer binner.ds.deinit()` and a stale `errdefer full.deinit()` over one
-    // allocation: a double free, and a use-after-free once a successful rebin
-    // had already swapped the matrix out from under the stale handle.
-    // ReleaseFast segfaulted inside `free`; Debug aborted there. Only
-    // `--search=bandit` surfaced it, because it is the strategy that reliably
-    // walks the whole `max_bin` choice set early.
-    //
-    // `testing.allocator` fails this test on a double free or a leak, so the
-    // ownership half is asserted by construction.
-    const gpa = testing.allocator;
-    const p = try pool_mod.Pool.init(gpa, 2);
-    defer p.deinit();
-
-    var frame = try testFrame(gpa, 40, 200);
-    defer frame.deinit();
-
-    // A real encoder, not `undefined`. The label column is numeric, so an
-    // empty class list is the right one -- and `undefined` here meant the test
-    // read uninitialised memory inside `encode`, which happened to be benign
-    // until an unrelated allocation shifted underneath it.
-    var numeric_enc = data.LabelEncoder{ .gpa = gpa, .classes = &.{} };
-
-    var b = Binner{
-        .gpa = gpa,
-        .pool = p,
-        .frame = &frame,
-        .label_col = 1,
-        // A real encoder, not `undefined`. The column is numeric, so an empty
-        // class list is the right one -- and `undefined` here meant the test
-        // was reading uninitialised memory in `encode`, which happened to be
-        // benign until an unrelated allocation shifted underneath it.
-        .enc = &numeric_enc,
-        .drops = &.{},
-        .ds = try data.quantise(gpa, p, &frame, .{ .max_bin = 64 }, null, &.{}),
-        .max_bin = 64,
-        .policy = (config.Config{}).bin_policy,
-    };
-    defer b.ds.deinit();
-
-    const before = b.ds.n_rows;
-    try testing.expect(before == 200);
-
-    // 40 levels. A limit of 32 cannot admit them.
-    try testing.expectError(
-        error.CategoricalTooWide,
-        b.get(.{ .max_bin = 64, .max_cat_levels = 32 }),
-    );
-
-    // The cache must be untouched: same rows, and still the width we loaded.
-    try testing.expectEqual(@as(u16, 64), b.max_bin);
-    try testing.expectEqual(before, b.ds.n_rows);
-
-    // And a later valid request must still rebin normally.
-    const ds = try b.get(.{ .max_bin = 128 });
-    try testing.expectEqual(before, ds.n_rows);
-    try testing.expectEqual(@as(usize, 1), b.rebins);
 }

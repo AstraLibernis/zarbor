@@ -11,15 +11,15 @@
 //! counts — rather than only that accuracy stayed acceptable.
 
 const std = @import("std");
-const data = @import("data.zig");
-const config = @import("config.zig");
-const booster = @import("booster.zig");
-const hist = @import("hist.zig");
-const forest = @import("forest.zig");
-const linear = @import("linear.zig");
-const tree = @import("tree.zig");
-const Pool = @import("pool.zig").Pool;
-const metric = @import("metric.zig");
+const data = @import("../data.zig");
+const config = @import("../config.zig");
+const booster = @import("../booster.zig");
+const hist = @import("../hist.zig");
+const forest = @import("../forest.zig");
+const linear = @import("../linear.zig");
+const tree = @import("../tree.zig");
+const Pool = @import("../pool.zig").Pool;
+const metric = @import("../metric.zig");
 
 const testing = std.testing;
 
