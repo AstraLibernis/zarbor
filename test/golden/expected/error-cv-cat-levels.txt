@@ -1,0 +1,13 @@
+$ zarbor cv titanic3.csv --label=survived --max_cat_levels=150 --folds=3 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 1
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+error: a categorical column has more levels than a bin can address
+       (limit 256, set by --max_bin; a bin is stored as a u8)
+
+Either --drop the column, or replace it with something numeric --
+for a high-cardinality group, a statistic of that group (its mean
+target, size, or rank) is usually more useful than its identity.
+--- stderr
+error: CategoricalTooWide
+--- files
