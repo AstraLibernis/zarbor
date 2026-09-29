@@ -25,6 +25,7 @@ test {
     std.testing.refAllDecls(@import("csv.zig"));
     std.testing.refAllDecls(@import("cv.zig"));
     std.testing.refAllDecls(@import("data.zig"));
+    std.testing.refAllDecls(@import("goss.zig"));
     std.testing.refAllDecls(@import("forest.zig"));
     std.testing.refAllDecls(@import("fitted.zig"));
     std.testing.refAllDecls(@import("hist.zig"));

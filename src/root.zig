@@ -13,6 +13,7 @@ pub const pool = @import("pool.zig");
 pub const prof = @import("prof.zig");
 pub const tree = @import("tree.zig");
 pub const booster = @import("booster.zig");
+pub const goss = @import("goss.zig");
 pub const forest = @import("forest.zig");
 pub const linear = @import("linear.zig");
 pub const lin_solve = @import("lin_solve.zig");

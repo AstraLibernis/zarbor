@@ -20,6 +20,7 @@ const linear = @import("../linear.zig");
 const tree = @import("../tree.zig");
 const Pool = @import("../pool.zig").Pool;
 const metric = @import("../metric.zig");
+const goss = @import("../goss.zig");
 
 const testing = std.testing;
 
@@ -654,7 +655,7 @@ test "goss_rank: the two keys select different rows, and coincide when h is 1" {
     // probabilities have spread by then, which is a property of the fixture,
     // not of the mechanism under test.
     const gpa = testing.allocator;
-    const counts = try gpa.alloc(u32, booster.n_radix);
+    const counts = try gpa.alloc(u32, goss.n_radix);
     defer gpa.free(counts);
 
     // Row 0 is confidently wrong (p = 0.9, y = 0): large residual, tiny
@@ -666,8 +667,8 @@ test "goss_rank: the two keys select different rows, and coincide when h is 1" {
         .{ .g = 0.5, .h = 0.25 }, // |g| = 0.50   |g*h| = 0.125
         .{ .g = 0.1, .h = 0.09 }, // |g| = 0.10   |g*h| = 0.009
     };
-    const c_grad = booster.gossCut(&pairs, counts, 1, .gradient);
-    const c_gh = booster.gossCut(&pairs, counts, 1, .gradient_hessian);
+    const c_grad = goss.gossCut(&pairs, counts, 1, .gradient);
+    const c_gh = goss.gossCut(&pairs, counts, 1, .gradient_hessian);
 
     // The single kept row is row 0 under |g| and row 1 under |g*h|.
     try testing.expect(c_grad.t == @as(u32, @bitCast(@as(f32, 0.9))));
