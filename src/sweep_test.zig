@@ -498,11 +498,17 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
     // Adam gets the same 40 passes L-BFGS gets. The whole point of a
     // curvature estimate is that those passes go much further.
     var adam = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .adam, .lin_epochs = 40, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .adam,
+        .lin_epochs = 40,
+        .verbose_eval = 0,
     }, null);
     defer adam.model.deinit();
     var lb = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .lbfgs, .lin_epochs = 40, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .lbfgs,
+        .lin_epochs = 40,
+        .verbose_eval = 0,
     }, null);
     defer lb.model.deinit();
     adam.model.predict(f.pool, &f.ds, p);
@@ -515,7 +521,10 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
     // its own. Steepest descent with the same line search converges linearly
     // and would still be moving here.
     var plenty = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .lbfgs, .lin_epochs = 400, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .lbfgs,
+        .lin_epochs = 400,
+        .verbose_eval = 0,
     }, null);
     defer plenty.model.deinit();
     try testing.expect(plenty.epochs < 400);
@@ -530,7 +539,11 @@ test "lin_solver: lbfgs beats Adam at the same iteration budget and ignores lin_
     // search must produce the same coefficients whatever it is set to --
     // otherwise the flag is lying about what it controls.
     var other = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .lbfgs, .lin_epochs = 40, .lin_lr = 0.5, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .lbfgs,
+        .lin_epochs = 40,
+        .lin_lr = 0.5,
+        .verbose_eval = 0,
     }, null);
     defer other.model.deinit();
     for (lb.model.w, other.model.w) |a, b| try testing.expectEqual(a, b);
@@ -583,7 +596,11 @@ test "alpha under lbfgs lands on a genuine L1 optimum" {
     var saw_partial = false;
     for ([_]f32{ 25, 50, 100, 200 }) |alpha| {
         var r = try linear.train(gpa, fx.pool, &fx.ds, null, .{
-            .algo = .linear, .lin_epochs = 600, .alpha = alpha, .lambda = lambda, .verbose_eval = 0,
+            .algo = .linear,
+            .lin_epochs = 600,
+            .alpha = alpha,
+            .lambda = lambda,
+            .verbose_eval = 0,
         }, null);
         defer r.model.deinit();
 
@@ -667,19 +684,18 @@ test "goss_rank makes no difference on squared error, where h is 1" {
     var f = try Fix.init(gpa, 4000, 77);
     defer f.deinit();
     const cfg = config.Config{
-        .objective = .squared_error, .n_rounds = 60, .learning_rate = 0.1,
-        .max_depth = 5, .sampling = .goss, .top_rate = 0.2, .other_rate = 0.1,
+        .objective = .squared_error,
+        .n_rounds = 60,
+        .learning_rate = 0.1,
+        .max_depth = 5,
+        .sampling = .goss,
+        .top_rate = 0.2,
+        .other_rate = 0.1,
         .verbose_eval = 0,
     };
-    var a = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds,
-        .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth,
-        .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate,
-        .goss_rank = .gradient });
+    var a = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds, .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth, .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate, .goss_rank = .gradient });
     defer a.model.deinit();
-    var b = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds,
-        .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth,
-        .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate,
-        .goss_rank = .gradient_hessian });
+    var b = try f.fit(.{ .objective = cfg.objective, .n_rounds = cfg.n_rounds, .learning_rate = cfg.learning_rate, .max_depth = cfg.max_depth, .sampling = .goss, .top_rate = cfg.top_rate, .other_rate = cfg.other_rate, .goss_rank = .gradient_hessian });
     defer b.model.deinit();
     const p1 = try gpa.alloc(f32, f.ds.n_rows);
     defer gpa.free(p1);
@@ -767,7 +783,10 @@ test "a solver stalled by bad scaling is not reported as converged" {
     for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
 
     var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_standardize = false, .lin_epochs = 300, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_standardize = false,
+        .lin_epochs = 300,
+        .verbose_eval = 0,
     }, null);
     defer bad.model.deinit();
     try testing.expect(bad.fit.stalled());
@@ -778,7 +797,10 @@ test "a solver stalled by bad scaling is not reported as converged" {
     // identical data must now arrive. Without this half the test would pass
     // against a `stalled()` that always returns true.
     var good = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_standardize = true, .lin_epochs = 300, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_standardize = true,
+        .lin_epochs = 300,
+        .verbose_eval = 0,
     }, null);
     defer good.model.deinit();
     try testing.expect(!good.fit.stalled());
@@ -797,8 +819,11 @@ test "adam reports a stall too, and does not cry wolf on a good design" {
     for (f.ds.edges[1]) |*e| e.* *= 50_000.0;
 
     var bad = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .adam, .lin_standardize = false,
-        .lin_epochs = 300, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .adam,
+        .lin_standardize = false,
+        .lin_epochs = 300,
+        .verbose_eval = 0,
     }, null);
     defer bad.model.deinit();
     try testing.expect(bad.fit.stalled());
@@ -811,8 +836,11 @@ test "adam reports a stall too, and does not cry wolf on a good design" {
     // Without this the test would pass against a `stalled()` that always
     // returns true, which is the mutation that kills the lbfgs test above.
     var good = try linear.train(gpa, f.pool, &f.ds, null, .{
-        .algo = .linear, .lin_solver = .adam, .lin_standardize = true,
-        .lin_epochs = 20_000, .verbose_eval = 0,
+        .algo = .linear,
+        .lin_solver = .adam,
+        .lin_standardize = true,
+        .lin_epochs = 20_000,
+        .verbose_eval = 0,
     }, null);
     defer good.model.deinit();
     try testing.expect(!good.fit.stalled());

@@ -45,8 +45,13 @@ const numeric_bins: u16 = 64;
 /// `n_numeric` numeric columns plus one categorical *declared* `cat_bins` wide.
 fn makeDs(gpa: std.mem.Allocator, n_rows: usize, cat_bins: u16, seed: u64) !data.Dataset {
     const nf = n_numeric + 1;
-    const bins = try gpa.alloc(data.BinIdx, nf * n_rows);
+    // The library's layout: one byte per bin in `bins`, and a column declared wider
+    // than 256 bins in `wide_cols` instead (its `bins` bytes then go unread).
+    const bins = try gpa.alloc(u8, nf * n_rows);
     const bins_rm = try gpa.alloc(data.BinIdx, nf * n_rows);
+    const wide_cols = try gpa.alloc([]data.BinIdx, nf);
+    @memset(wide_cols, &.{});
+    if (cat_bins > 256) wide_cols[n_numeric] = try gpa.alloc(data.BinIdx, n_rows);
     const labels = try gpa.alloc(f32, n_rows);
     var prng: std.Random.DefaultPrng = .init(seed);
     const r = prng.random();
@@ -58,7 +63,8 @@ fn makeDs(gpa: std.mem.Allocator, n_rows: usize, cat_bins: u16, seed: u64) !data
             else
                 @intCast(numeric_bins - 1);
             const b = r.intRangeAtMost(data.BinIdx, 1, top);
-            bins[f * n_rows + row] = b;
+            bins[f * n_rows + row] = @intCast(@min(b, 255));
+            if (wide_cols[f].len != 0) wide_cols[f][row] = b;
             bins_rm[row * nf + f] = b;
             if (f < 3) acc += @floatFromInt(b);
         }
@@ -85,6 +91,7 @@ fn makeDs(gpa: std.mem.Allocator, n_rows: usize, cat_bins: u16, seed: u64) !data
         .n_rows = n_rows,
         .n_features = nf,
         .bins = bins,
+        .wide_cols = wide_cols,
         .bins_rm = bins_rm,
         .n_bins = nb,
         .edges = edges,

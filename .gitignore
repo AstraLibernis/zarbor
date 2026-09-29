@@ -7,3 +7,5 @@ bench/arena/*.pred.csv
 bench/arena/run.log
 bench/arena/fig_dark.png
 bench/arena/fig_hover.png
+__pycache__/
+*.pyc

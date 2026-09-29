@@ -17,7 +17,7 @@
 //! make them *one*: pad the bin to four f64 lanes and let a single 32-byte
 //! vector load-add-store carry g, h and n together.
 //!
-//! Build: zig build-exe bench/binshape.zig -O ReleaseFast -femit-bin=/tmp/bs
+//! Run: zig build bench-binshape -Doptimize=ReleaseFast
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -415,13 +415,16 @@ pub fn main(init: std.process.Init) !void {
         \\slot: Bin24 {d} bins = {d:.1} KB | Vec4 {d} bins = {d:.1} KB
         \\
     , .{
-        N_FEAT,                                                   comptime blk: {
+        N_FEAT,
+        comptime blk: {
             var t: usize = 0;
             for (WIDTHS) |w| t += w;
             break :blk t;
         },
-        REPS,                                                     off24[N_FEAT],
-        @as(f64, @floatFromInt(off24[N_FEAT] * 24)) / 1024.0,     off32[N_FEAT],
+        REPS,
+        off24[N_FEAT],
+        @as(f64, @floatFromInt(off24[N_FEAT] * 24)) / 1024.0,
+        off32[N_FEAT],
         @as(f64, @floatFromInt(off32[N_FEAT] * 32)) / 1024.0,
     });
 

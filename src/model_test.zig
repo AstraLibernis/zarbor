@@ -370,7 +370,6 @@ test "applySchema maps categories by string, not by the new file's own ids" {
     try testing.expectEqual(@as(u8, 0), cat[3]); // mauve
 }
 
-
 // ---------------------------------------------------------------- fixtures
 //
 // One dataset and one model of each kind, trained once for the whole file.

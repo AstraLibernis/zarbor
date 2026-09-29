@@ -172,17 +172,17 @@ const Param = struct {
 
 /// `name=spec`, where spec is `a,b,c` or `lo..hi` with `:int` / `:log`.
 fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
-    const eq = std.mem.indexOfScalar(u8, text, '=') orelse return error.ParamNeedsValue;
+    const eq = std.mem.findScalar(u8, text, '=') orelse return error.ParamNeedsValue;
     const name = text[0..eq];
     if (!config.hasField(name)) return error.UnknownConfigField;
     var spec = text[eq + 1 ..];
     if (spec.len == 0) return error.EmptyParamSpec;
 
-    if (std.mem.indexOf(u8, spec, "..")) |dots| {
+    if (std.mem.find(u8, spec, "..")) |dots| {
         var is_int = false;
         var is_log = false;
         // Suffixes are order-independent so `:int:log` and `:log:int` agree.
-        while (std.mem.lastIndexOfScalar(u8, spec, ':')) |c| {
+        while (std.mem.findScalarLast(u8, spec, ':')) |c| {
             const suffix = spec[c + 1 ..];
             if (std.mem.eql(u8, suffix, "int")) {
                 is_int = true;
@@ -547,7 +547,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             continue;
         }
         const body = arg[2..];
-        const eq = std.mem.indexOfScalar(u8, body, '=') orelse return error.FlagNeedsValue;
+        const eq = std.mem.findScalar(u8, body, '=') orelse return error.FlagNeedsValue;
         const key = body[0..eq];
         const val = body[eq + 1 ..];
         if (std.mem.eql(u8, key, "label")) {
@@ -705,11 +705,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         \\
         \\
     , .{
-        path,              full.n_rows,
-        full.n_features,   target,
-        @tagName(cfg.algo), @tagName(search),
-        space.len,         n_folds,
-        fold_seed,         pool.workerCount(),
+        path,                   full.n_rows,
+        full.n_features,        target,
+        @tagName(cfg.algo),     @tagName(search),
+        space.len,              n_folds,
+        fold_seed,              pool.workerCount(),
         @tagName(builtin.mode), prep_ms,
     });
     for (space) |p| {
@@ -763,9 +763,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 mark = "  <- best";
             }
             try w.print("{d:>4}  {d:.6}  {d}f {d:>6}ms  {s}{s}\n", .{
-                i + 1,          o.pooled,
-                o.folds_run,    @as(u64, @intCast(@max(o.fit_ms, 0))),
-                text,           mark,
+                i + 1,       o.pooled,
+                o.folds_run, @as(u64, @intCast(@max(o.fit_ms, 0))),
+                text,        mark,
             });
             try w.flush();
         }

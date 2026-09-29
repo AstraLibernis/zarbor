@@ -985,7 +985,6 @@ pub const Builder = struct {
     }
 };
 
-
 /// Shared state for the three passes of a parallel partition.
 ///
 /// `parallelFor` hands out fixed-size chunks from a cursor, so `begin / chunk`
@@ -1033,7 +1032,7 @@ const TotalCtx = struct {
 fn PartCtx(comptime C: type) type {
     return struct {
         const Self = @This();
-    
+
         rows: []u32,
         rows_out: []u32,
         col: []const C,
@@ -1045,43 +1044,41 @@ fn PartCtx(comptime C: type) type {
         right: []usize,
 
         fn count(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        var n: usize = 0;
-        for (self.rows[self.start + begin .. self.start + end]) |row| {
-            if (Builder.goesLeft(self.col[row], self.sp)) n += 1;
+            _ = worker;
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            var n: usize = 0;
+            for (self.rows[self.start + begin .. self.start + end]) |row| {
+                if (Builder.goesLeft(self.col[row], self.sp)) n += 1;
+            }
+            self.counts[begin / self.chunk] = n;
         }
-        self.counts[begin / self.chunk] = n;
-    }
 
         fn scatter(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        const c = begin / self.chunk;
-        var li = self.left[c];
-        var ri = self.right[c];
-        var i = self.start + begin;
-        while (i < self.start + end) : (i += 1) {
-            const row = self.rows[i];
-            // Branchless: which side a row takes is close to a coin flip near
-            // a good split, so a branch here mispredicts about half the time.
-            // Selecting the cursor instead costs a cmov and nothing else.
-            const left = Builder.goesLeft(self.col[row], self.sp);
-            const dst = if (left) li else ri;
-            self.rows_out[dst] = row;
-            li += @intFromBool(left);
-            ri += @intFromBool(!left);
+            _ = worker;
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const c = begin / self.chunk;
+            var li = self.left[c];
+            var ri = self.right[c];
+            var i = self.start + begin;
+            while (i < self.start + end) : (i += 1) {
+                const row = self.rows[i];
+                // Branchless: which side a row takes is close to a coin flip near
+                // a good split, so a branch here mispredicts about half the time.
+                // Selecting the cursor instead costs a cmov and nothing else.
+                const left = Builder.goesLeft(self.col[row], self.sp);
+                const dst = if (left) li else ri;
+                self.rows_out[dst] = row;
+                li += @intFromBool(left);
+                ri += @intFromBool(!left);
+            }
         }
-    }
 
         fn copyBack(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        const a = self.start + begin;
-        const b_ = self.start + end;
-        @memcpy(self.rows[a..b_], self.rows_out[a..b_]);
-    }
+            _ = worker;
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const a = self.start + begin;
+            const b_ = self.start + end;
+            @memcpy(self.rows[a..b_], self.rows_out[a..b_]);
+        }
     };
 }
-
-

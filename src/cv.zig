@@ -134,7 +134,7 @@ pub fn assignGroupFolds(
     errdefer gpa.free(fold);
 
     // Distinct group ids, and how many rows each holds.
-    var counts: std.AutoArrayHashMapUnmanaged(u64, u32) = .empty;
+    var counts: std.array_hash_map.Auto(u64, u32) = .empty;
     defer counts.deinit(gpa);
     for (groups) |g| {
         const key: u64 = @bitCast(@as(f64, g));
@@ -193,7 +193,6 @@ fn shuffle(r: std.Random, xs: []u32) void {
         std.mem.swap(u32, &xs[i], &xs[j]);
     }
 }
-
 
 /// What one cross-validation produced. `pooled` is the out-of-fold score over
 /// every evaluated row at once; `mean`/`sd` describe the spread between folds.
@@ -309,8 +308,8 @@ pub fn crossValidate(
         };
         if (opts.progress) |w| {
             try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}\n", .{
-                k,                 head,
-                valid_ds.n_rows,   if (cfg.objective == .logistic) "auc" else "rmse",
+                k,               head,
+                valid_ds.n_rows, if (cfg.objective == .logistic) "auc" else "rmse",
                 per_fold[k],
             });
             try w.flush();
@@ -375,7 +374,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             continue;
         }
         const body = arg[2..];
-        const eq = std.mem.indexOfScalar(u8, body, '=') orelse return error.FlagNeedsValue;
+        const eq = std.mem.findScalar(u8, body, '=') orelse return error.FlagNeedsValue;
         const key = body[0..eq];
         const val = body[eq + 1 ..];
         if (std.mem.eql(u8, key, "label")) {
@@ -476,12 +475,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             \\
             \\
         , .{
-            path,                          full.n_rows,
-            full.n_features,               target,
-            n_folds,                       fold_seed,
-            if (group_col != null) ", grouped" else if (cfg.objective == .logistic) ", stratified" else "",
-            pool.workerCount(),            @tagName(builtin.mode),
-            @divTrunc(t_bin - t0, 1_000_000),
+            path,                                                                                           full.n_rows,
+            full.n_features,                                                                                target,
+            n_folds,                                                                                        fold_seed,
+            if (group_col != null) ", grouped" else if (cfg.objective == .logistic) ", stratified" else "", pool.workerCount(),
+            @tagName(builtin.mode),                                                                         @divTrunc(t_bin - t0, 1_000_000),
         });
         try out.flush();
     }
@@ -585,7 +583,6 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     }
     try out.flush();
 }
-
 
 // ----- tests
 

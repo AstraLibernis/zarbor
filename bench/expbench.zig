@@ -9,7 +9,7 @@
 //! evaluation is the cost, not anyone's implementation -- and the vector form
 //! is 11.7x, accurate to under 1e-6 absolute.
 //!
-//! Build: zig build-exe bench/expbench.zig -O ReleaseFast -lc -femit-bin=/tmp/eb
+//! Run: zig build bench-exp -Doptimize=ReleaseFast
 
 const std = @import("std");
 const linux = std.os.linux;

@@ -63,7 +63,6 @@ const usage =
     \\
 ;
 
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -113,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const body = arg[2..];
-        const eq = std.mem.indexOfScalar(u8, body, '=') orelse {
+        const eq = std.mem.findScalar(u8, body, '=') orelse {
             try out.writeAll(usage);
             try out.flush();
             return error.FlagNeedsValue;
@@ -491,7 +490,7 @@ fn score(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, mo
             continue;
         }
         const body = arg[2..];
-        const eq = std.mem.indexOfScalar(u8, body, '=') orelse return error.FlagNeedsValue;
+        const eq = std.mem.findScalar(u8, body, '=') orelse return error.FlagNeedsValue;
         const key = body[0..eq];
         const val = body[eq + 1 ..];
         if (std.mem.eql(u8, key, "model") or std.mem.eql(u8, key, "models")) {
@@ -695,7 +694,6 @@ fn writePredictions(
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
-
 /// Show which class became which number, or that the target was already
 /// numeric and untouched.
 fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
@@ -719,35 +717,35 @@ fn printEncoding(out: *std.Io.Writer, enc: *const data.LabelEncoder) !void {
 fn explainLabel(out: *std.Io.Writer, err: anyerror, target: []const u8) !void {
     const hint: []const u8 = switch (err) {
         error.MulticlassNotSupported =>
-            \\has more than two distinct values. zmodels fits binary and
-            \\regression targets only; a multiclass column would otherwise be
-            \\encoded 0,1,2,... and fitted as if those were magnitudes.
+        \\has more than two distinct values. zmodels fits binary and
+        \\regression targets only; a multiclass column would otherwise be
+        \\encoded 0,1,2,... and fitted as if those were magnitudes.
         ,
         error.SingleClassTarget =>
-            \\has only one distinct value, so there is nothing to learn.
+        \\has only one distinct value, so there is nothing to learn.
         ,
         error.EmptyTarget => "is empty.",
         error.PosLabelNotFound =>
-            \\does not contain the class named by --pos-label. Run without it
-            \\to see the classes as parsed.
+        \\does not contain the class named by --pos-label. Run without it
+        \\to see the classes as parsed.
         ,
         error.PosLabelOnNumericTarget =>
-            \\is numeric, so --pos-label has nothing to name. Its values are
-            \\used as-is.
+        \\is numeric, so --pos-label has nothing to name. Its values are
+        \\used as-is.
         ,
         error.MissingLabelValue =>
-            \\has missing values. A missing target cannot be guessed, and
-            \\treating it as the negative class would bias the fit.
+        \\has missing values. A missing target cannot be guessed, and
+        \\treating it as the negative class would bias the fit.
         ,
         error.LabelOutOfRange =>
-            \\has values outside [0,1], which the logistic objective cannot
-            \\represent. Use --objective=squared_error, or recode the target.
+        \\has values outside [0,1], which the logistic objective cannot
+        \\represent. Use --objective=squared_error, or recode the target.
         ,
         error.UnseenLabelClass =>
-            \\contains a class the model was not trained on.
+        \\contains a class the model was not trained on.
         ,
         error.LabelKindMismatch =>
-            \\is numeric here but was a string in training, or the reverse.
+        \\is numeric here but was a string in training, or the reverse.
         ,
         else => return,
     };

@@ -63,9 +63,9 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\
     , .{
-        N_FEAT,               uniform_stride,                uniform_len,
-        uniform_len * @sizeOf(Bin) / 1024,                   packed_len,
-        packed_len * @sizeOf(Bin) / 1024,                    @as(f64, @floatFromInt(uniform_len)) /
+        N_FEAT,                            uniform_stride, uniform_len,
+        uniform_len * @sizeOf(Bin) / 1024, packed_len,     packed_len * @sizeOf(Bin) / 1024,
+        @as(f64, @floatFromInt(uniform_len)) /
             @as(f64, @floatFromInt(packed_len)),
     });
 

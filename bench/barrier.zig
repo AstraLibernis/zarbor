@@ -11,8 +11,7 @@
 //! answer turned out to be serial work inside the loop (the root gradient
 //! sum, the split search) rather than the cost of going parallel at all.
 //!
-//! Build: zig build-exe -O ReleaseFast --dep pool -Mroot=bench/barrier.zig \
-//!            -Mpool=src/pool.zig -femit-bin=/tmp/bar
+//! Run: zig build bench-barrier -Doptimize=ReleaseFast
 
 const std = @import("std");
 const linux = std.os.linux;

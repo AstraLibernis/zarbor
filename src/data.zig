@@ -33,7 +33,6 @@ pub const ColumnKind = csv.ColumnKind;
 pub const Frame = csv.Frame;
 pub const readCsv = csv.readCsv;
 
-
 // ------------------------------------------------------------------ binning
 
 /// A quantised training matrix.

@@ -518,14 +518,11 @@ pub fn train(
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
         prof.stop(.grad, t_g);
 
-        const subset: ?[]const u32 = if (cfg.sampling == .goss)
-            blk: {
-                const t_gs = prof.start();
-                defer prof.stop(.goss_select, t_gs);
-                break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
-            }
-        else
-            null;
+        const subset: ?[]const u32 = if (cfg.sampling == .goss) blk: {
+            const t_gs = prof.start();
+            defer prof.stop(.goss_select, t_gs);
+            break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
+        } else null;
 
         var t = try builder.growRows(grads, subset);
         errdefer t.deinit(gpa);

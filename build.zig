@@ -52,4 +52,20 @@ pub fn build(b: *std.Build) void {
 
     b.step("bench-widecat", "Measure what a wide categorical column costs")
         .dependOn(&b.addRunArtifact(wc).step);
+
+    // Standalone microbenchmarks, each answering one recorded question (see its header).
+    const pool_mod = b.createModule(.{ .root_source_file = b.path("src/pool.zig"), .target = target, .optimize = optimize });
+    const micro = [_]struct { step: []const u8, file: []const u8, desc: []const u8, libc: bool = false, pool: bool = false }{
+        .{ .step = "bench-barrier", .file = "bench/barrier.zig", .desc = "What one parallel region costs", .pool = true },
+        .{ .step = "bench-binshape", .file = "bench/binshape.zig", .desc = "Histogram bin shape at real feature widths" },
+        .{ .step = "bench-exp", .file = "bench/expbench.zig", .desc = "sigmoid: @exp vs glibc expf vs vector 2^x", .libc = true },
+        .{ .step = "bench-hist", .file = "bench/histbench.zig", .desc = "Histogram accumulation kernel variants" },
+        .{ .step = "bench-layout", .file = "bench/layoutbench.zig", .desc = "Uniform stride vs packed per-feature offsets" },
+    };
+    for (micro) |m| {
+        const micro_mod = b.createModule(.{ .root_source_file = b.path(m.file), .target = target, .optimize = optimize, .link_libc = m.libc });
+        if (m.pool) micro_mod.addImport("pool", pool_mod);
+        const exe_m = b.addExecutable(.{ .name = m.step, .root_module = micro_mod });
+        b.step(m.step, m.desc).dependOn(&b.addRunArtifact(exe_m).step);
+    }
 }

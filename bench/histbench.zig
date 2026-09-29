@@ -9,7 +9,7 @@
 //! here takes seconds instead of a two-minute training run, and removes every
 //! confound the full pipeline brings.
 //!
-//! Build: zig build-exe bench/histbench.zig -O ReleaseFast -femit-bin=/tmp/hb
+//! Run: zig build bench-hist -Doptimize=ReleaseFast
 
 const std = @import("std");
 const linux = std.os.linux;
