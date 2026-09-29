@@ -15,13 +15,13 @@
 
 const std = @import("std");
 const data = @import("data.zig");
-const config = @import("config.zig");
 const tree = @import("tree.zig");
 const hist = @import("hist.zig");
 const booster = @import("booster.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const Pool = @import("pool.zig").Pool;
+const Objective = @import("objective.zig").Objective;
 
 pub const magic = "ZMDL";
 /// 2 added the label encoding. A version-1 file still loads; it simply has
@@ -47,7 +47,7 @@ pub const Bundle = struct {
     gpa: std.mem.Allocator,
     kind: Kind,
     schema: data.Schema,
-    objective: config.Objective,
+    objective: Objective,
     base_score: f32 = 0,
     trees: []tree.Tree = &.{},
     lin: ?linear.Linear = null,
@@ -447,7 +447,7 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     if (ver == 0 or ver > format_version) return error.UnsupportedModelVersion;
 
     const kind = std.enums.fromInt(Kind, try r.u8v()) orelse return error.BadModelFile;
-    const obj = std.enums.fromInt(config.Objective, try r.u8v()) orelse return error.BadModelFile;
+    const obj = std.enums.fromInt(Objective, try r.u8v()) orelse return error.BadModelFile;
     const base = try r.f32v();
 
     var label: []u8 = &.{};

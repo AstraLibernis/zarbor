@@ -297,7 +297,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             best_i: *?usize,
             x: []const f64,
             o: cv.Outcome,
-            obj: config.Objective,
+            obj: zarbor.objective.Objective,
         ) !void {
             const xs = try a.alloc(f64, x.len);
             @memcpy(xs, x);
@@ -415,7 +415,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 if (scored.items.len == 0) break;
 
                 const S = struct {
-                    obj: config.Objective,
+                    obj: zarbor.objective.Objective,
                     fn lessThan(c: @This(), a: Scored, b: Scored) bool {
                         return cv.better(c.obj, a.s, b.s);
                     }
@@ -443,7 +443,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     for (order, 0..) |*v, i| v.* = @intCast(i);
     const Ctx = struct {
         t: []const Trial,
-        obj: config.Objective,
+        obj: zarbor.objective.Objective,
         fn lessThan(c: @This(), a: u32, b: u32) bool {
             return cv.better(c.obj, c.t[a].score, c.t[b].score);
         }

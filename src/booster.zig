@@ -16,6 +16,36 @@ const tree = @import("tree.zig");
 const config = @import("config.zig");
 const metric = @import("metric.zig");
 const prof = @import("prof.zig");
+const Objective = @import("objective.zig").Objective;
+
+/// How rows are chosen for each tree.
+pub const Sampling = enum {
+    /// Uniform random subset of size `subsample`, without replacement.
+    uniform,
+    /// LightGBM's Gradient-based One-Side Sampling: keep every large-gradient
+    /// row, sample the rest, and amplify the survivors so the gradient sum
+    /// stays unbiased. Ignores `subsample`.
+    goss,
+};
+
+/// Which magnitude GOSS ranks rows by when choosing the ones to keep in full.
+///
+/// This is the one place the GOSS paper and LightGBM's implementation part
+/// company, and it is worth 0.0012 AUC on a binary problem. Measured in
+/// docs/goss.md.
+pub const GossRank = enum {
+    /// `|g|`. What Ke et al. (NeurIPS 2017) specify, and what LightGBM's own
+    /// `top_rate` documentation describes. Keeps the rows with the largest
+    /// residual.
+    gradient,
+    /// `|g * h|`. What LightGBM actually computes in `goss.hpp`. The hessian
+    /// factor pulls confidently-wrong rows *out* of the kept set -- for
+    /// logistic loss `h = p(1-p)`, so a row at p = 0.99 is scored a hundred
+    /// times lower than one at p = 0.5 with the same residual. Select this
+    /// for parity with LightGBM; on squared error the two are identical,
+    /// because `h` is 1.
+    gradient_hessian,
+};
 
 const min_hessian: f32 = 1e-6;
 
@@ -23,7 +53,7 @@ pub const Model = struct {
     gpa: std.mem.Allocator,
     trees: std.ArrayList(tree.Tree),
     base_score: f32,
-    objective: config.Objective,
+    objective: Objective,
     n_features: usize,
 
     pub fn deinit(m: *Model) void {
@@ -127,7 +157,7 @@ const GradCtx = struct {
     labels: []const f32,
     grads: []hist.GradPair,
     scale_pos_weight: f32,
-    objective: config.Objective,
+    objective: Objective,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -137,7 +167,7 @@ const GradCtx = struct {
         }
     }
 
-    fn runFor(self: *GradCtx, comptime obj: config.Objective, begin: usize, end: usize) void {
+    fn runFor(self: *GradCtx, comptime obj: Objective, begin: usize, end: usize) void {
         var i = begin;
         if (obj == .logistic) {
             const one: F8 = @splat(1.0);
@@ -242,8 +272,8 @@ inline fn magBits(g: f32) u32 {
 }
 
 /// The value GOSS ranks a row by. `|g|` is the paper's; `|g*h|` is
-/// LightGBM's. See `config.GossRank`.
-inline fn rankKey(p: hist.GradPair, how: config.GossRank) u32 {
+/// LightGBM's. See `GossRank`.
+inline fn rankKey(p: hist.GradPair, how: GossRank) u32 {
     return switch (how) {
         .gradient => magBits(p.g),
         .gradient_hessian => magBits(p.g * p.h),
@@ -269,7 +299,7 @@ pub const Cut = struct {
 ///
 /// Exact, not approximate: afterwards every chosen row's magnitude is >= every
 /// unchosen row's, with exact bit-ties broken by row order.
-pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: config.GossRank) Cut {
+pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: GossRank) Cut {
     std.debug.assert(counts.len == n_radix);
     std.debug.assert(k >= 1 and k <= grads.len);
 
@@ -320,7 +350,7 @@ fn gossSelect(
     out: []u32,
     top_rate: f32,
     other_rate: f32,
-    how: config.GossRank,
+    how: GossRank,
     rng: std.Random,
 ) []u32 {
     const n = grads.len;
@@ -405,13 +435,13 @@ pub const TrainResult = struct {
     valid_ns: u64,
 };
 
-fn higherIsBetter(obj: config.Objective) bool {
+fn higherIsBetter(obj: Objective) bool {
     return obj == .logistic; // AUC for logistic, RMSE for regression
 }
 
 fn evaluate(
     gpa: std.mem.Allocator,
-    obj: config.Objective,
+    obj: Objective,
     raw: []const f32,
     labels: []const f32,
     scratch: []f32,

@@ -28,6 +28,25 @@ const Dataset = data.Dataset;
 const config = @import("config.zig");
 const prof = @import("prof.zig");
 const metric = @import("metric.zig");
+const Objective = @import("objective.zig").Objective;
+
+/// How the linear model's coefficients are fitted. Both minimise the *same*
+/// convex objective, so wherever both arrive they must agree -- measured, and
+/// the places they do not are in docs/linear-solvers.md.
+pub const LinSolver = enum {
+    /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), with
+    /// **OWL-QN** (orthant-wise limited-memory quasi-Newton) when `alpha` > 0.
+    /// Builds a curvature estimate from recent steps, so it reaches the
+    /// optimum in tens of passes where a first-order method needs thousands.
+    /// This is also what scikit-learn's LogisticRegression defaults to, which
+    /// makes the two directly comparable.
+    lbfgs,
+    /// **Adam** (adaptive moment estimation), full batch, with an L1
+    /// proximal step. Needs no objective
+    /// evaluation and so no line search, which makes each pass cheaper — but
+    /// it takes far more of them to reach the same coefficients.
+    adam,
+};
 
 /// Ceiling on one-hot expansion. A categorical with thousands of levels would
 /// silently turn a small table into a huge design matrix; fail loudly instead.
@@ -161,7 +180,7 @@ pub const Linear = struct {
     design: Design,
     w: []f32,
     intercept: f32,
-    objective: config.Objective,
+    objective: Objective,
     n_features: usize,
 
     pub fn deinit(m: *Linear) void {
@@ -237,7 +256,7 @@ const EvalCtx = struct {
     resid: []f32,
     loss: []f64,
     rsum: []f64,
-    objective: config.Objective,
+    objective: Objective,
     scale_pos_weight: f32,
     want_loss: bool,
     size: usize,
@@ -342,7 +361,7 @@ pub const Problem = struct {
     pool: *Pool,
     design: *const Design,
     ds: *const Dataset,
-    objective: config.Objective,
+    objective: Objective,
     scale_pos_weight: f32,
     l2: f64,
     l1: f64,

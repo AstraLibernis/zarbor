@@ -20,6 +20,27 @@ const hist = @import("hist.zig");
 const config = @import("config.zig");
 const prof = @import("prof.zig");
 
+/// How a tree is expanded once its root histogram exists.
+pub const GrowPolicy = enum {
+    /// Expand all nodes at depth d before any at depth d+1 (XGBoost default).
+    depthwise,
+    /// Always split the leaf with the highest gain (LightGBM-style). Usually
+    /// stronger per tree, and needs `max_leaves` rather than `max_depth` to
+    /// control capacity.
+    lossguide,
+};
+
+/// How a categorical feature's levels are partitioned at a split.
+pub const CatSplit = enum {
+    /// Cut the dictionary id like a numeric bin. The ids are assigned in
+    /// order of first appearance, so the reachable partitions are prefixes of
+    /// an arbitrary order.
+    ordinal,
+    /// Sort the levels present in the node by their smoothed gradient ratio
+    /// and cut that order instead. See docs/categorical-splits.md.
+    optimal,
+};
+
 /// The value a bin stands for when a leaf needs a number rather than an index.
 ///
 /// Midpoints of the schema's edges, not `ds.means`: means are a property of

@@ -119,7 +119,7 @@ fn halfA(gpa: std.mem.Allocator, pool: *Pool, n_rows: usize, n_trees: usize) !vo
 
         var slot_kib: f64 = 0;
         var times: [2]u64 = undefined;
-        for ([2]config.CatSplit{ .ordinal, .optimal }, 0..) |mode, mi| {
+        for ([2]zarbor.tree.CatSplit{ .ordinal, .optimal }, 0..) |mode, mi| {
             var b = try tree.Builder.init(gpa, pool, &ds, .{
                 .max_depth = 6,
                 .cat_split = mode,

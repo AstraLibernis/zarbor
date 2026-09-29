@@ -24,11 +24,12 @@ const tree = @import("tree.zig");
 const config = @import("config.zig");
 const prof = @import("prof.zig");
 const metric = @import("metric.zig");
+const Objective = @import("objective.zig").Objective;
 
 pub const Forest = struct {
     gpa: std.mem.Allocator,
     trees: std.ArrayList(tree.Tree),
-    objective: config.Objective,
+    objective: Objective,
     n_features: usize,
 
     pub fn deinit(m: *Forest) void {
@@ -208,7 +209,7 @@ pub fn train(
 /// there is no raw-score scale to convert from.
 fn evaluate(
     gpa: std.mem.Allocator,
-    obj: config.Objective,
+    obj: Objective,
     pred: []f32,
     labels: []const f32,
 ) !f64 {

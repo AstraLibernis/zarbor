@@ -38,6 +38,7 @@ const config = @import("config.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
 const cv = @import("cv.zig");
+const Objective = @import("objective.zig").Objective;
 
 pub const Search = enum { grid, random, bayes, bandit };
 
@@ -249,7 +250,7 @@ pub const Binner = struct {
     /// Tracked like `max_bin`, because it changes the binning and a cached
     /// matrix built under a different value is the wrong matrix.
     max_cat_levels: u32 = (config.Config{}).max_cat_levels,
-    policy: config.BinPolicy,
+    policy: data.BinPolicy,
     rebins: usize = 0,
 
     pub fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
@@ -406,7 +407,7 @@ pub const Tpe = struct {
         r: std.Random,
         space: []const Param,
         trials: []const Trial,
-        obj: config.Objective,
+        obj: Objective,
         out: []f64,
     ) !void {
         const n = trials.len;
@@ -415,7 +416,7 @@ pub const Tpe = struct {
         for (order, 0..) |*v, i| v.* = @intCast(i);
         const Ctx = struct {
             t: []const Trial,
-            obj: config.Objective,
+            obj: Objective,
             fn lessThan(c: @This(), a: u32, b: u32) bool {
                 return cv.better(c.obj, c.t[a].score, c.t[b].score);
             }

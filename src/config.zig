@@ -8,6 +8,13 @@
 //! names for the same reason.
 
 const std = @import("std");
+const Objective = @import("objective.zig").Objective;
+const GrowPolicy = @import("tree.zig").GrowPolicy;
+const CatSplit = @import("tree.zig").CatSplit;
+const BinPolicy = @import("data.zig").BinPolicy;
+const Sampling = @import("booster.zig").Sampling;
+const GossRank = @import("booster.zig").GossRank;
+const LinSolver = @import("linear.zig").LinSolver;
 
 /// Which model to fit. All three share the binning, missing-value and
 /// categorical handling in `data.zig`; they differ in what they do with it.
@@ -19,117 +26,6 @@ pub const Algo = enum {
     random_forest,
     /// Regularised linear or logistic regression on the binned design matrix.
     linear,
-};
-
-/// Loss function. Dispatched at comptime so the boosting loop inlines the
-/// exact gradient/hessian pair with no indirect call in the hot path.
-///
-/// With `--algo=linear` this choice *is* the choice of model, and the two it
-/// selects are the two standard simple models every library ships:
-///
-///     --objective=logistic        LOGISTIC REGRESSION   (binary classifier)
-///     --objective=squared_error   LINEAR REGRESSION     (ordinary least squares)
-///
-/// They are the same machinery -- a weighted sum of features -- differing in
-/// the loss and in whether a sigmoid link is applied to the output. See
-/// `Config.modelName`, which prints the name at train time, and
-/// docs/linear-solvers.md.
-pub const Objective = enum {
-    /// Binary logistic / cross-entropy. Raw scores are log-odds; predictions
-    /// are sigmoid(raw).
-    ///
-    /// With `--algo=linear`: **logistic regression**, i.e. scikit-learn's
-    /// `LogisticRegression`.
-    logistic,
-    /// Squared error for regression. Hessian is constant 1, which is why
-    /// `adam` converges on it in a few hundred epochs where logistic needs
-    /// tens of thousands.
-    ///
-    /// With `--algo=linear`: **linear regression** (ordinary least squares),
-    /// i.e. scikit-learn's `LinearRegression` -- becoming `Ridge` once
-    /// `lambda > 0`, `Lasso` once `alpha > 0`, and elastic net with both.
-    squared_error,
-};
-
-/// How a tree is expanded once its root histogram exists.
-pub const GrowPolicy = enum {
-    /// Expand all nodes at depth d before any at depth d+1 (XGBoost default).
-    depthwise,
-    /// Always split the leaf with the highest gain (LightGBM-style). Usually
-    /// stronger per tree, and needs `max_leaves` rather than `max_depth` to
-    /// control capacity.
-    lossguide,
-};
-
-/// How a categorical feature's levels are partitioned at a split.
-pub const CatSplit = enum {
-    /// Cut the dictionary id like a numeric bin. The ids are assigned in
-    /// order of first appearance, so the reachable partitions are prefixes of
-    /// an arbitrary order.
-    ordinal,
-    /// Sort the levels present in the node by their smoothed gradient ratio
-    /// and cut that order instead. See docs/categorical-splits.md.
-    optimal,
-};
-
-/// Strategy for choosing bin edges when quantising a numeric column.
-pub const BinPolicy = enum {
-    /// Equal-count bins from the empirical distribution. Robust to skew.
-    quantile,
-    /// Equal-width bins between min and max. Cheaper, worse on skewed data.
-    uniform,
-    /// LightGBM's `GreedyFindBin`. Any distinct value carrying at least a
-    /// bin's worth of rows gets a bin to itself, and the remaining budget is
-    /// spread over what is left -- so a column that is 92% one value spends
-    /// its cuts on the other 8% instead of collapsing them all onto the mode.
-    greedy,
-};
-
-/// How rows are chosen for each tree.
-pub const Sampling = enum {
-    /// Uniform random subset of size `subsample`, without replacement.
-    uniform,
-    /// LightGBM's Gradient-based One-Side Sampling: keep every large-gradient
-    /// row, sample the rest, and amplify the survivors so the gradient sum
-    /// stays unbiased. Ignores `subsample`.
-    goss,
-};
-
-/// Which magnitude GOSS ranks rows by when choosing the ones to keep in full.
-///
-/// This is the one place the GOSS paper and LightGBM's implementation part
-/// company, and it is worth 0.0012 AUC on a binary problem. Measured in
-/// docs/goss.md.
-pub const GossRank = enum {
-    /// `|g|`. What Ke et al. (NeurIPS 2017) specify, and what LightGBM's own
-    /// `top_rate` documentation describes. Keeps the rows with the largest
-    /// residual.
-    gradient,
-    /// `|g * h|`. What LightGBM actually computes in `goss.hpp`. The hessian
-    /// factor pulls confidently-wrong rows *out* of the kept set -- for
-    /// logistic loss `h = p(1-p)`, so a row at p = 0.99 is scored a hundred
-    /// times lower than one at p = 0.5 with the same residual. Select this
-    /// for parity with LightGBM; on squared error the two are identical,
-    /// because `h` is 1.
-    gradient_hessian,
-};
-
-/// How the linear model's coefficients are fitted. Both minimise the *same*
-/// convex objective, so wherever both arrive they must agree -- measured, and
-/// the places they do not are in docs/linear-solvers.md.
-pub const LinSolver = enum {
-    /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), with
-    /// **OWL-QN** (orthant-wise limited-memory quasi-Newton) when `alpha` > 0.
-    /// Builds a curvature estimate from recent steps, so it reaches the
-    /// optimum in tens of passes where a first-order method needs thousands.
-    /// This is also what scikit-learn's LogisticRegression defaults to, which
-    /// makes the two directly comparable.
-    lbfgs,
-    /// **Adam** (adaptive moment estimation), full batch, with an L1
-    /// proximal step. Needs no objective
-    /// evaluation and so no line search, which makes each pass cheaper — but
-    /// it takes far more of them to reach the same coefficients.
-    adam,
 };
 
 fn parseInto(comptime T: type, val: []const u8) !T {

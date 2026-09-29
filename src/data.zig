@@ -25,6 +25,20 @@ pub const BinIdx = u16;
 pub const max_bins = std.math.maxInt(BinIdx);
 
 pub const csv = @import("csv.zig");
+const Objective = @import("objective.zig").Objective;
+
+/// Strategy for choosing bin edges when quantising a numeric column.
+pub const BinPolicy = enum {
+    /// Equal-count bins from the empirical distribution. Robust to skew.
+    quantile,
+    /// Equal-width bins between min and max. Cheaper, worse on skewed data.
+    uniform,
+    /// LightGBM's `GreedyFindBin`. Any distinct value carrying at least a
+    /// bin's worth of rows gets a bin to itself, and the remaining budget is
+    /// spread over what is left -- so a column that is 92% one value spends
+    /// its cuts on the other 8% instead of collapsing them all onto the mode.
+    greedy,
+};
 
 /// Parsing lives in `csv.zig`. Re-exported here because `Frame` and
 /// `ColumnKind` are the input to quantisation and every caller of this module
@@ -285,7 +299,7 @@ const BinCtx = struct {
     /// the index type -- it stops a free-text column becoming a 50,000-bin
     /// histogram that would be legal and unusable.
     max_cat_levels: u32,
-    policy: config.BinPolicy,
+    policy: BinPolicy,
     failed: std.atomic.Value(bool),
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
@@ -550,7 +564,7 @@ pub const LabelEncoder = struct {
 
     /// Reject labels the objective cannot represent, such as a {1,2}-coded
     /// numeric target handed to logistic loss.
-    pub fn validate(_: *const LabelEncoder, labels: []const f32, obj: config.Objective) !void {
+    pub fn validate(_: *const LabelEncoder, labels: []const f32, obj: Objective) !void {
         if (obj != .logistic) return;
         // Written so NaN fails too.
         for (labels) |y| if (!(y >= 0 and y <= 1)) return error.LabelOutOfRange;

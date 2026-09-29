@@ -27,6 +27,7 @@ const booster = @import("booster.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const metric = @import("metric.zig");
+const Objective = @import("objective.zig").Objective;
 
 /// Assign every row a fold. For logistic the assignment is stratified: the
 /// two classes are shuffled and dealt out separately, so a fold cannot draw
@@ -188,7 +189,7 @@ pub const Opts = struct {
 /// Higher is better for AUC, lower is better for RMSE. Everything that ranks
 /// configurations goes through here so the comparison cannot drift from the
 /// objective.
-pub fn better(obj: config.Objective, a: f64, b: f64) bool {
+pub fn better(obj: Objective, a: f64, b: f64) bool {
     return switch (obj) {
         .logistic => a > b,
         .squared_error => a < b,

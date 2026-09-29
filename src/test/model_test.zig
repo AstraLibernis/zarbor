@@ -17,6 +17,7 @@ const booster = @import("../booster.zig");
 const forest = @import("../forest.zig");
 const linear = @import("../linear.zig");
 const hist = @import("../hist.zig");
+const tree = @import("../tree.zig");
 const Pool = @import("../pool.zig").Pool;
 const metric = @import("../metric.zig");
 
@@ -558,7 +559,7 @@ test "greedy binning gives a dominant value its own bin; quantile does not" {
     }
 
     var used: [2]usize = undefined;
-    for ([2]config.BinPolicy{ .quantile, .greedy }, 0..) |policy, i| {
+    for ([2]data.BinPolicy{ .quantile, .greedy }, 0..) |policy, i| {
         var f = try numericFrame(gpa, vals, lab);
         defer f.deinit();
         var ds = try data.quantise(gpa, pool, &f, .{ .bin_policy = policy, .max_bin = 256 }, null, &.{});
@@ -585,7 +586,7 @@ test "optimal categorical splits actually fire, and ordinal ones never do" {
     var ds = try synthWithCats(gpa, 3000, 7);
     defer ds.deinit();
 
-    for ([2]config.CatSplit{ .ordinal, .optimal }) |mode| {
+    for ([2]tree.CatSplit{ .ordinal, .optimal }) |mode| {
         var schema = try data.Schema.fromDataset(gpa, &ds);
         errdefer schema.deinit();
         var res = try booster.train(gpa, pool, &ds, null, .{

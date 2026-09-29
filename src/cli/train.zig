@@ -380,7 +380,7 @@ const Scale = enum { raw, natural };
 fn report(
     gpa: std.mem.Allocator,
     out: *std.Io.Writer,
-    obj: config.Objective,
+    obj: zarbor.objective.Objective,
     pred: []const f32,
     labels: []const f32,
     scale: Scale,
