@@ -187,6 +187,15 @@ const Reader = struct {
     fn f32v(r: *Reader) !f32 {
         return @bitCast(try r.u32v());
     }
+    /// An element count the rest of the file can hold at `min_bytes` per element.
+    /// Callers allocate from the count before reading the elements, so an unchecked
+    /// corrupt count (up to 4G) commits gigabytes before any read can fail.
+    fn count(r: *Reader, min_bytes: usize) !u32 {
+        std.debug.assert(min_bytes > 0);
+        const n = try r.u32v();
+        if (@as(usize, n) * min_bytes > r.buf.len - r.pos) return error.TruncatedModel;
+        return n;
+    }
     fn bytes(r: *Reader) ![]const u8 {
         const n = try r.u32v();
         return r.take(n);
@@ -207,7 +216,7 @@ fn writeSchema(gpa: std.mem.Allocator, b: *Buf, s: *const data.Schema) !void {
 }
 
 fn readSchema(gpa: std.mem.Allocator, r: *Reader) !data.Schema {
-    const n = try r.u32v();
+    const n = try r.count(4 + 1 + 2 + 4 + 4); // name len, kind, bins, edge and level counts
     var s = data.Schema{
         .gpa = gpa,
         .n_features = n,
@@ -228,11 +237,11 @@ fn readSchema(gpa: std.mem.Allocator, r: *Reader) !data.Schema {
         s.names[f] = try gpa.dupe(u8, try r.bytes());
         s.kinds[f] = std.enums.fromInt(data.ColumnKind, try r.u8v()) orelse return error.BadModelFile;
         s.n_bins[f] = try r.u16v();
-        const ne = try r.u32v();
+        const ne = try r.count(4);
         const e = try gpa.alloc(f32, ne);
         s.edges[f] = e;
         for (e) |*x| x.* = try r.f32v();
-        const nl = try r.u32v();
+        const nl = try r.count(4); // each level is at least its length prefix
         const ls = try gpa.alloc([]u8, nl);
         @memset(ls, &.{});
         s.levels[f] = ls;
@@ -313,7 +322,10 @@ fn expandV3Masks(
 }
 
 fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
-    const nt = try r.u32v();
+    // Per node: feature, left, right, weight, two flags, then what each version added.
+    const node_bytes: usize = 16 + 2 + @as(usize, if (ver >= 4) 2 else 1) +
+        @as(usize, if (ver >= 3) 10 else 0) + @as(usize, if (ver >= 4) 1 else 0);
+    const nt = try r.count(if (ver >= 3) 12 else 4); // node count, then mask and term counts
     const trees = try gpa.alloc(tree.Tree, nt);
     var made: usize = 0;
     errdefer {
@@ -321,7 +333,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
         gpa.free(trees);
     }
     while (made < nt) {
-        const nn = try r.u32v();
+        const nn = try r.count(node_bytes);
         if (nn == 0) return error.BadModelFile;
         const nodes = try gpa.alloc(tree.Node, nn);
         trees[made] = .{ .nodes = nodes };
@@ -365,7 +377,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
             if (!n.is_leaf and (n.left >= nn or n.right >= nn)) return error.BadModelFile;
         }
         if (ver >= 3) {
-            const nm = try r.u32v();
+            const nm = try r.count(if (ver >= 4) 2 else 8); // u16 ids, or u64 mask words
             if (nm != 0) {
                 if (ver >= 4) {
                     const ids = try gpa.alloc(data.BinIdx, nm);
@@ -381,7 +393,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
             // A mask offset past the store would read out of bounds at
             // prediction time, which is the same class of fault as a bad
             // child index and is rejected the same way.
-            const nl = try r.u32v();
+            const nl = try r.count(12);
             if (nl != 0) {
                 const terms = try gpa.alloc(tree.LinTerm, nl);
                 trees[made - 1].lin = terms;
@@ -484,12 +496,12 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
         .gbdt, .forest => b.trees = try readTrees(gpa, &r, ver),
         .linear => {
             const intercept = try r.f32v();
-            const nw = try r.u32v();
+            const nw = try r.count(4);
             const w = try gpa.alloc(f32, nw);
             errdefer gpa.free(w);
             for (w) |*x| x.* = try r.f32v();
 
-            const nc = try r.u32v();
+            const nc = try r.count(4 + 2 + 4 + 4);
             if (nc != nw) return error.BadModelFile;
             const cols = try gpa.alloc(linear.Col, nc);
             errdefer gpa.free(cols);
@@ -500,7 +512,7 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
                 .scale = try r.f32v(),
             };
 
-            const nr = try r.u32v();
+            const nr = try r.count(4);
             const repr = try gpa.alloc([]f32, nr);
             @memset(repr, &.{});
             errdefer {
@@ -508,7 +520,7 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
                 gpa.free(repr);
             }
             for (repr) |*t| {
-                const n = try r.u32v();
+                const n = try r.count(4);
                 const tab = try gpa.alloc(f32, n);
                 t.* = tab;
                 for (tab) |*v| v.* = try r.f32v();

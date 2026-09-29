@@ -1172,3 +1172,83 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     defer res.model.deinit();
     try testing.expectEqualSlices(f32, lds.means[0], res.model.design.repr[0]);
 }
+
+/// Passes allocations through to `inner` but refuses any single one over `limit`
+/// bytes, recording that it did. A parser that allocates from an unchecked count
+/// then fails the test instead of committing gigabytes and taking the machine down.
+const Budget = struct {
+    inner: std.mem.Allocator,
+    limit: usize,
+    refused: usize = 0,
+
+    fn allocator(b: *Budget) std.mem.Allocator {
+        return .{ .ptr = b, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn over(b: *Budget, len: usize) bool {
+        if (len <= b.limit) return false;
+        b.refused += 1;
+        return true;
+    }
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const b: *Budget = @ptrCast(@alignCast(ctx));
+        return if (b.over(len)) null else b.inner.rawAlloc(len, a, ra);
+    }
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, len: usize, ra: usize) bool {
+        const b: *Budget = @ptrCast(@alignCast(ctx));
+        return !b.over(len) and b.inner.rawResize(m, a, len, ra);
+    }
+    fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const b: *Budget = @ptrCast(@alignCast(ctx));
+        return if (b.over(len)) null else b.inner.rawRemap(m, a, len, ra);
+    }
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const b: *Budget = @ptrCast(@alignCast(ctx));
+        b.inner.rawFree(m, a, ra);
+    }
+};
+
+test "every single-byte corruption of a model file is refused or loads, never crashes" {
+    // Oracle: deserialise must return an error or a bundle for any input. A panic (an
+    // out-of-range cast on a corrupt count) kills the test binary; a leak on an error path
+    // fails under testing.allocator, and an allocation far larger than the file itself
+    // means a count went unchecked (Budget). Small models of its own, not the shared fixture: the
+    // sweep re-parses the whole file per byte, so its cost is quadratic in file size.
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try shared();
+    var ds = try synthWithCats(a, 400, 7); // categorical splits exercise the id store
+
+    var gb = try booster.train(a, f.pool, &ds, null, config.Config.from(.{ .n_rounds = 3, .max_depth = 3, .verbose_eval = 0 }).gbdt, null);
+    const cfg = config.Config.from(.{ .algo = .random_forest, .n_rounds = 3, .max_depth = 3, .verbose_eval = 0 });
+    var rf = try forest.train(a, f.pool, &ds, null, cfg.random_forest, null);
+    const lr = try linear.train(a, f.pool, &ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 5, .verbose_eval = 0 }).linear, null);
+    const bundles = [_]model_mod.Bundle{
+        try model_mod.fromBooster(a, &gb.model, try data.Schema.fromDataset(a, &ds)),
+        try model_mod.fromForest(a, &rf.model, try data.Schema.fromDataset(a, &ds)),
+        .{ .gpa = a, .kind = .linear, .schema = try data.Schema.fromDataset(a, &ds), .objective = .logistic, .lin = lr.model },
+    };
+
+    for (&bundles) |*bundle| {
+        const bytes = try model_mod.serialise(gpa, bundle);
+        defer gpa.free(bytes);
+        const bad = try gpa.dupe(u8, bytes);
+        defer gpa.free(bad);
+        // No element grows more than 12x from its smallest encoding (a Tree: 48 bytes
+        // from a 4-byte count), so an honest allocation stays well under 32x the file.
+        var budget: Budget = .{ .inner = gpa, .limit = 32 * bytes.len };
+        for (0..bad.len) |i| {
+            for ([_]u8{ 0xFF, 0x00 }) |v| {
+                if (bytes[i] == v) continue;
+                bad[i] = v;
+                if (model_mod.deserialise(budget.allocator(), bad)) |m| {
+                    var mm = m;
+                    mm.deinit();
+                } else |_| {}
+            }
+            bad[i] = bytes[i];
+        }
+        try testing.expectEqual(0, budget.refused);
+    }
+}
