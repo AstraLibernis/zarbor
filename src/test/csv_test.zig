@@ -5,12 +5,13 @@ const std = @import("std");
 const Pool = @import("../pool.zig").Pool;
 const zsift = @import("../vendor/zsift/csv.zig");
 const csv = @import("../csv.zig");
+const csv_profile = @import("../csv_profile.zig");
 const ColumnKind = csv.ColumnKind;
 const Frame = csv.Frame;
 const isMissingToken = csv.isMissingToken;
 const readCsv = csv.readCsv;
 const sniff_rows = csv.sniff_rows;
-const profile = csv.profile;
+const profile = csv_profile.profile;
 const readCsvHinted = csv.readCsvHinted;
 
 const testing = std.testing;

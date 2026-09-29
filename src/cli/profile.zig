@@ -9,6 +9,7 @@ const args = @import("args.zig");
 const data = zarbor.data;
 const pool_mod = zarbor.pool;
 const csv = zarbor.csv;
+const csv_profile = zarbor.csv_profile;
 
 /// `zarbor profile <data.csv>` -- describe a file without training on it.
 ///
@@ -43,12 +44,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer frame.deinit();
     const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
-    const stats = try csv.profile(gpa, &frame);
+    const stats = try csv_profile.profile(gpa, &frame);
     defer gpa.free(stats);
     const t_prof = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     try out.print("file    {s}\nread    {d} ms\nprofile {d} ms\n", .{
         p, @divTrunc(t_read - t0, 1_000_000), @divTrunc(t_prof - t_read, 1_000_000),
     });
-    try csv.writeProfile(out, &frame, stats);
+    try csv_profile.writeProfile(out, &frame, stats);
 }

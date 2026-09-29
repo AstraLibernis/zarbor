@@ -23,6 +23,7 @@ test {
     std.testing.refAllDecls(@import("booster.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("csv.zig"));
+    std.testing.refAllDecls(@import("csv_profile.zig"));
     std.testing.refAllDecls(@import("cv.zig"));
     std.testing.refAllDecls(@import("data.zig"));
     std.testing.refAllDecls(@import("goss.zig"));

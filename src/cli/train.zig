@@ -14,6 +14,7 @@ const linear = zarbor.linear;
 const metric = zarbor.metric;
 const prof = zarbor.prof;
 const csv = zarbor.csv;
+const csv_profile = zarbor.csv_profile;
 const common = @import("common.zig");
 const Fitted = zarbor.fitted.Fitted;
 const explainLabel = common.explainLabel;
@@ -108,9 +109,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         // Cheap enough to do unconditionally, and it is the line that catches
         // a file read wrong -- a column silently all-NaN, a categorical that
         // was meant to be numeric -- before a score is blamed on the model.
-        const stats = try csv.profile(gpa, &frame);
+        const stats = try csv_profile.profile(gpa, &frame);
         defer gpa.free(stats);
-        try csv.writeSummary(out, &frame, stats);
+        try csv_profile.writeSummary(out, &frame, stats);
     }
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;

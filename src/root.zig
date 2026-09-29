@@ -5,6 +5,7 @@
 
 pub const config = @import("config.zig");
 pub const csv = @import("csv.zig");
+pub const csv_profile = @import("csv_profile.zig");
 pub const data = @import("data.zig");
 pub const hist = @import("hist.zig");
 pub const split = @import("split.zig");

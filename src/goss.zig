@@ -4,7 +4,6 @@
 //! GOSS (gradient-based one-side sampling): which rows a boosting round keeps.
 
 const std = @import("std");
-const data = @import("data.zig");
 const hist = @import("hist.zig");
 const booster = @import("booster.zig");
 const GossRank = booster.GossRank;

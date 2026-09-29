@@ -11,6 +11,7 @@ const config = zarbor.config;
 const data = zarbor.data;
 const pool_mod = zarbor.pool;
 const csv = zarbor.csv;
+const csv_profile = zarbor.csv_profile;
 const cv = zarbor.cv;
 const assignGroupFolds = cv.assignGroupFolds;
 const assignFolds = cv.assignFolds;
@@ -132,9 +133,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer frame.deinit();
 
     if (!quiet) {
-        const stats = try csv.profile(gpa, &frame);
+        const stats = try csv_profile.profile(gpa, &frame);
         defer gpa.free(stats);
-        try csv.writeSummary(out, &frame, stats);
+        try csv_profile.writeSummary(out, &frame, stats);
     }
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
