@@ -15,3 +15,5 @@ pub const booster = @import("booster.zig");
 pub const forest = @import("forest.zig");
 pub const linear = @import("linear.zig");
 pub const model = @import("model.zig");
+pub const cv = @import("cv.zig");
+pub const tune = @import("tune.zig");

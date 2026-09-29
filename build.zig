@@ -7,10 +7,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    // The library; the CLI, tools and benches all see it as `zarbor`.
+    const lib = b.addModule("zarbor", .{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zarbor", .module = lib }},
     });
 
     const exe = b.addExecutable(.{ .name = "zgbdt", .root_module = mod });
@@ -52,11 +60,6 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&golden.step);
 
     // Cost prototype for widening the bin type; see docs/wide-categoricals.md.
-    const lib = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const wc = b.addExecutable(.{ .name = "widecat", .root_module = b.createModule(.{
         .root_source_file = b.path("bench/widecat.zig"),
         .target = target,
