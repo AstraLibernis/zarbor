@@ -246,6 +246,14 @@ fn readSchema(gpa: std.mem.Allocator, r: *Reader) !data.Schema {
         @memset(ls, &.{});
         s.levels[f] = ls;
         for (ls) |*l| l.* = try gpa.dupe(u8, try r.bytes());
+        // Binning a table counts bins from the edges or levels, but sizes storage from
+        // n_bins (`splitByWidth`), so n_bins must cover the highest bin they produce.
+        // That also keeps each bin within the u16 that `applySchema` narrows it into.
+        const top: usize = switch (s.kinds[f]) {
+            .numeric => @as(usize, ne) + 1,
+            .categorical => nl,
+        };
+        if (s.n_bins[f] <= top) return error.BadModelFile;
     }
     return s;
 }
@@ -321,7 +329,7 @@ fn expandV3Masks(
     t.cat_ids = try ids.toOwnedSlice(gpa);
 }
 
-fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
+fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![]tree.Tree {
     // Per node: feature, left, right, weight, two flags, then what each version added.
     const node_bytes: usize = 16 + 2 + @as(usize, if (ver >= 4) 2 else 1) +
         @as(usize, if (ver >= 3) 10 else 0) + @as(usize, if (ver >= 4) 1 else 0);
@@ -341,7 +349,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
         // the end of the loop instead leaves this tree outside the errdefer's
         // `trees[0..made]` window, so a truncated file leaks it.
         made += 1;
-        for (nodes) |*n| {
+        for (nodes, 0..) |*n, i| {
             // Read into locals rather than into a struct literal. The fields
             // are not declared in wire order, and a literal's initialisers
             // are not guaranteed to run in the order they are written -- so
@@ -372,9 +380,12 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
                 .n_lin = n_lin,
                 .lin_ofs = lin_ofs,
             };
-            // A corrupt child index would walk off the node array during
-            // prediction; reject it here instead.
-            if (!n.is_leaf and (n.left >= nn or n.right >= nn)) return error.BadModelFile;
+            // A corrupt child or feature index would walk off the node array or the
+            // row during prediction, and a child at or above its parent could loop
+            // forever. The builder appends children after their parent, so every
+            // real child index is past its parent's.
+            if (!n.is_leaf and (n.left <= i or n.right <= i or n.left >= nn or n.right >= nn or
+                n.feature >= n_features)) return error.BadModelFile;
         }
         if (ver >= 3) {
             const nm = try r.count(if (ver >= 4) 2 else 8); // u16 ids, or u64 mask words
@@ -401,6 +412,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32) ![]tree.Tree {
                     const feature = try r.u32v();
                     const coef = try r.f32v();
                     const center = try r.f32v();
+                    if (feature >= n_features) return error.BadModelFile;
                     term.* = .{ .feature = feature, .coef = coef, .center = center };
                 }
             }
@@ -493,7 +505,7 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     };
 
     switch (kind) {
-        .gbdt, .forest => b.trees = try readTrees(gpa, &r, ver),
+        .gbdt, .forest => b.trees = try readTrees(gpa, &r, ver, b.schema.n_features),
         .linear => {
             const intercept = try r.f32v();
             const nw = try r.count(4);
@@ -524,6 +536,13 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
                 const tab = try gpa.alloc(f32, n);
                 t.* = tab;
                 for (tab) |*v| v.* = try r.f32v();
+            }
+            // Scoring indexes the row by a column's feature and a numeric column's
+            // table by bin, unchecked.
+            for (cols) |c| {
+                if (c.feature >= b.schema.n_features) return error.BadModelFile;
+                if (c.bin == linear.numeric_col and
+                    (c.feature >= repr.len or repr[c.feature].len < b.schema.n_bins[c.feature])) return error.BadModelFile;
             }
 
             b.lin = .{

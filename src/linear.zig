@@ -73,7 +73,7 @@ pub const Params = struct {
 /// One-hot ceiling: fail loudly rather than silently build a huge design matrix.
 pub const max_design_cols: usize = 1 << 16;
 
-const numeric_col: u16 = std.math.maxInt(u16);
+pub const numeric_col: u16 = std.math.maxInt(u16);
 
 /// One design-matrix column; public because saving a linear model writes these.
 pub const Col = struct {

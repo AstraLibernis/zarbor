@@ -394,6 +394,14 @@ const Fixture = struct {
     lin_raw: linear.Linear,
 };
 
+/// `fromBooster` takes the schema only when it succeeds. A test holding an errdefer on
+/// the schema past that point double-frees it on any later failure; this ends it there.
+fn gbdtBundle(gpa: std.mem.Allocator, m: *const booster.Model, ds: *const data.Dataset) !model_mod.Bundle {
+    var schema = try data.Schema.fromDataset(gpa, ds);
+    errdefer schema.deinit();
+    return model_mod.fromBooster(gpa, m, schema);
+}
+
 var fixture: ?Fixture = null;
 
 fn shared() !*const Fixture {
@@ -489,8 +497,6 @@ test "cat_l2 penalises the children and not the parent" {
 
     var counts: [2]usize = undefined;
     for ([2]f32{ 0.0, 1e9 }, 0..) |l2, i| {
-        var schema = try data.Schema.fromDataset(gpa, &ds);
-        errdefer schema.deinit();
         var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 15,
             .max_depth = 4,
@@ -499,7 +505,7 @@ test "cat_l2 penalises the children and not the parent" {
             .verbose_eval = 0,
         }).gbdt, null);
         defer res.model.deinit();
-        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        var bundle = try gbdtBundle(gpa, &res.model, &ds);
         defer bundle.deinit();
         counts[i] = countCatNodes(&bundle);
     }
@@ -586,8 +592,6 @@ test "optimal categorical splits actually fire, and ordinal ones never do" {
     defer ds.deinit();
 
     for ([2]tree.CatSplit{ .ordinal, .optimal }) |mode| {
-        var schema = try data.Schema.fromDataset(gpa, &ds);
-        errdefer schema.deinit();
         var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
             .n_rounds = 30,
             .max_depth = 4,
@@ -595,7 +599,7 @@ test "optimal categorical splits actually fire, and ordinal ones never do" {
             .verbose_eval = 0,
         }).gbdt, null);
         defer res.model.deinit();
-        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        var bundle = try gbdtBundle(gpa, &res.model, &ds);
         defer bundle.deinit();
         const n = countCatNodes(&bundle);
         switch (mode) {
@@ -612,8 +616,6 @@ test "a model carrying categorical subset splits round trips exactly" {
     defer pool.deinit();
     var ds = try synthWithCats(gpa, 3000, 11);
     defer ds.deinit();
-    var schema = try data.Schema.fromDataset(gpa, &ds);
-    errdefer schema.deinit();
 
     var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 30,
@@ -622,7 +624,7 @@ test "a model carrying categorical subset splits round trips exactly" {
         .verbose_eval = 0,
     }).gbdt, null);
     defer res.model.deinit();
-    var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+    var bundle = try gbdtBundle(gpa, &res.model, &ds);
     defer bundle.deinit();
     try testing.expect(countCatNodes(&bundle) > 0);
 
@@ -659,17 +661,13 @@ test "linear leaves fire, stay off by default, and round trip exactly" {
 
     // Off by default: not one leaf carries a slope.
     {
-        var schema = try data.Schema.fromDataset(gpa, &ds);
-        errdefer schema.deinit();
         var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }).gbdt, null);
         defer res.model.deinit();
-        var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+        var bundle = try gbdtBundle(gpa, &res.model, &ds);
         defer bundle.deinit();
         try testing.expectEqual(@as(usize, 0), countLinLeaves(&bundle));
     }
 
-    var schema = try data.Schema.fromDataset(gpa, &ds);
-    errdefer schema.deinit();
     var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
         .n_rounds = 20,
         .max_depth = 4,
@@ -677,7 +675,7 @@ test "linear leaves fire, stay off by default, and round trip exactly" {
         .verbose_eval = 0,
     }).gbdt, null);
     defer res.model.deinit();
-    var bundle = try model_mod.fromBooster(gpa, &res.model, schema);
+    var bundle = try gbdtBundle(gpa, &res.model, &ds);
     defer bundle.deinit();
     // Without this the round trip below would pass vacuously.
     try testing.expect(countLinLeaves(&bundle) > 0);
@@ -1207,9 +1205,46 @@ const Budget = struct {
     }
 };
 
+/// A frame with `schema`'s columns whose rows reach every bin, missing included.
+fn frameCovering(a: std.mem.Allocator, schema: *const data.Schema) !data.Frame {
+    const n = schema.n_features;
+    var n_rows: usize = 1;
+    for (schema.n_bins) |nb| n_rows = @max(n_rows, @as(usize, nb) + 1);
+    const f: data.Frame = .{
+        .gpa = a,
+        .n_rows = n_rows,
+        .names = try a.alloc([]u8, n),
+        .kinds = try a.dupe(data.ColumnKind, schema.kinds),
+        .values = try a.alloc([]f32, n),
+        .levels = try a.alloc([][]u8, n),
+    };
+    for (0..n) |c| {
+        f.names[c] = try a.dupe(u8, schema.names[c]);
+        f.levels[c] = &.{};
+        const vals = try a.alloc(f32, n_rows);
+        f.values[c] = vals;
+        const e = schema.edges[c];
+        switch (schema.kinds[c]) {
+            // Row 0 missing; then below every edge, on each edge, above the last.
+            .numeric => for (vals, 0..) |*v, r| {
+                const k = r % (e.len + 3);
+                v.* = if (k == 0) std.math.nan(f32) else if (e.len == 0) 0 else if (k == 1) e[0] - 1 else if (k - 2 < e.len) e[k - 2] else e[e.len - 1] + 1;
+            },
+            .categorical => {
+                const ls = schema.levels[c];
+                f.levels[c] = try a.alloc([]u8, ls.len);
+                for (ls, f.levels[c]) |l, *to| to.* = try a.dupe(u8, l);
+                for (vals, 0..) |*v, r| v.* = if (r % (ls.len + 1) == 0) std.math.nan(f32) else @floatFromInt(r % (ls.len + 1) - 1);
+            },
+        }
+    }
+    return f;
+}
+
 test "every single-byte corruption of a model file is refused or loads, never crashes" {
-    // Oracle: deserialise must return an error or a bundle for any input. A panic (an
-    // out-of-range cast on a corrupt count) kills the test binary; a leak on an error path
+    // Oracle: deserialise must return an error or a bundle for any input, and a bundle it
+    // returns must bin and score a table the way `score` does. A panic (an out-of-range
+    // cast or index on a corrupt value) kills the test binary; a leak on an error path
     // fails under testing.allocator, and an allocation far larger than the file itself
     // means a count went unchecked (Budget). Small models of its own, not the shared fixture: the
     // sweep re-parses the whole file per byte, so its cost is quadratic in file size.
@@ -1220,7 +1255,7 @@ test "every single-byte corruption of a model file is refused or loads, never cr
     const f = try shared();
     var ds = try synthWithCats(a, 400, 7); // categorical splits exercise the id store
 
-    var gb = try booster.train(a, f.pool, &ds, null, config.Config.from(.{ .n_rounds = 3, .max_depth = 3, .verbose_eval = 0 }).gbdt, null);
+    var gb = try booster.train(a, f.pool, &ds, null, config.Config.from(.{ .n_rounds = 3, .max_depth = 3, .linear_leaves = true, .verbose_eval = 0 }).gbdt, null);
     const cfg = config.Config.from(.{ .algo = .random_forest, .n_rounds = 3, .max_depth = 3, .verbose_eval = 0 });
     var rf = try forest.train(a, f.pool, &ds, null, cfg.random_forest, null);
     const lr = try linear.train(a, f.pool, &ds, null, config.Config.from(.{ .algo = .linear, .lin_epochs = 5, .verbose_eval = 0 }).linear, null);
@@ -1229,6 +1264,7 @@ test "every single-byte corruption of a model file is refused or loads, never cr
         try model_mod.fromForest(a, &rf.model, try data.Schema.fromDataset(a, &ds)),
         .{ .gpa = a, .kind = .linear, .schema = try data.Schema.fromDataset(a, &ds), .objective = .logistic, .lin = lr.model },
     };
+    var frame = try frameCovering(a, &bundles[0].schema);
 
     for (&bundles) |*bundle| {
         const bytes = try model_mod.serialise(gpa, bundle);
@@ -1244,11 +1280,49 @@ test "every single-byte corruption of a model file is refused or loads, never cr
                 bad[i] = v;
                 if (model_mod.deserialise(budget.allocator(), bad)) |m| {
                     var mm = m;
-                    mm.deinit();
+                    defer mm.deinit();
+                    // A renamed or re-kinded column is refused here, as `score` would.
+                    var sds = data.applySchema(gpa, f.pool, &frame, &mm.schema, null) catch continue;
+                    defer sds.deinit();
+                    const out = try gpa.alloc(f32, sds.n_rows);
+                    defer gpa.free(out);
+                    mm.predict(f.pool, &sds, out);
                 } else |_| {}
             }
             bad[i] = bytes[i];
         }
         try testing.expectEqual(0, budget.refused);
+    }
+}
+
+test "a schema whose bin count cannot hold its edges or levels is refused" {
+    // Binning counts from the edges and levels; `splitByWidth` sizes storage from
+    // n_bins. A file where n_bins (17) is below the highest bin they produce would
+    // narrow a bin past 255 into a u8 when scored.
+    const gpa = testing.allocator;
+    const f = try shared();
+    const bytes = try model_mod.serialise(gpa, &f.gbdt);
+    defer gpa.free(bytes);
+
+    for ([_]data.ColumnKind{ .numeric, .categorical }) |kind| {
+        var m = try model_mod.deserialise(gpa, bytes);
+        defer m.deinit();
+        try testing.expectEqual(@as(u16, 17), m.schema.n_bins[0]);
+        m.schema.kinds[0] = kind;
+        gpa.free(m.schema.edges[0]);
+        m.schema.edges[0] = &.{};
+        switch (kind) {
+            .numeric => {
+                m.schema.edges[0] = try gpa.alloc(f32, 300);
+                for (m.schema.edges[0], 0..) |*e, i| e.* = @floatFromInt(i);
+            },
+            .categorical => {
+                m.schema.levels[0] = try gpa.alloc([]u8, 300);
+                for (m.schema.levels[0], 0..) |*l, i| l.* = try std.fmt.allocPrint(gpa, "l{d}", .{i});
+            },
+        }
+        const bad = try model_mod.serialise(gpa, &m);
+        defer gpa.free(bad);
+        try testing.expectError(error.BadModelFile, model_mod.deserialise(gpa, bad));
     }
 }
