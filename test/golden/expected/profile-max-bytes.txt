@@ -23,8 +23,8 @@ boat                    cat         823  62.9%       27            -            
 body                    num        1188  90.8%      121       1.0000     155.0000     328.0000        0
 home.dest               cat         564  43.1%      369            -            -            -        -
 
-Categorical columns too wide for a u8 bin. These must be dropped or
-replaced with a numeric summary before training:
+Categorical columns over the default --max_cat_levels (255). Drop
+them, replace them with a numeric summary, or raise the limit:
   name                    1307 levels
   ticket                  929 levels
   home.dest               369 levels

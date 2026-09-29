@@ -214,8 +214,8 @@ pub fn writeProfile(out: *std.Io.Writer, f: *const Frame, stats: []const ColumnS
         if (!wide) {
             try out.writeAll(
                 \\
-                \\Categorical columns too wide for a u8 bin. These must be dropped or
-                \\replaced with a numeric summary before training:
+                \\Categorical columns over the default --max_cat_levels (255). Drop
+                \\them, replace them with a numeric summary, or raise the limit:
                 \\
             );
             wide = true;

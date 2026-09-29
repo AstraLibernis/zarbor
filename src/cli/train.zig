@@ -138,7 +138,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer enc.deinit();
 
     var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
-        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin.max_bin, drops.items);
+        if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
         return err;
     };

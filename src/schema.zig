@@ -213,30 +213,27 @@ pub fn applySchema(
     return out;
 }
 
-/// Name the columns that blew the bin cap, and how wide they are.
+/// Name the columns `quantise` refused, and how wide they are: the bare error
+/// would send the reader to count distinct values by hand. Lives beside
+/// `quantise` so every caller of it (train, cv) can print it.
 ///
-/// `error.CategoricalTooWide` on its own sends the reader back to count
-/// distinct values by hand across every column in the file. The frame already
-/// knows, so it may as well say.
-///
-/// It lives here, next to the `quantise` that raises the error, because it
-/// used to live in `main.zig` where only the train path could reach it: `cv`
-/// and `tune` printed a bare `error: CategoricalTooWide` and left the reader
-/// with nothing. An explanation attached to one caller of a shared failure is
-/// an explanation that mostly does not appear.
+/// The limit is the one `quantise` and `binOne` apply: `max_cat_levels`,
+/// capped by what a bin index can address.
 pub fn explainWidth(
     out: *std.Io.Writer,
     frame: *const Frame,
-    max_bin: u16,
+    p: data.BinParams,
     dropped: []const []const u8,
 ) !void {
+    const cap: u32 = data.max_bins - 1;
+    const limit = @min(p.max_cat_levels, cap);
     try out.print(
-        \\error: a categorical column has more levels than a bin can address
-        \\       (limit {d}, set by --max_bin; a bin is stored as a u8)
+        \\error: a categorical column has more levels than allowed
+        \\       (limit {d}, set by --max_cat_levels; a bin index holds at most {d})
         \\
-    , .{max_bin});
+    , .{ limit, cap });
     outer: for (frame.names, frame.kinds, frame.levels) |name, kind, levels| {
-        if (kind != .categorical or levels.len < max_bin) continue;
+        if (kind != .categorical or levels.len <= limit) continue;
         // A column the caller already dropped is not their problem.
         for (dropped) |d| if (std.mem.eql(u8, d, name)) continue :outer;
         try out.print("  {s: <28} {d} levels\n", .{ name, levels.len });
