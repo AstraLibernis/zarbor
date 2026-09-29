@@ -15,6 +15,7 @@ pub const tree = @import("tree.zig");
 pub const booster = @import("booster.zig");
 pub const forest = @import("forest.zig");
 pub const linear = @import("linear.zig");
+pub const lin_solve = @import("lin_solve.zig");
 pub const objective = @import("objective.zig");
 pub const model = @import("model.zig");
 pub const fitted = @import("fitted.zig");

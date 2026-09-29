@@ -30,6 +30,7 @@ test {
     std.testing.refAllDecls(@import("hist.zig"));
     std.testing.refAllDecls(@import("split.zig"));
     std.testing.refAllDecls(@import("linear.zig"));
+    std.testing.refAllDecls(@import("lin_solve.zig"));
     std.testing.refAllDecls(@import("metric.zig"));
     std.testing.refAllDecls(@import("model.zig"));
     std.testing.refAllDecls(@import("objective.zig"));

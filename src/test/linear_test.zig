@@ -8,9 +8,10 @@ const config = @import("../config.zig");
 const prof = @import("../prof.zig");
 const metric = @import("../metric.zig");
 const linear = @import("../linear.zig");
-const Problem = linear.Problem;
-const projectOrthant = linear.projectOrthant;
-const pseudoGrad = linear.pseudoGrad;
+const lin_solve = @import("../lin_solve.zig");
+const Problem = lin_solve.Problem;
+const projectOrthant = lin_solve.projectOrthant;
+const pseudoGrad = lin_solve.pseudoGrad;
 
 const testing = std.testing;
 
