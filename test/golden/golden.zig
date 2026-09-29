@@ -162,9 +162,14 @@ fn runCase(io: Io, gpa: Allocator, exe: []const u8, scratch: []const u8, case: C
     return rec.written();
 }
 
-/// Lines whose presence depends on timing: `build` (optimize mode), and `fit`,
-/// which prints only when validation took at least 1 ms.
-const dropped_prefixes = [_][]const u8{ "build ", "fit " };
+/// Lines whose presence depends on timing: `build` (optimize mode), and the
+/// `fit     N ms  (+M ms validating)` line, which prints only when validation
+/// took at least 1 ms. The linear model's `fit     converged` line stays.
+const dropped_prefixes = [_][]const u8{ "build " };
+
+fn isTimingFitLine(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "fit ") and std.mem.find(u8, line, " ms  (+") != null;
+}
 
 /// Copy `text` without the dropped lines, replacing every duration (a number
 /// followed by `ms`, optionally after one space) and its padding with ` #`.
@@ -174,6 +179,7 @@ fn mask(w: *Io.Writer, text: []const u8) !void {
     var first = true;
     next_line: while (lines.next()) |line| {
         for (dropped_prefixes) |p| if (std.mem.startsWith(u8, line, p)) continue :next_line;
+        if (isTimingFitLine(line)) continue;
         // Debug/ReleaseSafe append an error return trace; the error line above it stays.
         if (line.len > 0 and line[0] == '/' and std.mem.find(u8, line, ": 0x") != null) {
             if (!first) try w.writeByte('\n');

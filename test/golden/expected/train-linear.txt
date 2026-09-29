@@ -20,6 +20,7 @@ train   1047 rows / valid 262 rows
 rounds  35
 train # ms  ( # ms/epoch)
 coefs   196 (25 zero)
+fit     converged, |g|max 4.14e-6 from 2.59e-1
 saved   l.zm
 valid   auc=0.830974  logloss=0.511979
 --- stderr
