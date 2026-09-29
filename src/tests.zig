@@ -20,12 +20,14 @@ test {
     // Compile coverage: every module, so none escapes the test build.
     // Add a new module here as well as in root.zig. The CLI (src/cli/) is
     // compiled by `zig build` and `zig build check`.
+    std.testing.refAllDecls(@import("bin_edges.zig"));
     std.testing.refAllDecls(@import("booster.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("csv.zig"));
     std.testing.refAllDecls(@import("csv_profile.zig"));
     std.testing.refAllDecls(@import("cv.zig"));
     std.testing.refAllDecls(@import("data.zig"));
+    std.testing.refAllDecls(@import("label_encoder.zig"));
     std.testing.refAllDecls(@import("goss.zig"));
     std.testing.refAllDecls(@import("forest.zig"));
     std.testing.refAllDecls(@import("fitted.zig"));
@@ -39,6 +41,7 @@ test {
     std.testing.refAllDecls(@import("pool.zig"));
     std.testing.refAllDecls(@import("prof.zig"));
     std.testing.refAllDecls(@import("root.zig"));
+    std.testing.refAllDecls(@import("schema.zig"));
     std.testing.refAllDecls(@import("tree.zig"));
     std.testing.refAllDecls(@import("tune.zig"));
 }
