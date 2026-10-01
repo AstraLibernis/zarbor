@@ -1,0 +1,30 @@
+$ zarbor tune titanic3.csv --label=survived --search=bandit --trials=6 --folds=4 --eta=5000000000 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+data     titanic3.csv
+rows     1309   feats 8   (label "survived")
+algo     gbdt
+search   bandit
+space    8 params
+folds    4  (seed 1)
+threads  4
+prep # ms  (read + bin, paid once for the whole search)
+
+  n_rounds             choice  [200, 300, 500, 800]
+  learning_rate        log_uniform  0.02 .. 0.2
+  max_depth            choice  [3, 4, 5, 6, 7, 8]
+  lambda               log_uniform  0.1 .. 50
+  min_child_weight     log_uniform  0.1 .. 100
+  subsample            uniform  0.5 .. 1
+  colsample_bytree     uniform  0.5 .. 1
+  max_bin              choice  [64, 128, 256]
+
+rung 0  6 configs at 2 folds
+rung 1  1 configs at 4 folds
+   1  0.865088  4f #ms  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128  <- best
+
+best     0.865088   1 trials   (6 re-bins)
+  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128
+verified 0.865088   (winner re-ran identically)
+--- stderr
+--- files

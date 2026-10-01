@@ -226,7 +226,10 @@ fn writePredictions(
     for (preds, 0..) |p, row| {
         if (idx) |i| {
             const v = frame.values[i][row];
-            const txt = if (frame.kinds[i] == .categorical) blk: {
+            const txt = if (std.math.isNan(v))
+                // Missing id: an empty field, as it was in the input.
+                try std.fmt.bufPrint(&line, ",", .{})
+            else if (frame.kinds[i] == .categorical) blk: {
                 // Ids read as text keep their original spelling.
                 const lid: usize = @intFromFloat(v);
                 break :blk try std.fmt.bufPrint(&line, "{s},", .{frame.levels[i][lid]});

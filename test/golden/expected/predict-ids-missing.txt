@@ -1,0 +1,12 @@
+$ zarbor predict titanic3.csv --model=g.zm --id-col=cabin --out=pm.csv
+exit 0
+--- stdout
+rows    1309
+models  1
+read # ms
+bin # ms
+predict # ms
+wrote   pm.csv
+--- stderr
+--- files
+pm.csv  14210 bytes  sha256 905086d6e5d5c842e22cb9121248f1cfc11446276bce0ff9ad2a6cd3d8463e83

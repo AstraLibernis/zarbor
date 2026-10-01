@@ -95,6 +95,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try out.flush();
         return error.NoLabel;
     };
+    // NaN fails both comparisons; 1 would leave no training rows.
+    if (!(valid_frac >= 0 and valid_frac < 1)) return error.ValidFracOutOfRange;
 
     const pool = try pool_mod.Pool.init(gpa, cfg.n_threads);
     defer pool.deinit();

@@ -76,6 +76,11 @@ const cases = [_]Case{
     .{ .name = "error-forest-no-rounds", .args = &.{ data_file, "--label=survived", "--algo=random_forest", "--n_rounds=0" } },
     .{ .name = "error-linear-no-epochs", .args = &.{ data_file, "--label=survived", "--algo=linear", "--lin_epochs=0" } },
     .{ .name = "error-linear-neg-lambda", .args = &.{ "cv", data_file, "--label=survived", "--algo=linear", "--lambda=-1" } },
+    .{ .name = "error-valid-frac-negative", .args = &.{ data_file, "--label=survived", "--valid-frac=-0.5" } },
+    .{ .name = "error-valid-frac-nan", .args = &.{ data_file, "--label=survived", "--valid-frac=nan" } },
+    .{ .name = "error-valid-frac-one", .args = &.{ data_file, "--label=survived", "--valid-frac=1" } },
+    .{ .name = "tune-bandit-huge-eta", .args = &.{ "tune", data_file, "--label=survived", "--search=bandit", "--trials=6", "--folds=4", "--eta=5000000000" } },
+    .{ .name = "predict-ids-missing", .train_flags = false, .args = &.{ "predict", data_file, "--model=g.zm", "--id-col=cabin", "--out=pm.csv" }, .files = &.{"pm.csv"} },
     .{ .name = "forest-explicit-overrides", .args = &.{ data_file, "--label=survived", "--algo=random_forest", "--n_rounds=20", "--max_depth=5", "--learning_rate=0.3", "--colsample_bynode=0.5", "--lambda=2" } },
 };
 

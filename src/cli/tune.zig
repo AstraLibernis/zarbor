@@ -425,7 +425,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 const keep = @max(@as(usize, 1), scored.items.len / eta);
                 alive.clearRetainingCapacity();
                 for (scored.items[0..keep]) |e| try alive.append(gpa, e.x);
-                rung_folds = @min(n_folds, @max(rung_folds + 1, rung_folds * @as(u32, @intCast(eta))));
+                rung_folds = @min(n_folds, @max(rung_folds + 1, rung_folds *| @as(u32, @intCast(@min(eta, n_folds)))));
                 if (keep == 1) rung_folds = n_folds;
             }
         },
