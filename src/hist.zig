@@ -57,21 +57,11 @@ pub const Bin = extern struct {
 /// nodes in the last level. Features start on cache lines, keeping clear/reduce off partial lines.
 pub const Bank = struct {
     gpa: std.mem.Allocator,
-    n_workers: usize,
     n_features: usize,
     /// Feature `f`'s bins: `offsets[f]..offsets[f+1]`. `n_features + 1` long; last = slot length.
     offsets: []u32,
-    /// `n_workers * slotLen()`
+    /// `max_parts * slotLen()`: one partial histogram per row chunk of a parallel build.
     private: []Bin,
-    /// Build seq each worker last cleared its slot for, one per cache line. Clearing on the main
-    /// thread was 108 ms of a 773 ms fit (147 KB memset x 6400 builds); now each worker clears its
-    /// own slot on its first chunk, and a worker with no chunk is neither cleared nor reduced.
-    stamps: []u64,
-    /// Scratch for the workers that took part in the last build.
-    parts: []usize,
-    seq: u64 = 0,
-
-    const stamp_stride: usize = @max(1, std.atomic.cache_line / @sizeOf(u64));
 
     /// Bins per alignment step, so `step * @sizeOf(Bin)` is whole cache lines. Not `cache_line /
     /// @sizeOf(Bin)`: the 24-byte `Bin` this once was gave 128/24 = 5 on a 128-byte line, not the
@@ -87,7 +77,6 @@ pub const Bank = struct {
 
     pub fn init(
         gpa: std.mem.Allocator,
-        n_workers: usize,
         n_features: usize,
         n_bins: []const u16,
     ) !Bank {
@@ -101,33 +90,19 @@ pub const Bank = struct {
         }
         offsets[n_features] = @intCast(acc);
 
-        const private = try gpa.alloc(Bin, n_workers * acc);
-        errdefer gpa.free(private);
-        const stamps = try gpa.alloc(u64, n_workers * stamp_stride);
-        errdefer gpa.free(stamps);
-        @memset(stamps, 0);
-        const parts = try gpa.alloc(usize, n_workers);
+        const private = try gpa.alloc(Bin, max_parts * acc);
         return .{
             .gpa = gpa,
-            .n_workers = n_workers,
             .n_features = n_features,
             .offsets = offsets,
             .private = private,
-            .stamps = stamps,
-            .parts = parts,
         };
     }
 
     pub fn deinit(b: *Bank) void {
         b.gpa.free(b.private);
-        b.gpa.free(b.stamps);
-        b.gpa.free(b.parts);
         b.gpa.free(b.offsets);
         b.* = undefined;
-    }
-
-    inline fn stamp(b: *const Bank, worker: usize) *u64 {
-        return &b.stamps[worker * stamp_stride];
     }
 
     /// Bins in one node's histogram slot.
@@ -160,21 +135,21 @@ const BuildCtx = struct {
     /// the partition moved, while this gather costs 4 ms across a 200-tree fit.
     grads: []const GradPair,
     features: []const u32,
-    seq: u64,
+    /// Rows per part; part `c` is `rows[c * size ..]`, accumulated into private slot `c`.
+    size: usize,
 
+    /// `begin..end` are part indices: one worker may be handed several, or all of them.
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
         const self: *BuildCtx = @ptrCast(@alignCast(ctx));
-        const bank = self.bank;
-        const span = bank.slotLen();
-        const mine = bank.private[worker * span ..][0..span];
-        // First chunk of this build for this worker: clear and stamp, so the reduce knows the slot
-        // holds data. Only the worker writes its stamp; the pool's barrier publishes it.
-        const st = bank.stamp(worker);
-        if (st.* != self.seq) {
+        const span = self.bank.slotLen();
+        for (begin..end) |c| {
+            const mine = self.bank.private[c * span ..][0..span];
             @memset(mine, .{});
-            st.* = self.seq;
+            const lo = @min(c * self.size, self.rows.len);
+            const hi = @min(lo + self.size, self.rows.len);
+            accumulate(self.ds, self.bank.offsets, self.rows[lo..hi], self.grads, self.features, mine);
         }
-        accumulate(self.ds, bank.offsets, self.rows[begin..end], self.grads, self.features, mine);
     }
 };
 
@@ -230,19 +205,19 @@ pub fn subtractInto(bank: *const Bank, out: []Bin, parent: []const Bin, sibling:
 /// hold whatever their private copies did, which the caller already must not read.
 const ReduceCtx = struct {
     bank: *Bank,
-    /// Workers that actually took a chunk, ascending.
-    parts: []const usize,
+    /// Parts `0..n_parts` were built; summed in that order.
+    n_parts: usize,
     out: []Bin,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ReduceCtx = @ptrCast(@alignCast(ctx));
         const span = self.bank.slotLen();
-        const parts = self.parts;
+        const private = self.bank.private;
         var i = begin;
         while (i < end) : (i += 1) {
-            var acc = self.bank.private[parts[0] * span + i];
-            for (parts[1..]) |w| acc = acc.add(self.bank.private[w * span + i]);
+            var acc = private[i];
+            for (1..self.n_parts) |c| acc = acc.add(private[c * span + i]);
             self.out[i] = acc;
         }
     }
@@ -250,7 +225,9 @@ const ReduceCtx = struct {
 
 /// Below this many rows a node is built on one thread. Tuned against per-node clear+reduce cost
 /// (packing cut it ~4.5x): 200-tree fit at 8192 (old value) 1516 ms, at 512 1213 ms; flat 256-768,
-/// rising below 128 where chunks get too small for the barrier. Output identical at every setting.
+/// rising below 128 where chunks get too small for the barrier. It also sets how a node's sum is
+/// grouped (one run, or `rows / threshold` parts), so changing it changes histograms in the last
+/// bits; the thread count never does.
 pub const parallel_threshold: usize = 512;
 
 /// Build one node's histogram into `out`, one slot's worth (`bank.slotLen()` bins). Only `features`
@@ -264,54 +241,41 @@ pub fn build(
     features: []const u32,
     out: []Bin,
 ) void {
-    const span = bank.slotLen();
+    if (rows.len <= parallel_threshold) {
+        const t_a = prof.start();
+        buildInto(bank, ds, rows, grads, features, out);
+        prof.stop(.hist_accum, t_a);
+        return;
+    }
 
-    // Fan-out is decided here, not by the pool: the clear and merge must cover exactly the workers
-    // that ran, else a stale private histogram is merged in.
-    const parallel = bank.n_workers > 1 and rows.len > parallel_threshold;
-    const active: usize = if (parallel) bank.n_workers else 1;
-
-    // The clear runs inside the accumulate, on workers that take a chunk; see `Bank.stamps`.
-    bank.seq += 1;
+    // Parts are fixed by the row count alone, never by the thread count or by which worker takes
+    // which: each part sums into its own slot and the slots are added in part order, so every
+    // histogram is the same to the bit at any `--n_threads` and on every run. Per-worker slots,
+    // as before, grouped the additions by whichever chunks a worker happened to grab.
+    const n_parts = @min(max_parts, (rows.len + parallel_threshold - 1) / parallel_threshold);
     var bctx = BuildCtx{
         .bank = bank,
         .ds = ds,
         .rows = rows,
         .grads = grads,
         .features = features,
-        .seq = bank.seq,
+        .size = (rows.len + n_parts - 1) / n_parts,
     };
     const t_a = prof.start();
-    if (parallel) {
-        pool.parallelFor(rows.len, &bctx, BuildCtx.run, parallel_threshold);
-    } else {
-        BuildCtx.run(&bctx, 0, 0, rows.len);
-    }
+    pool.parallelFor(n_parts, &bctx, BuildCtx.run, 1);
     prof.stop(.hist_accum, t_a);
 
     const t_r = prof.start();
     defer prof.stop(.hist_reduce, t_r);
-
-    // Ascending worker order; untouched slots skipped, not added as zeros: bit-identical to all.
-    var n_parts: usize = 0;
-    for (0..active) |w| {
-        if (bank.stamp(w).* == bank.seq) {
-            bank.parts[n_parts] = w;
-            n_parts += 1;
-        }
-    }
-    if (n_parts == 0) {
-        @memset(out[0..span], .{});
-        return;
-    }
-    if (n_parts == 1) {
-        @memcpy(out[0..span], bank.private[bank.parts[0] * span ..][0..span]);
-        return;
-    }
-
-    var rctx = ReduceCtx{ .bank = bank, .parts = bank.parts[0..n_parts], .out = out };
-    pool.parallelFor(span, &rctx, ReduceCtx.run, 512);
+    var rctx = ReduceCtx{ .bank = bank, .n_parts = n_parts, .out = out };
+    pool.parallelFor(bank.slotLen(), &rctx, ReduceCtx.run, 512);
 }
+
+/// Most partial histograms a parallel build makes. Fixed, so a build's grouping depends only on
+/// its row count. Swept on ev-purchases at 16 threads: 16 parts matched or beat the per-worker
+/// build (gbdt 1.209 -> 1.194 s, lossguide+goss 1.581 -> 1.571, forest 3.592 -> 3.521); 32 and 64
+/// were slower, the extra partials costing more to clear and reduce than balance gained.
+pub const max_parts: usize = 16;
 
 const SubCtx = struct {
     out: []Bin,

@@ -127,7 +127,7 @@ test "packed offsets never truncate a feature and stay cache-line aligned" {
     const gpa = testing.allocator;
     const widths = [_]u16{ 2, 3, 17, 47, 202, 234, 256, 257 };
 
-    var bank = try hist.Bank.init(gpa, 2, widths.len, &widths);
+    var bank = try hist.Bank.init(gpa, widths.len, &widths);
     defer bank.deinit();
 
     var prev: u32 = 0;
@@ -148,7 +148,7 @@ test "packed offsets never truncate a feature and stay cache-line aligned" {
     // continuous columns beside several tiny categorical ones. These are the
     // measured bin counts of the dataset this was tuned against.
     const real = [_]u16{ 47, 234, 202, 6, 17, 22, 7, 4, 4, 5, 3, 3, 4 };
-    var rb = try hist.Bank.init(gpa, 1, real.len, &real);
+    var rb = try hist.Bank.init(gpa, real.len, &real);
     defer rb.deinit();
 
     var maxw: usize = 0;

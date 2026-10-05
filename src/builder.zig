@@ -219,7 +219,7 @@ pub const Builder = struct {
         ds: *const Dataset,
         cfg: Params,
     ) !Builder {
-        var bank = try hist.Bank.init(gpa, pool.workerCount(), ds.n_features, ds.n_bins);
+        var bank = try hist.Bank.init(gpa, ds.n_features, ds.n_bins);
         errdefer bank.deinit();
 
         const slot_len = bank.slotLen();

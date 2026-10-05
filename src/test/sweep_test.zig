@@ -437,6 +437,54 @@ test "n_threads: thread count changes nothing about the result" {
     for (weights[0], weights[1]) |x, y| try testing.expectEqual(x, y);
 }
 
+test "histogram sums are the same to the bit at any thread count" {
+    // A leaf weight is f32, so the model-level check above can miss a reduction that regroups
+    // f64 sums: the last bits differ, the rounded weights do not. This compares the sums
+    // themselves. A build grouped by worker (as it once was) fails it at 3 or 16 threads.
+    const gpa = testing.allocator;
+    const n = 200_000;
+    var ds = try synth(gpa, n, 9);
+    defer ds.deinit();
+
+    const grads = try gpa.alloc(hist.GradPair, n);
+    defer gpa.free(grads);
+    var prng: std.Random.DefaultPrng = .init(4);
+    // Logistic-like, from confident and unsure rows alike: p spans 1e-9 .. 0.5, so g = p - y and
+    // h = p(1 - p) span many binades. That matters: f32 values within a few binades of each other
+    // sum exactly in f64 in any order, and a test over p ~ U(0, 1) passed a per-worker grouping.
+    for (grads) |*g| {
+        const pr: f32 = 0.5 * @exp(-20.0 * prng.random().float(f32));
+        const y: f32 = if (prng.random().boolean()) 1 else 0;
+        g.* = .{ .g = pr - y * (1 - 2 * pr), .h = pr * (1 - pr) };
+    }
+    const rows = try gpa.alloc(u32, n);
+    defer gpa.free(rows);
+    for (rows, 0..) |*r, i| r.* = @intCast(i);
+    const features = try gpa.alloc(u32, ds.n_features);
+    defer gpa.free(features);
+    for (features, 0..) |*f, i| f.* = @intCast(i);
+
+    var bank = try hist.Bank.init(gpa, ds.n_features, ds.n_bins);
+    defer bank.deinit();
+    const want = try gpa.alloc(hist.Bin, bank.slotLen());
+    defer gpa.free(want);
+    const got = try gpa.alloc(hist.Bin, bank.slotLen());
+    defer gpa.free(got);
+
+    const one = try Pool.init(gpa, 1);
+    defer one.deinit();
+    // The whole table, and a node just over the serial threshold.
+    for ([_]usize{ n, hist.parallel_threshold + 37 }) |len| {
+        hist.build(one, &bank, &ds, rows[0..len], grads, features, want);
+        for ([_]u32{ 3, 16 }) |threads| {
+            const pool = try Pool.init(gpa, threads);
+            defer pool.deinit();
+            hist.build(pool, &bank, &ds, rows[0..len], grads, features, got);
+            try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+        }
+    }
+}
+
 // ------------------------------------------------------------------ linear
 
 test "lin_epochs and lin_tol: more budget converges further, a loose tol stops early" {
