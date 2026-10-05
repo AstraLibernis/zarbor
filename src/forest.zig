@@ -93,6 +93,11 @@ const PredictCtx = struct {
     }
 };
 
+/// Validation rows per pool chunk, at least. 4096 cut 133k rows into 33 chunks for 16 workers, so the
+/// barrier waited on a worker with three while the average had two; 1024 gives 131. Rows are
+/// independent, so the chunking changes nothing but the wait.
+const valid_min_chunk = 1024;
+
 /// Running sum of member predictions, so a validation curve costs one tree
 /// traversal per round instead of re-predicting the whole ensemble.
 const AccumCtx = struct {
@@ -173,7 +178,7 @@ pub fn train(
                 .ds = v,
                 .sum = valid_sum,
             };
-            pool.parallelFor(v.n_rows, &actx, AccumCtx.run, 4096);
+            pool.parallelFor(v.n_rows, &actx, AccumCtx.run, valid_min_chunk);
             prof.stop(.valid_predict, t_vp);
 
             // Score only when consumed: no early stopping, so only the last and logged
