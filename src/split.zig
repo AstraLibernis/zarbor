@@ -149,6 +149,19 @@ const CatKey = struct {
 ///   but biases the comparison against categorical splits instead of regularising them.
 /// Missing is not searched: bin 0 always goes right (LightGBM `default_left = false`), so
 /// `missing_left` is forced false rather than searched in a direction LightGBM never considers.
+/// Levels the sorted categorical search orders on the stack. `max_cat_levels` defaults to 255, so this
+/// covers it; wider columns go through `bestCatSplitWide`. bestSplit used to declare a `max_bins`
+/// (65,535 x 16 B = 1 MB) scratch on every call, cat search or not: Debug and ReleaseSafe fill an
+/// `undefined` array with 0xAA, and that fill was most of a 12x ReleaseSafe slowdown on a forest;
+/// the 1 MB frame also cost a stack probe per call in every mode.
+const cat_scratch_small = 256;
+
+/// The 1 MB scratch, in its own frame so only a categorical search over a wide column pays for it.
+noinline fn bestCatSplitWide(best: *Split, fid: u32, h: []const Bin, nb: u16, total: Bin, p: SplitParams) void {
+    var scratch: [data.max_bins]CatKey = undefined;
+    bestCatSplit(best, fid, h, nb, total, p, &scratch);
+}
+
 fn bestCatSplit(
     best: *Split,
     fid: u32,
@@ -156,8 +169,9 @@ fn bestCatSplit(
     nb: u16,
     total: Bin,
     p: SplitParams,
-    scratch: *[data.max_bins]CatKey,
+    scratch: []CatKey,
 ) void {
+    std.debug.assert(scratch.len >= nb);
     const min_n: f64 = @floatFromInt(p.min_child_samples);
 
     // Few levels: one vs the rest, without `cat_l2` (LightGBM adds it only on the sorted path).
@@ -289,7 +303,6 @@ pub fn bestSplit(
 ) Split {
     var best: Split = .{};
     const parent_score = nodeScore(total.g, total.h, p);
-    var cat_scratch: [data.max_bins]CatKey = undefined;
 
     for (features) |fid| {
         const h = bank.featureSliceConst(hist, fid);
@@ -297,7 +310,10 @@ pub fn bestSplit(
         if (nb < 3) continue; // missing bin plus one real bin: nothing to cut
 
         if (p.cat_optimal and ds.kinds[fid] == .categorical) {
-            bestCatSplit(&best, fid, h, nb, total, p, &cat_scratch);
+            if (nb <= cat_scratch_small) {
+                var scratch: [cat_scratch_small]CatKey = undefined;
+                bestCatSplit(&best, fid, h, nb, total, p, &scratch);
+            } else bestCatSplitWide(&best, fid, h, nb, total, p);
             continue;
         }
 
