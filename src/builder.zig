@@ -71,6 +71,11 @@ pub const Builder = struct {
     cat_ids: std.ArrayList(data.BinIdx),
     lin: std.ArrayList(LinTerm),
     queue: std.ArrayList(Work),
+    /// Depthwise pops `queue.items[queue_head]` and advances; the items before it are spent.
+    /// `orderedRemove(0)` shifted the whole frontier of 256-byte `Work`s on every pop: 1.6 ms of a
+    /// 17.7 ms 1,024-leaf forest tree. Lossguide still removes in place (its queue is short, and
+    /// the remaining order breaks gain ties), so its head stays 0.
+    queue_head: usize = 0,
     leaves: std.ArrayList(LeafSpan),
 
     all_features: []u32,
@@ -384,6 +389,7 @@ pub const Builder = struct {
         b.cat_ids.clearRetainingCapacity();
         b.lin.clearRetainingCapacity();
         b.queue.clearRetainingCapacity();
+        b.queue_head = 0;
         b.leaves.clearRetainingCapacity();
         b.level_depth = -1;
 
@@ -434,11 +440,10 @@ pub const Builder = struct {
         });
 
         // --- expansion ---
-        while (b.queue.items.len != 0) {
-            const idx = b.pickNext();
-            const w = b.queue.orderedRemove(idx);
+        while (b.pending() != 0) {
+            const w = b.popNext();
 
-            const leaf_count = b.leaves.items.len + b.queue.items.len + 1;
+            const leaf_count = b.leaves.items.len + b.pending() + 1;
             const depth_capped = b.cfg.max_depth != 0 and w.depth >= b.cfg.max_depth;
             if (!w.split.valid() or depth_capped or leaf_count >= leaf_cap) {
                 try b.makeLeaf(w);
@@ -483,7 +488,7 @@ pub const Builder = struct {
             // -1, leaves +1; or splits: queue -1 +2), so once the budget is hit every remaining pop
             // is a leaf. `b.queue` is post-removal here; the next pop sees `leaves + queue + 2`.
             const at_depth_cap = b.cfg.max_depth != 0 and w.depth + 1 >= b.cfg.max_depth;
-            const at_leaf_cap = b.leaves.items.len + b.queue.items.len + 2 >= leaf_cap;
+            const at_leaf_cap = b.leaves.items.len + b.pending() + 2 >= leaf_cap;
             const children_are_leaves = at_depth_cap or at_leaf_cap;
 
             const slot_l = b.takeSlot();
@@ -583,10 +588,17 @@ pub const Builder = struct {
         return .{ .nodes = nodes, .cat_ids = ids, .lin = lin };
     }
 
+    fn pending(b: *const Builder) usize {
+        return b.queue.items.len - b.queue_head;
+    }
+
     /// Depthwise takes the oldest pending node (breadth-first); lossguide takes the one whose split
     /// buys the most.
-    fn pickNext(b: *Builder) usize {
-        if (b.cfg.grow_policy == .depthwise) return 0;
+    fn popNext(b: *Builder) Work {
+        if (b.cfg.grow_policy == .depthwise) {
+            b.queue_head += 1;
+            return b.queue.items[b.queue_head - 1];
+        }
         var best: usize = 0;
         var best_gain = -std.math.inf(f64);
         for (b.queue.items, 0..) |w, i| {
@@ -595,7 +607,7 @@ pub const Builder = struct {
                 best = i;
             }
         }
-        return best;
+        return b.queue.orderedRemove(best);
     }
 
     pub fn leafSpans(b: *const Builder) []const LeafSpan {
