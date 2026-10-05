@@ -138,11 +138,15 @@ pub fn readCsvHinted(
         gpa,
         std.Io.Limit.limited(max_bytes),
     );
-    defer gpa.free(text);
+    // `parseText` frees the text once every field is parsed, before the merge: the file, the
+    // per-range columns and the merged columns were all alive at once, the peak of every command.
+    var owned: ?[]u8 = text;
+    defer if (owned) |t| gpa.free(t);
     const workers = @min(pool.workerCount(), zsift.parallel.max_workers);
-    return parseText(gpa, io, text, workers, hint, .strict) catch |e| switch (e) {
-        // Not RFC 4180 (a quote inside an unquoted field): read it leniently instead.
-        error.InvalidQuote => parseText(gpa, io, text, 1, hint, .lenient),
+    return parseText(gpa, io, text, &owned, workers, hint, .strict) catch |e| switch (e) {
+        // Not RFC 4180 (a quote inside an unquoted field): read it leniently instead. The strict
+        // pass fails while parsing, so the text has not been freed.
+        error.InvalidQuote => parseText(gpa, io, text, &owned, 1, hint, .lenient),
         else => e,
     };
 }
@@ -159,7 +163,29 @@ const bytes_per_worker: usize = 64 << 10;
 /// escaped field is a `ScratchTooSmall` error, not a truncation.
 const field_scratch_max: usize = 16 << 20;
 
-fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usize, hint: ?KindHint, comptime mode: Mode) !Frame {
+/// Unescape scratch is allocated raw, skipping `alloc`'s fill: Debug and ReleaseSafe write 0xAA over
+/// every allocation and again on free, and this is up to 16 MiB per worker, 272 MB on 16 threads
+/// (ReleaseSafe peaked at 384 MB vs 135 MB in ReleaseFast). Only a field containing `""` writes it.
+fn allocScratch(gpa: std.mem.Allocator, len: usize) ![]u8 {
+    const p = gpa.rawAlloc(len, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
+    return p[0..len];
+}
+
+fn freeScratch(gpa: std.mem.Allocator, scratch: []u8) void {
+    gpa.rawFree(scratch, .of(u8), @returnAddress());
+}
+
+/// `owner` holds `text` if the caller owns it; it is freed (and set to null) once all fields are
+/// parsed, since nothing after that reads it: categorical levels are copied.
+fn parseText(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    text: []const u8,
+    owner: *?[]u8,
+    workers: usize,
+    hint: ?KindHint,
+    comptime mode: Mode,
+) !Frame {
     const P = if (mode == .strict) zsift.SimdParser else zsift.Parser;
     const scratch_len = @min(text.len + 64, field_scratch_max);
 
@@ -172,8 +198,8 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
     var kinds: std.ArrayList(ColumnKind) = .empty;
     errdefer kinds.deinit(gpa);
     {
-        const scratch = try gpa.alloc(u8, scratch_len);
-        defer gpa.free(scratch);
+        const scratch = try allocScratch(gpa, scratch_len);
+        defer freeScratch(gpa, scratch);
         var it = try P.init(text, scratch, .{});
         while (try it.next()) |f| {
             try names.append(gpa, try gpa.dupe(u8, trimField(f.bytes)));
@@ -222,10 +248,10 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
     const scratches = try gpa.alloc([]u8, k);
     defer gpa.free(scratches);
     var n_scratch: usize = 0;
-    defer for (scratches[0..n_scratch]) |sc| gpa.free(sc);
+    defer for (scratches[0..n_scratch]) |sc| freeScratch(gpa, sc);
     for (ptrs, scratches, sinks) |*ptr, *sc, *s| {
         ptr.* = s;
-        sc.* = try gpa.alloc(u8, scratch_len);
+        sc.* = try allocScratch(gpa, scratch_len);
         n_scratch += 1;
     }
     switch (mode) {
@@ -239,6 +265,12 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
         },
     }
     for (sinks) |*s| if (s.err) |e| return e;
+    if (owner.*) |t| {
+        gpa.free(t);
+        owner.* = null;
+    }
+    for (scratches[0..n_scratch]) |sc| freeScratch(gpa, sc);
+    n_scratch = 0;
 
     // ---- merge the ranges in file order ----
     var n_rows: usize = 0;
@@ -267,6 +299,8 @@ fn parseText(gpa: std.mem.Allocator, io: std.Io, text: []const u8, workers: usiz
         for (sinks) |*s| unparsed[c] += s.bad[c];
         levels[c] = try mergeColumn(gpa, sinks, c, values[c]);
         levelled += 1;
+        // Merged: the ranges' copy of this column is dead weight while the next is built.
+        for (sinks) |*s| s.cols[c].clearAndFree(gpa);
     }
 
     return .{
