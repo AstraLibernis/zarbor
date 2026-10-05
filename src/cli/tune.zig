@@ -210,6 +210,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         .ds = try data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items),
         .max_bin = cfg.bin.max_bin,
         .policy = cfg.bin.bin_policy,
+        // The matrix was binned under `cfg.bin`; left at the default, a pinned
+        // `--max_cat_levels` made the first trial re-bin to an identical one.
+        .max_cat_levels = cfg.bin.max_cat_levels,
     };
     defer binner.ds.deinit();
     // Row order, labels and feature count do not change with binning, so a
