@@ -38,6 +38,22 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
 
+    // The unit tests under ThreadSanitizer, which reports data races at run time. Needs LLVM (the
+    // self-hosted x86 backend does not instrument), libc, and an explicit linux-gnu target: the
+    // native one compiles libtsan against /usr/include, which lacks the kernel headers here, while
+    // an explicit target uses the copies bundled with Zig. Run before committing threaded changes.
+    const tsan_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }),
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = true,
+        }),
+        .use_llvm = true,
+    });
+    b.step("test-tsan", "Run unit tests under ThreadSanitizer (data races)").dependOn(&b.addRunArtifact(tsan_tests).step);
+
     // End-to-end regression fence: the CLI on real data vs test/golden/expected/.
     const golden = b.addExecutable(.{ .name = "golden", .root_module = b.createModule(.{
         .root_source_file = b.path("test/golden/golden.zig"),
