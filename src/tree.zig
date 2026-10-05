@@ -159,7 +159,8 @@ pub const Tree = struct {
     }
 
     /// Raw score for one row binned with the same edges. Row-major: a walk visits a new feature per
-    /// level, so column-major cost a cache line per level; a row is 13 contiguous bytes.
+    /// level, so column-major cost a cache line per level; a row is `n_features` contiguous `u16`
+    /// bins (26 bytes on 13 features).
     pub fn predictBinned(t: *const Tree, ds: *const Dataset, row: usize) f32 {
         const rb = ds.bins_rm[row * ds.n_features ..][0..ds.n_features];
         var i: u32 = 0;

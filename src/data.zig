@@ -74,11 +74,11 @@ pub const Dataset = struct {
     gpa: std.mem.Allocator,
     n_rows: usize,
     n_features: usize,
-    /// Column-major, one byte per bin: `bins[f * n_rows + r]`. Partition reads
-    /// one feature over scattered rows, each its own cache line, so element
-    /// size is paid in full: at `u16` partition went 51 -> 110 ms on adult
-    /// (accumulate unchanged). Too-wide columns go to `wide_cols`.
-    /// See docs/wide-categoricals.md.
+    /// Column-major, one byte per bin: `bins[f * n_rows + r]`, read by partition
+    /// one feature over scattered rows. Too-wide columns go to `wide_cols`.
+    /// The 51 -> 110 ms partition slowdown once blamed on `u16` bins was
+    /// `goesLeft` taking a 160-byte `Split` by value; the bin width "was never
+    /// the cost" (docs/wide-categoricals.md, "Three wrong guesses").
     bins: []u8,
     /// Column-major bins for features with more than 256 bins; empty otherwise.
     wide_cols: [][]BinIdx,
