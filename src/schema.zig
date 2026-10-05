@@ -85,6 +85,8 @@ const ApplyCtx = struct {
     schema: *const Schema,
     /// Column of `src` supplying each schema feature.
     src_col: []const usize,
+    /// Per categorical feature, the bin of each of `src`'s level ids (`levelBins`).
+    level_bins: []const []const BinIdx,
     bins: []BinIdx,
     n_rows: usize,
 
@@ -104,29 +106,40 @@ const ApplyCtx = struct {
                 },
                 .categorical => {
                     // The new frame built its own dictionary, so translate
-                    // through the strings. A level the model never saw becomes
-                    // the missing bin, which every split already handles.
-                    const src_levels = self.src.levels[self.src_col[f]];
+                    // through the strings, once per level (`levelBins`). A
+                    // level the model never saw becomes the missing bin, which
+                    // every split already handles.
+                    const map = self.level_bins[f];
                     for (vals, out) |v, *b| {
                         if (std.math.isNan(v)) {
                             b.* = 0;
                             continue;
                         }
                         const id: usize = @intFromFloat(v);
-                        b.* = 0;
-                        if (id >= src_levels.len) continue;
-                        for (self.schema.levels[f], 0..) |lvl, j| {
-                            if (std.mem.eql(u8, lvl, src_levels[id])) {
-                                b.* = @intCast(j + 1);
-                                break;
-                            }
-                        }
+                        b.* = if (id < map.len) map[id] else 0;
                     }
                 },
             }
         }
     }
 };
+
+/// The bin of each of a new file's level ids: the saved level's position + 1, or 0 (missing) for a
+/// level the model never saw. Translating per row scanned the saved levels with a string compare
+/// each time, O(rows x levels): 136 ms to bin 668k rows of one 255-level column, 10 ms to parse
+/// them. A first match wins, as it did in that scan, should a saved level ever repeat.
+fn levelBins(gpa: std.mem.Allocator, saved: []const []const u8, src_levels: []const []const u8) ![]BinIdx {
+    var index: std.StringHashMapUnmanaged(u32) = .empty;
+    defer index.deinit(gpa);
+    try index.ensureTotalCapacity(gpa, @intCast(saved.len));
+    for (saved, 0..) |lvl, j| {
+        const gop = index.getOrPutAssumeCapacity(lvl);
+        if (!gop.found_existing) gop.value_ptr.* = @intCast(j + 1);
+    }
+    const map = try gpa.alloc(BinIdx, src_levels.len);
+    for (src_levels, map) |lvl, *m| m.* = if (index.get(lvl)) |b| @intCast(b) else 0;
+    return map;
+}
 
 /// Bin `src` under an existing `schema`, matching columns by name.
 ///
@@ -153,6 +166,17 @@ pub fn applySchema(
         if (src.kinds[src_col[f]] != schema.kinds[f]) return error.FeatureKindMismatch;
     }
 
+    const level_bins = try gpa.alloc([]BinIdx, n);
+    @memset(level_bins, &.{});
+    defer {
+        for (level_bins) |m| if (m.len != 0) gpa.free(m);
+        gpa.free(level_bins);
+    }
+    for (0..n) |f| {
+        if (schema.kinds[f] == .categorical)
+            level_bins[f] = try levelBins(gpa, schema.levels[f], src.levels[src_col[f]]);
+    }
+
     var bins = try gpa.alloc(BinIdx, n * src.n_rows);
     errdefer if (bins.len != 0) gpa.free(bins);
 
@@ -160,6 +184,7 @@ pub fn applySchema(
         .src = src,
         .schema = schema,
         .src_col = src_col,
+        .level_bins = level_bins,
         .bins = bins,
         .n_rows = src.n_rows,
     };
