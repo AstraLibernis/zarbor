@@ -105,6 +105,50 @@ const BatchBuildCtx = struct {
 
 const partitionSmall = @import("partition.zig").partitionSmall;
 
+/// `Builder.clearCounts` / `emitSample` over row ids, in chunks of `chunk`; each pass walks its range
+/// chunk by chunk, since one worker gets the whole range in one call.
+const SampleCtx = struct {
+    b: *Builder,
+    chunk: usize,
+
+    fn clear(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SampleCtx = @ptrCast(@alignCast(ctx));
+        @memset(self.b.row_counts[begin..end], 0);
+    }
+
+    fn total(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SampleCtx = @ptrCast(@alignCast(ctx));
+        var lo = begin;
+        while (lo < end) {
+            const hi = @min(lo + self.chunk, end);
+            var t: usize = 0;
+            for (self.b.row_counts[lo..hi]) |c| t += c;
+            self.b.sample_at[lo / self.chunk] = t;
+            lo = hi;
+        }
+    }
+
+    fn emit(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SampleCtx = @ptrCast(@alignCast(ctx));
+        const rows = self.b.rows;
+        var lo = begin;
+        while (lo < end) {
+            const hi = @min(lo + self.chunk, end);
+            var at = self.b.sample_at[lo / self.chunk];
+            for (self.b.row_counts[lo..hi], lo..) |c, row| {
+                for (0..c) |_| {
+                    rows[at] = @intCast(row);
+                    at += 1;
+                }
+            }
+            lo = hi;
+        }
+    }
+};
+
 /// Hard ceiling on histogram slot memory; beyond it the caller must shrink the tree, not the
 /// allocator decide.
 const slot_memory_budget: usize = 2 << 30;
@@ -136,6 +180,10 @@ pub const Builder = struct {
     part_right: []usize,
     /// Rows active for the current tree: `rows[0..n_active]`.
     n_active: usize,
+    /// Per-row draw counts for putting a sampled tree's rows in ascending order (`sortSample`).
+    row_counts: []u32,
+    /// Per-chunk row totals, then output offsets, for `sortSample`'s parallel emit.
+    sample_at: []usize,
 
     nodes: std.ArrayList(Node),
     cat_ids: std.ArrayList(data.BinIdx),
@@ -219,6 +267,10 @@ pub const Builder = struct {
         const batch_jobs = try gpa.alloc(BatchJob, batch_max_nodes);
         errdefer gpa.free(batch_jobs);
         const batch_feats = try gpa.alloc(u32, 2 * batch_max_nodes * @as(usize, ds.n_features));
+        errdefer gpa.free(batch_feats);
+        const row_counts = try gpa.alloc(u32, ds.n_rows);
+        errdefer gpa.free(row_counts);
+        const sample_at = try gpa.alloc(usize, pool.workerCount() * 4);
 
         return .{
             .gpa = gpa,
@@ -236,6 +288,8 @@ pub const Builder = struct {
             .part_left = part_left,
             .part_right = part_right,
             .n_active = 0,
+            .row_counts = row_counts,
+            .sample_at = sample_at,
             .nodes = .empty,
             .cat_ids = .empty,
             .lin = .empty,
@@ -275,6 +329,8 @@ pub const Builder = struct {
         gpa.free(b.batch_mid);
         gpa.free(b.batch_jobs);
         gpa.free(b.batch_feats);
+        gpa.free(b.row_counts);
+        gpa.free(b.sample_at);
         b.nodes.deinit(gpa);
         b.cat_ids.deinit(gpa);
         b.lin.deinit(gpa);
@@ -449,8 +505,10 @@ pub const Builder = struct {
         if (b.cfg.bootstrap) {
             // With replacement: duplicates are the point; a row drawn twice carries twice the
             // weight.
-            for (b.rows[0..k]) |*slot_row| slot_row.* = r.uintLessThan(u32, @intCast(n_all));
-            b.n_active = k;
+            // Counted as drawn; `emitSample` writes them out in ascending order.
+            b.clearCounts();
+            for (0..k) |_| b.row_counts[r.uintLessThan(u32, @intCast(n_all))] += 1;
+            b.emitSample(k);
             return;
         }
 
@@ -461,8 +519,46 @@ pub const Builder = struct {
                 const j = i + r.uintLessThan(usize, n_all - i);
                 std.mem.swap(u32, &b.rows[i], &b.rows[j]);
             }
+            b.clearCounts();
+            for (b.rows[0..k]) |row| b.row_counts[row] += 1;
+            b.emitSample(k);
+            return;
         }
         b.n_active = k;
+    }
+
+    /// A sampled tree's rows go in ascending order, duplicates adjacent: the histogram kernel walks
+    /// rows in order through the row-major matrix and the gradients, and the stable partition keeps
+    /// the root's order all the way down. In draw order every row was a cache miss: one histogram
+    /// over the root's 535k bootstrap rows took 6.14 ms against 2.83 ms for the same rows sorted.
+    /// Same rows, same multiplicities, same RNG draws (so every later sample is unchanged); only
+    /// the order of additions inside a histogram moves. Rows are counted as drawn, then written out
+    /// by row id on the pool: chunk totals, a prefix, and each chunk fills its own range, so the
+    /// order is the same at any thread count.
+    fn clearCounts(b: *Builder) void {
+        var ctx = SampleCtx{ .b = b, .chunk = b.sampleChunk() };
+        b.pool.parallelFor(b.row_counts.len, &ctx, SampleCtx.clear, ctx.chunk);
+    }
+
+    fn emitSample(b: *Builder, k: usize) void {
+        var ctx = SampleCtx{ .b = b, .chunk = b.sampleChunk() };
+        const n = b.row_counts.len;
+        b.pool.parallelFor(n, &ctx, SampleCtx.total, ctx.chunk);
+        var at: usize = 0;
+        for (b.sample_at[0 .. (n + ctx.chunk - 1) / ctx.chunk]) |*t| {
+            const c = t.*;
+            t.* = at;
+            at += c;
+        }
+        std.debug.assert(at == k);
+        b.pool.parallelFor(n, &ctx, SampleCtx.emit, ctx.chunk);
+        b.n_active = k;
+    }
+
+    /// No more chunks than `sample_at` holds, so the size asked for is the one the pool uses.
+    fn sampleChunk(b: *const Builder) usize {
+        const n = b.row_counts.len;
+        return @max((n + b.sample_at.len - 1) / b.sample_at.len, 16384);
     }
 
     /// Grow one tree against `gradients` (indexed by original row id); `leafSpans()` gives leaf row
