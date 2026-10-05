@@ -232,6 +232,12 @@ const GradCtx = struct {
     }
 };
 
+/// Adds each leaf's weight to its rows, split over positions in `rows`, not over leaves: one task
+/// per leaf left the barrier waiting on the biggest leaf, and leaves' rows interleave in row-id
+/// space, so workers on different leaves wrote the same cache lines of `raw`. The spans are
+/// sorted by start and tile `rows[0..n]`, so a chunk finds its first span and walks on. Boosting
+/// rows are distinct (bootstrap is rejected for it), so chunks never share a row, and every row
+/// still gets its one add: bit-identical.
 const ApplyCtx = struct {
     spans: []const tree.LeafSpan,
     rows: []const u32,
@@ -240,10 +246,26 @@ const ApplyCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ApplyCtx = @ptrCast(@alignCast(ctx));
-        // Leaf spans are disjoint, so workers never share a row: no synchronisation.
-        for (self.spans[begin..end]) |s| {
-            for (self.rows[s.start..s.end]) |r| self.raw[r] += s.weight;
+        const spans = self.spans;
+        // The span holding `begin`: the last one starting at or before it.
+        var lo: usize = 0;
+        var hi: usize = spans.len;
+        while (hi - lo > 1) {
+            const m = lo + (hi - lo) / 2;
+            if (spans[m].start <= begin) lo = m else hi = m;
         }
+        var si = lo;
+        var i = begin;
+        while (i < end) : (si += 1) {
+            const s = spans[si];
+            const stop = @min(s.end, end);
+            for (self.rows[i..stop]) |r| self.raw[r] += s.weight;
+            i = @max(i, stop);
+        }
+    }
+
+    fn byStart(_: void, a: tree.LeafSpan, b: tree.LeafSpan) bool {
+        return a.start < b.start;
     }
 };
 
@@ -384,6 +406,9 @@ pub fn train(
     defer if (goss_rows.len != 0) gpa.free(goss_rows);
     defer if (goss_chunks.len != 0) gpa.free(goss_chunks);
     var goss_rng: std.Random.DefaultPrng = .init(cfg.tree.seed +% 0x9E3779B97F4A7C15);
+    // The finished tree's leaf spans, sorted by position for `ApplyCtx`.
+    const span_buf = try gpa.alloc(tree.LeafSpan, cfg.tree.leafBudget());
+    defer gpa.free(span_buf);
 
     var builder = try tree.Builder.init(gpa, pool, ds, cfg.tree);
     defer builder.deinit();
@@ -421,12 +446,15 @@ pub fn train(
         const t_ap = prof.start();
         // Span fast path needs constant leaves; a linear leaf has no single constant.
         if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
+            const spans = span_buf[0..builder.leafSpans().len];
+            @memcpy(spans, builder.leafSpans());
+            std.sort.pdq(tree.LeafSpan, spans, {}, ApplyCtx.byStart);
             var actx = ApplyCtx{
-                .spans = builder.leafSpans(),
+                .spans = spans,
                 .rows = builder.rows,
                 .raw = raw,
             };
-            pool.parallelFor(builder.leafSpans().len, &actx, ApplyCtx.run, 1);
+            pool.parallelFor(builder.activeRows().len, &actx, ApplyCtx.run, 8192);
         } else {
             var actx = ApplyAllCtx{
                 .t = &model.trees.items[model.trees.items.len - 1],
