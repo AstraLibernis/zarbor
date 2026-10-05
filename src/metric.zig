@@ -4,12 +4,13 @@
 //! Evaluation metrics.
 
 const std = @import("std");
+const radix = @import("radix.zig");
 
 /// ROC AUC by rank identity: `(sum of positive ranks - n_pos(n_pos+1)/2) / (n_pos * n_neg)`.
 /// Ties share their average rank: rows sharing a leaf get equal scores, and
 /// arbitrary tie order would bias the result.
 ///
-/// Sorted by LSD radix on `sortKey(score) << 32 | label`, not a comparison sort through an index:
+/// Sorted by LSD radix (`radix.zig`) on `f32Key(score) << 32 | label`, not a comparison sort through an index:
 /// 9x faster on 133k rows (10.3 -> 1.2 ms), and it runs every `verbose_eval` round, every round
 /// under early stopping. The value is unchanged to the bit: a tied block is still every row of
 /// one score, and the rank sum adds half-integers far below 2^53, exact in any order.
@@ -21,31 +22,8 @@ pub fn auc(gpa: std.mem.Allocator, scores: []const f32, labels: []const f32) !f6
 
     const buf = try gpa.alloc(u64, 2 * n);
     defer gpa.free(buf);
-    var src = buf[0..n];
-    var dst = buf[n..];
-    for (src, scores, labels) |*v, s, y| v.* = @as(u64, sortKey(s)) << 32 | @intFromBool(y > 0.5);
-
-    var shift: u6 = 32;
-    while (true) : (shift += 8) {
-        var count = [_]usize{0} ** 256;
-        for (src) |v| count[@as(u8, @truncate(v >> shift))] += 1;
-        // A byte every key shares cannot reorder anything.
-        if (count[@as(u8, @truncate(src[0] >> shift))] != n) {
-            var at: usize = 0;
-            for (&count) |*c| {
-                const k = c.*;
-                c.* = at;
-                at += k;
-            }
-            for (src) |v| {
-                const b: u8 = @truncate(v >> shift);
-                dst[count[b]] = v;
-                count[b] += 1;
-            }
-            std.mem.swap([]u64, &src, &dst);
-        }
-        if (shift == 56) break;
-    }
+    for (buf[0..n], scores, labels) |*v, x, y| v.* = @as(u64, radix.f32Key(x)) << 32 | @intFromBool(y > 0.5);
+    const src = radix.sortHigh32(buf[0..n], buf[n..]);
 
     var pos: f64 = 0;
     var neg: f64 = 0;
@@ -68,13 +46,6 @@ pub fn auc(gpa: std.mem.Allocator, scores: []const f32, labels: []const f32) !f6
 
     if (pos == 0 or neg == 0) return 0.5;
     return (rank_sum - pos * (pos + 1) / 2.0) / (pos * neg);
-}
-
-/// An f32 as a u32 whose unsigned order is the float order. -0 and +0 share a key, as they compare
-/// equal under `==`, so they still fall into one tied block.
-fn sortKey(s: f32) u32 {
-    const bits: u32 = @bitCast(if (s == 0) @as(f32, 0) else s);
-    return if (bits >> 31 == 1) ~bits else bits | 0x8000_0000;
 }
 
 /// Mean binary cross-entropy from raw log-odds.

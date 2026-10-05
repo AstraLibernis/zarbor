@@ -4,6 +4,7 @@
 //! What is in a loaded CSV: per-column statistics and the report `zarbor profile` prints.
 
 const std = @import("std");
+const radix = @import("radix.zig");
 const csv = @import("csv.zig");
 const ColumnKind = csv.ColumnKind;
 const Frame = csv.Frame;
@@ -68,6 +69,12 @@ pub fn profile(gpa: std.mem.Allocator, f: *const Frame) ![]ColumnStat {
     const stats = try gpa.alloc(ColumnStat, f.names.len);
     errdefer gpa.free(stats);
 
+    // Sorted by radix on (key << 32 | bits), not std.mem.sort on f64: the stable block sort was
+    // 171 ms of a 221 ms load on 668k rows x 8 numeric columns. The order is the same element for
+    // element: f32 -> f64 is exact and order-preserving, the key orders as `<` does (-0 and +0
+    // equal), and LSD radix is stable as the block sort was, so even signed zeros keep their places.
+    const keys = try gpa.alloc(u64, 2 * f.n_rows);
+    defer gpa.free(keys);
     const buf = try gpa.alloc(f64, f.n_rows);
     defer gpa.free(buf);
 
@@ -76,7 +83,7 @@ pub fn profile(gpa: std.mem.Allocator, f: *const Frame) ![]ColumnStat {
         var sum: f64 = 0;
         for (vals) |v| {
             if (std.math.isNan(v)) continue;
-            buf[n] = v;
+            keys[n] = @as(u64, radix.f32Key(v)) << 32 | @as(u32, @bitCast(v));
             n += 1;
             sum += v;
         }
@@ -93,8 +100,9 @@ pub fn profile(gpa: std.mem.Allocator, f: *const Frame) ![]ColumnStat {
         }
         if (n == 0) continue;
 
+        const sorted = radix.sortHigh32(keys[0..n], keys[f.n_rows..][0..n]);
         const v = buf[0..n];
-        std.mem.sort(f64, v, {}, std.sort.asc(f64));
+        for (v, sorted) |*x, k| x.* = @as(f32, @bitCast(@as(u32, @truncate(k))));
         var distinct: usize = 1;
         for (1..n) |i| {
             if (v[i] != v[i - 1]) distinct += 1;

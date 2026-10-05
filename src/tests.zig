@@ -14,6 +14,7 @@ test {
     _ = @import("test/metric_test.zig");
     _ = @import("test/model_test.zig");
     _ = @import("test/pool_test.zig");
+    _ = @import("test/radix_test.zig");
     _ = @import("test/sweep_test.zig");
     _ = @import("test/tune_test.zig");
 
@@ -43,6 +44,7 @@ test {
     std.testing.refAllDecls(@import("partition.zig"));
     std.testing.refAllDecls(@import("pool.zig"));
     std.testing.refAllDecls(@import("prof.zig"));
+    std.testing.refAllDecls(@import("radix.zig"));
     std.testing.refAllDecls(@import("root.zig"));
     std.testing.refAllDecls(@import("schema.zig"));
     std.testing.refAllDecls(@import("tree.zig"));
