@@ -365,8 +365,10 @@ pub fn train(
     var goss_others: []u32 = &.{};
     var goss_mask: []u64 = &.{};
     var goss_rows: []u32 = &.{};
+    var goss_chunks: []usize = &.{};
     if (cfg.sampling == .goss) {
         goss_counts = try gpa.alloc(u32, n_radix);
+        goss_chunks = try gpa.alloc(usize, goss.scratchLen(pool));
         goss_others = try gpa.alloc(u32, ds.n_rows);
         goss_mask = try gpa.alloc(u64, (ds.n_rows + 63) / 64);
         goss_rows = try gpa.alloc(u32, ds.n_rows);
@@ -375,6 +377,7 @@ pub fn train(
     defer if (goss_others.len != 0) gpa.free(goss_others);
     defer if (goss_mask.len != 0) gpa.free(goss_mask);
     defer if (goss_rows.len != 0) gpa.free(goss_rows);
+    defer if (goss_chunks.len != 0) gpa.free(goss_chunks);
     var goss_rng: std.Random.DefaultPrng = .init(cfg.tree.seed +% 0x9E3779B97F4A7C15);
 
     var builder = try tree.Builder.init(gpa, pool, ds, cfg.tree);
@@ -402,7 +405,7 @@ pub fn train(
         const subset: ?[]const u32 = if (cfg.sampling == .goss) blk: {
             const t_gs = prof.start();
             defer prof.stop(.goss_select, t_gs);
-            break :blk gossSelect(grads, goss_counts, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
+            break :blk gossSelect(pool, grads, goss_counts, goss_chunks, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
         } else null;
 
         var t = try builder.growRows(grads, subset);
