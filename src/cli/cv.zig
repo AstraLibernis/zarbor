@@ -130,7 +130,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
-    defer frame.deinit();
+    var frame_live = true;
+    defer if (frame_live) frame.deinit();
 
     if (!quiet) {
         const stats = try csv_profile.profile(gpa, &frame);
@@ -161,6 +162,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer full.deinit();
     try enc.validate(full.labels, cfg.objective());
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
+
+    // Past binning the frame is read for one column, the groups, once per repeat: keep a copy of
+    // that and free the rest (~40 MB on 668k x 15) before the folds run.
+    const groups: ?[]f32 = if (group_idx) |gi| try gpa.dupe(f32, frame.values[gi]) else null;
+    defer if (groups) |g| gpa.free(g);
+    frame.deinit();
+    frame_live = false;
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     if (!quiet) {
@@ -208,8 +216,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     for (0..repeats) |rep| {
         const seed = fold_seed + rep;
-        const fold_of = if (group_idx) |gi|
-            try assignGroupFolds(gpa, frame.values[gi], n_folds, seed)
+        const fold_of = if (groups) |g|
+            try assignGroupFolds(gpa, g, n_folds, seed)
         else
             try assignFolds(gpa, full.labels, n_folds, seed, cfg.objective() == .logistic);
         var keep_this = false;

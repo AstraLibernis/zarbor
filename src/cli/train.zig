@@ -104,7 +104,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
-    defer frame.deinit();
+    var frame_live = true;
+    defer if (frame_live) frame.deinit();
     const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     {
@@ -144,7 +145,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try explainLabel(out, err, target);
         return err;
     };
-    defer full.deinit();
+    var full_live = true;
+    defer if (full_live) full.deinit();
     enc.validate(full.labels, cfg.objective()) catch |err| {
         try explainLabel(out, err, target);
         return err;
@@ -228,6 +230,16 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     if (n_valid != 0) valid_ds = try data.subset(gpa, &full, perm[n_train..]);
     defer if (valid_ds) |*v| v.deinit();
 
+    // The split owns copies of everything it needs, and a save needs only the schema, so the
+    // CSV frame and the full matrix are dead from here: freed now, not at exit, they were ~66 MB
+    // of the fit's peak on 668k rows.
+    var schema: ?data.Schema = if (save_path != null) try data.Schema.fromDataset(gpa, &full) else null;
+    defer if (schema) |*sch| sch.deinit();
+    full.deinit();
+    full_live = false;
+    frame.deinit();
+    frame_live = false;
+
     try out.print("train   {d} rows / valid {d} rows\n\n", .{ n_train, n_valid });
     try out.flush();
 
@@ -240,7 +252,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     try printTiming(out, io, t_train0, res.model.stepName(), res.steps, res.valid_ns);
     if (res.lin_fit) |fit| try reportLinearFit(out, cfg.linear, &res.model.linear, fit);
     if (save_path) |sp| {
-        try res.model.save(gpa, io, sp, try data.Schema.fromDataset(gpa, &full), target, &enc);
+        const sch = schema.?;
+        schema = null; // `save` owns it now
+        try res.model.save(gpa, io, sp, sch, target, &enc);
         try out.print("saved   {s}\n", .{sp});
     }
     if (valid_ds) |*v| {
