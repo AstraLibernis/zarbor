@@ -158,7 +158,7 @@ const cat_scratch_small = 256;
 
 /// The 1 MB scratch, in its own frame so only a categorical search over a wide column pays for it.
 noinline fn bestCatSplitWide(best: *Split, fid: u32, h: []const Bin, nb: u16, total: Bin, p: SplitParams) void {
-    var scratch: [data.max_bins]CatKey = undefined;
+    var scratch: [data.max_bins]CatKey = undefined; // zsnag:ok — R015: wide columns only
     bestCatSplit(best, fid, h, nb, total, p, &scratch);
 }
 
