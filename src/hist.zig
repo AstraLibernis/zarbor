@@ -174,23 +174,56 @@ const BuildCtx = struct {
             @memset(mine, .{});
             st.* = self.seq;
         }
-        const nf = self.ds.n_features;
-        const rm = self.ds.bins_rm;
-        const offs = bank.offsets;
-
-        var i = begin;
-        while (i < end) : (i += 1) {
-            const row: usize = self.rows[i];
-            const rb = rm[row * nf ..][0..nf];
-            const g = self.grads[row];
-            const v = Bin.Vec{ g.g, g.h, 1, 0 };
-            for (self.features) |fid| {
-                const cell: *Bin.Vec = @ptrCast(&mine[offs[fid] + rb[fid]]);
-                cell.* += v;
-            }
-        }
+        accumulate(self.ds, bank.offsets, self.rows[begin..end], self.grads, self.features, mine);
     }
 };
+
+/// The accumulate kernel, shared by the pool path and `buildInto` so both add in the same order.
+fn accumulate(
+    ds: *const Dataset,
+    offs: []const u32,
+    rows: []const u32,
+    grads: []const GradPair,
+    features: []const u32,
+    dst: []Bin,
+) void {
+    const nf = ds.n_features;
+    const rm = ds.bins_rm;
+    for (rows) |r| {
+        const row: usize = r;
+        const rb = rm[row * nf ..][0..nf];
+        const g = grads[row];
+        const v = Bin.Vec{ g.g, g.h, 1, 0 };
+        for (features) |fid| {
+            const cell: *Bin.Vec = @ptrCast(&dst[offs[fid] + rb[fid]]);
+            cell.* += v;
+        }
+    }
+}
+
+/// `build` for a node at or under `parallel_threshold` rows, written straight into `out` and
+/// touching no shared state (no private slot, no stamp, no pool), so several nodes can be built at
+/// once from pool tasks. Bit-identical to `build` on such a node: that clears worker 0's private
+/// slot, runs the same kernel over the same rows in the same order, and copies the slot to `out`.
+pub fn buildInto(
+    bank: *const Bank,
+    ds: *const Dataset,
+    rows: []const u32,
+    grads: []const GradPair,
+    features: []const u32,
+    out: []Bin,
+) void {
+    std.debug.assert(rows.len <= parallel_threshold);
+    const span = bank.slotLen();
+    @memset(out[0..span], .{});
+    accumulate(ds, bank.offsets, rows, grads, features, out[0..span]);
+}
+
+/// `subtract` on the calling thread, for pool tasks. Element-wise, so identical at any grouping.
+pub fn subtractInto(bank: *const Bank, out: []Bin, parent: []const Bin, sibling: []const Bin) void {
+    const span = bank.slotLen();
+    for (out[0..span], parent[0..span], sibling[0..span]) |*o, pa, si| o.* = pa.sub(si);
+}
 
 /// Reduces private histograms into `out` over the whole slot. All features, not just selected ones:
 /// a flat branch-free pass over ~16 KB beats the index arithmetic of skipping. Unselected features

@@ -63,6 +63,21 @@ pub fn partition(b: *Builder, start: usize, end: usize, sp: split.Split) usize {
     return partitionOn(b, u8, b.ds.columnNarrow(sp.feature), start, end, sp);
 }
 
+/// `partition` on the calling thread, for a node small enough that `partition` would run it serially
+/// anyway (`parallel_partition_min`); safe from pool tasks on disjoint row ranges, which is how the
+/// builder expands a batch of small nodes at once.
+pub fn partitionSmall(b: *Builder, start: usize, end: usize, sp: split.Split) usize {
+    std.debug.assert(end - start < parallel_partition_min);
+    const t = split.SplitTest.of(&sp);
+    if (b.ds.isWide(sp.feature)) return serialFor(b, data.BinIdx, b.ds.columnWide(sp.feature), start, end, t);
+    return serialFor(b, u8, b.ds.columnNarrow(sp.feature), start, end, t);
+}
+
+fn serialFor(b: *Builder, comptime C: type, col: []const C, start: usize, end: usize, t: split.SplitTest) usize {
+    if (t.is_cat) return partitionSerial(b, C, CatTest, col, start, end, .{ .t = t });
+    return partitionSerial(b, C, NumTest, col, start, end, NumTest.of(t));
+}
+
 /// Picks the test once per partition, so the row loops are specialised at compile time.
 fn partitionOn(b: *Builder, comptime C: type, col: []const C, start: usize, end: usize, sp: split.Split) usize {
     const t = split.SplitTest.of(&sp);

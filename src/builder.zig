@@ -35,6 +35,76 @@ pub const Work = struct {
     n_path: u8 = 0,
 };
 
+/// `expandBatch` takes runs of pending nodes up to this many rows. At most `2 * parallel_threshold`,
+/// so the smaller child is built serially either way and the batch's trees stay bit-identical.
+const batch_max_rows: usize = 2 * hist.parallel_threshold;
+const batch_max_nodes: usize = 256;
+/// Fewer nodes than this are not worth two barriers.
+const batch_min_nodes: usize = 4;
+
+/// One split node of a batch: what `expandBatch`'s parallel step needs, fixed in its serial step.
+const BatchJob = struct {
+    parent_slot: u32,
+    slot_l: u32,
+    slot_r: u32,
+    start: usize,
+    mid: usize,
+    end: usize,
+    /// False when both children can only be leaves: no histogram, no search.
+    search: bool,
+    total_l: hist.Bin,
+    total_r: hist.Bin,
+    feats_l: []const u32,
+    feats_r: []const u32,
+    /// The left child's index in `queue.items`; the right child is next.
+    queue_left: usize,
+};
+
+const BatchPartCtx = struct {
+    b: *Builder,
+    work: []const Work,
+    mids: []usize,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *BatchPartCtx = @ptrCast(@alignCast(ctx));
+        for (self.work[begin..end], self.mids[begin..end]) |w, *mid| {
+            mid.* = if (self.b.willSplit(w)) partitionSmall(self.b, w.start, w.end, w.split) else w.start;
+        }
+    }
+};
+
+const BatchBuildCtx = struct {
+    b: *Builder,
+    jobs: []const BatchJob,
+    p: split.SplitParams,
+    tree_feats: []const u32,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *BatchBuildCtx = @ptrCast(@alignCast(ctx));
+        const b = self.b;
+        for (self.jobs[begin..end]) |j| {
+            if (!j.search) continue;
+            const sl = b.slot(j.slot_l);
+            const sr = b.slot(j.slot_r);
+            // Accumulate the smaller side; derive the larger by subtraction.
+            if (j.mid - j.start <= j.end - j.mid) {
+                hist.buildInto(&b.bank, b.ds, b.rows[j.start..j.mid], b.g, self.tree_feats, sl);
+                hist.subtractInto(&b.bank, sr, b.slot(j.parent_slot), sl);
+            } else {
+                hist.buildInto(&b.bank, b.ds, b.rows[j.mid..j.end], b.g, self.tree_feats, sr);
+                hist.subtractInto(&b.bank, sl, b.slot(j.parent_slot), sr);
+            }
+            const q = b.queue.items[j.queue_left..][0..2];
+            q[0].split = split.bestSplit(&b.bank, sl, b.ds, j.feats_l, j.total_l, self.p);
+            q[1].split = split.bestSplit(&b.bank, sr, b.ds, j.feats_r, j.total_r, self.p);
+        }
+    }
+};
+
+const partitionSmall = @import("partition.zig").partitionSmall;
+
 /// Hard ceiling on histogram slot memory; beyond it the caller must shrink the tree, not the
 /// allocator decide.
 const slot_memory_budget: usize = 2 << 30;
@@ -88,6 +158,13 @@ pub const Builder = struct {
 
     rng: std.Random.DefaultPrng,
 
+    /// Scratch for `expandBatch`: the batch's `Work`, each node's partition point, the split nodes'
+    /// jobs, and two feature samples per job (`featuresFor` returns one shared buffer).
+    batch_work: []Work,
+    batch_mid: []usize,
+    batch_jobs: []BatchJob,
+    batch_feats: []u32,
+
     pub fn init(
         gpa: std.mem.Allocator,
         pool: *Pool,
@@ -134,6 +211,14 @@ pub const Builder = struct {
         const level_features = try gpa.alloc(u32, ds.n_features);
         errdefer gpa.free(level_features);
         const node_features = try gpa.alloc(u32, ds.n_features);
+        errdefer gpa.free(node_features);
+        const batch_work = try gpa.alloc(Work, batch_max_nodes);
+        errdefer gpa.free(batch_work);
+        const batch_mid = try gpa.alloc(usize, batch_max_nodes);
+        errdefer gpa.free(batch_mid);
+        const batch_jobs = try gpa.alloc(BatchJob, batch_max_nodes);
+        errdefer gpa.free(batch_jobs);
+        const batch_feats = try gpa.alloc(u32, 2 * batch_max_nodes * @as(usize, ds.n_features));
 
         return .{
             .gpa = gpa,
@@ -164,6 +249,10 @@ pub const Builder = struct {
             .n_level_features = 0,
             .level_depth = -1,
             .rng = .init(cfg.seed),
+            .batch_work = batch_work,
+            .batch_mid = batch_mid,
+            .batch_jobs = batch_jobs,
+            .batch_feats = batch_feats,
         };
     }
 
@@ -182,6 +271,10 @@ pub const Builder = struct {
         gpa.free(b.tree_features);
         gpa.free(b.level_features);
         gpa.free(b.node_features);
+        gpa.free(b.batch_work);
+        gpa.free(b.batch_mid);
+        gpa.free(b.batch_jobs);
+        gpa.free(b.batch_feats);
         b.nodes.deinit(gpa);
         b.cat_ids.deinit(gpa);
         b.lin.deinit(gpa);
@@ -441,11 +534,16 @@ pub const Builder = struct {
 
         // --- expansion ---
         while (b.pending() != 0) {
+            const k = b.batchSize(leaf_cap);
+            if (k >= batch_min_nodes) {
+                try b.expandBatch(k, p, leaf_cap, tree_feats);
+                continue;
+            }
+
             const w = b.popNext();
 
             const leaf_count = b.leaves.items.len + b.pending() + 1;
-            const depth_capped = b.cfg.max_depth != 0 and w.depth >= b.cfg.max_depth;
-            if (!w.split.valid() or depth_capped or leaf_count >= leaf_cap) {
+            if (!b.willSplit(w) or leaf_count >= leaf_cap) {
                 try b.makeLeaf(w);
                 continue;
             }
@@ -460,36 +558,10 @@ pub const Builder = struct {
                 continue;
             }
 
-            const li: u32 = @intCast(b.nodes.items.len);
-            try b.nodes.append(b.gpa, .{});
-            const ri: u32 = @intCast(b.nodes.items.len);
-            try b.nodes.append(b.gpa, .{});
-            var cat_ofs: u32 = 0;
-            if (w.split.is_cat) {
-                cat_ofs = @intCast(b.cat_ids.items.len);
-                try b.cat_ids.appendSlice(b.gpa, w.split.cat_ids[0..w.split.n_cat]);
-            }
-            b.nodes.items[w.node] = .{
-                .feature = w.split.feature,
-                .threshold = w.split.threshold,
-                .missing_left = w.split.missing_left,
-                .is_cat = w.split.is_cat,
-                .n_cat = w.split.n_cat,
-                .cat_ofs = cat_ofs,
-                .is_leaf = false,
-                .left = li,
-                .right = ri,
-            };
-
-            // Will these children only ever be leaves? `makeLeaf` reads a node's total, row span
-            // and slot, never its histogram or split, so building and searching those is waste:
-            // half a depthwise tree's nodes are its last level. Both caps are decidable here: depth
-            // is static, and `leaf_count` at pop time never decreases (a pop makes a leaf: queue
-            // -1, leaves +1; or splits: queue -1 +2), so once the budget is hit every remaining pop
-            // is a leaf. `b.queue` is post-removal here; the next pop sees `leaves + queue + 2`.
-            const at_depth_cap = b.cfg.max_depth != 0 and w.depth + 1 >= b.cfg.max_depth;
-            const at_leaf_cap = b.leaves.items.len + b.pending() + 2 >= leaf_cap;
-            const children_are_leaves = at_depth_cap or at_leaf_cap;
+            const kids = try b.splitNode(w);
+            const li = kids[0];
+            const ri = kids[1];
+            const children_are_leaves = b.childrenAreLeaves(w, leaf_cap);
 
             const slot_l = b.takeSlot();
             const slot_r = b.takeSlot();
@@ -534,44 +606,7 @@ pub const Builder = struct {
                 right_split = split.bestSplit(&b.bank, b.slot(slot_r), b.ds, right_search, w.split.right, p);
             prof.stop(.best_split, t_bs);
 
-            // Children inherit the path plus the feature just tested, unless categorical (a
-            // dictionary id is no number to fit a slope in) or already present.
-            var path = w.path;
-            var n_path = w.n_path;
-            if (b.cfg.linear_leaves and
-                b.ds.kinds[w.split.feature] == .numeric and
-                n_path < max_path)
-            {
-                var seen = false;
-                for (path[0..n_path]) |f| seen = seen or f == w.split.feature;
-                if (!seen) {
-                    path[n_path] = w.split.feature;
-                    n_path += 1;
-                }
-            }
-
-            try b.queue.append(b.gpa, .{
-                .node = li,
-                .start = w.start,
-                .end = mid,
-                .depth = w.depth + 1,
-                .total = w.split.left,
-                .slot = slot_l,
-                .split = left_split,
-                .path = path,
-                .n_path = n_path,
-            });
-            try b.queue.append(b.gpa, .{
-                .node = ri,
-                .start = mid,
-                .end = w.end,
-                .depth = w.depth + 1,
-                .total = w.split.right,
-                .slot = slot_r,
-                .split = right_split,
-                .path = path,
-                .n_path = n_path,
-            });
+            try b.pushChildren(w, li, ri, mid, slot_l, slot_r, left_split, right_split);
         }
 
         const nodes = try b.gpa.dupe(Node, b.nodes.items);
@@ -586,6 +621,189 @@ pub const Builder = struct {
         else
             try b.gpa.dupe(LinTerm, b.lin.items);
         return .{ .nodes = nodes, .cat_ids = ids, .lin = lin };
+    }
+
+    /// Whether a popped node splits, leaf budget aside (the caller checks that against its count).
+    fn willSplit(b: *const Builder, w: Work) bool {
+        const depth_capped = b.cfg.max_depth != 0 and w.depth >= b.cfg.max_depth;
+        return w.split.valid() and !depth_capped;
+    }
+
+    /// Turn `w`'s node into a split: append its two children (ids returned) and its category ids.
+    fn splitNode(b: *Builder, w: Work) ![2]u32 {
+        const li: u32 = @intCast(b.nodes.items.len);
+        try b.nodes.append(b.gpa, .{});
+        const ri: u32 = @intCast(b.nodes.items.len);
+        try b.nodes.append(b.gpa, .{});
+        var cat_ofs: u32 = 0;
+        if (w.split.is_cat) {
+            cat_ofs = @intCast(b.cat_ids.items.len);
+            try b.cat_ids.appendSlice(b.gpa, w.split.cat_ids[0..w.split.n_cat]);
+        }
+        b.nodes.items[w.node] = .{
+            .feature = w.split.feature,
+            .threshold = w.split.threshold,
+            .missing_left = w.split.missing_left,
+            .is_cat = w.split.is_cat,
+            .n_cat = w.split.n_cat,
+            .cat_ofs = cat_ofs,
+            .is_leaf = false,
+            .left = li,
+            .right = ri,
+        };
+        return .{ li, ri };
+    }
+
+    /// Will these children only ever be leaves? `makeLeaf` reads a node's total, row span and slot,
+    /// never its histogram or split, so building and searching those is waste: half a depthwise
+    /// tree's nodes are its last level. Both caps are decidable here: depth is static, and
+    /// `leaf_count` at pop time never decreases (a pop makes a leaf: queue -1, leaves +1; or
+    /// splits: queue -1 +2), so once the budget is hit every remaining pop is a leaf. Called after
+    /// the pop, before the children are queued: the next pop sees `leaves + queue + 2`.
+    fn childrenAreLeaves(b: *const Builder, w: Work, leaf_cap: usize) bool {
+        const at_depth_cap = b.cfg.max_depth != 0 and w.depth + 1 >= b.cfg.max_depth;
+        const at_leaf_cap = b.leaves.items.len + b.pending() + 2 >= leaf_cap;
+        return at_depth_cap or at_leaf_cap;
+    }
+
+    /// Queue `w`'s children. They inherit the path plus the feature just tested, unless categorical
+    /// (a dictionary id is no number to fit a slope in) or already present.
+    fn pushChildren(
+        b: *Builder,
+        w: Work,
+        li: u32,
+        ri: u32,
+        mid: usize,
+        slot_l: u32,
+        slot_r: u32,
+        left_split: split.Split,
+        right_split: split.Split,
+    ) !void {
+        var path = w.path;
+        var n_path = w.n_path;
+        if (b.cfg.linear_leaves and
+            b.ds.kinds[w.split.feature] == .numeric and
+            n_path < max_path)
+        {
+            var seen = false;
+            for (path[0..n_path]) |f| seen = seen or f == w.split.feature;
+            if (!seen) {
+                path[n_path] = w.split.feature;
+                n_path += 1;
+            }
+        }
+        try b.queue.append(b.gpa, .{
+            .node = li,
+            .start = w.start,
+            .end = mid,
+            .depth = w.depth + 1,
+            .total = w.split.left,
+            .slot = slot_l,
+            .split = left_split,
+            .path = path,
+            .n_path = n_path,
+        });
+        try b.queue.append(b.gpa, .{
+            .node = ri,
+            .start = mid,
+            .end = w.end,
+            .depth = w.depth + 1,
+            .total = w.split.right,
+            .slot = slot_r,
+            .split = right_split,
+            .path = path,
+            .n_path = n_path,
+        });
+    }
+
+    /// How many pending nodes, from the head, `expandBatch` may take: a depthwise run of nodes of
+    /// at most `batch_max_rows`, few enough that the leaf budget cannot bind inside the batch and
+    /// that two fresh slots per node are free. 0 = expand one at a time.
+    fn batchSize(b: *const Builder, leaf_cap: usize) usize {
+        if (b.cfg.grow_policy != .depthwise or b.pool.workerCount() == 1) return 0;
+        // The k-th pop of a batch sees `leaf_count` = leaves + pending at batch start + splits so
+        // far <= that + k - 1, so `k <= leaf_cap - (leaves + pending)` keeps every pop under it.
+        const used = b.leaves.items.len + b.pending();
+        if (used >= leaf_cap) return 0;
+        const limit = @min(@min(leaf_cap - used, b.free_slots.items.len / 2), batch_max_nodes);
+        var k: usize = 0;
+        for (b.queue.items[b.queue_head..]) |w| {
+            if (k == limit or w.end - w.start > batch_max_rows) break;
+            k += 1;
+        }
+        return k;
+    }
+
+    /// Expand the next `k` pending nodes together. A forest's lower levels are thousands of nodes of
+    /// a few hundred rows, each too small to spread over the pool, so one at a time 16 threads ran
+    /// a tree 2.9x faster than one (52 -> 17.7 ms). Here the per-node work (partition, histogram,
+    /// subtraction, split search) runs one node per task, while everything order-sensitive -- leaf
+    /// order, node and category ids, slot takes, RNG draws, queue order -- happens on this thread
+    /// in pop order, exactly as the one-at-a-time loop does it. Every node here is small enough
+    /// that the one-at-a-time loop would partition and build it serially too, with the same
+    /// kernels, so the trees are identical. Only histogram slot ids differ: parents' slots go back
+    /// after the batch, not per node, and slot ids reach nothing in the model.
+    fn expandBatch(b: *Builder, k: usize, p: split.SplitParams, leaf_cap: usize, tree_feats: []const u32) !void {
+        const work = b.batch_work[0..k];
+        @memcpy(work, b.queue.items[b.queue_head..][0..k]);
+        const mids = b.batch_mid[0..k];
+
+        // 1. Partition every node that will split; their row ranges are disjoint.
+        const t_part = prof.start();
+        var pctx = BatchPartCtx{ .b = b, .work = work, .mids = mids };
+        b.pool.parallelFor(k, &pctx, BatchPartCtx.run, 1);
+        prof.stop(.partition, t_part);
+
+        // 2. Bookkeeping, in pop order.
+        const nf: usize = b.ds.n_features;
+        var n_jobs: usize = 0;
+        for (work, mids) |queued, mid| {
+            const w = b.popNext();
+            std.debug.assert(w.node == queued.node);
+            std.debug.assert(b.leaves.items.len + b.pending() + 1 < leaf_cap);
+            if (!b.willSplit(w) or mid == w.start or mid == w.end) {
+                try b.makeLeaf(w);
+                continue;
+            }
+            const kids = try b.splitNode(w);
+            const children_are_leaves = b.childrenAreLeaves(w, leaf_cap);
+            const slot_l = b.takeSlot();
+            const slot_r = b.takeSlot();
+            // Drawn even when unused, as the one-at-a-time loop does; copied out because the next
+            // draw reuses the buffer.
+            const feats = b.batch_feats[2 * n_jobs * nf ..][0 .. 2 * nf];
+            const left_search = b.featuresFor(w.depth + 1);
+            @memcpy(feats[0..left_search.len], left_search);
+            const n_left_search = left_search.len;
+            const right_search = b.featuresFor(w.depth + 1);
+            @memcpy(feats[nf..][0..right_search.len], right_search);
+            const q = b.queue.items.len;
+            try b.pushChildren(w, kids[0], kids[1], mid, slot_l, slot_r, .{}, .{});
+            b.batch_jobs[n_jobs] = .{
+                .parent_slot = w.slot,
+                .slot_l = slot_l,
+                .slot_r = slot_r,
+                .start = w.start,
+                .mid = mid,
+                .end = w.end,
+                .search = !children_are_leaves,
+                .total_l = w.split.left,
+                .total_r = w.split.right,
+                .feats_l = feats[0..n_left_search],
+                .feats_r = feats[nf..][0..right_search.len],
+                .queue_left = q,
+            };
+            n_jobs += 1;
+        }
+
+        // 3. Histograms and split searches, one task per split node.
+        const t_build = prof.start();
+        var cctx = BatchBuildCtx{ .b = b, .jobs = b.batch_jobs[0..n_jobs], .p = p, .tree_feats = tree_feats };
+        b.pool.parallelFor(n_jobs, &cctx, BatchBuildCtx.run, 1);
+        prof.stop(.hist_build, t_build);
+
+        // 4. Every parent histogram has been read; hand the slots back.
+        for (b.batch_jobs[0..n_jobs]) |j| b.giveSlot(j.parent_slot);
     }
 
     fn pending(b: *const Builder) usize {
