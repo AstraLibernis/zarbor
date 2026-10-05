@@ -97,17 +97,19 @@ pub const Model = struct {
 
     /// Raw scores (log-odds for logistic) for every row of `ds`.
     pub fn predictRaw(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
-        std.debug.assert(out.len == ds.n_rows);
-        var ctx = PredictCtx{ .m = m, .ds = ds, .out = out };
-        pool.parallelFor(ds.n_rows, &ctx, PredictCtx.run, 2048);
+        m.predictScaled(pool, ds, out, false);
     }
 
-    /// Natural-scale predictions: probabilities for logistic, raw for regression.
+    /// Natural-scale predictions: probabilities for logistic, raw for regression. The sigmoid runs
+    /// in the workers, as `model.zig` does it, not in a serial pass after them.
     pub fn predict(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
-        m.predictRaw(pool, ds, out);
-        if (m.objective == .logistic) {
-            for (out) |*v| v.* = sigmoid(v.*);
-        }
+        m.predictScaled(pool, ds, out, m.objective == .logistic);
+    }
+
+    fn predictScaled(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32, prob: bool) void {
+        std.debug.assert(out.len == ds.n_rows);
+        var ctx = PredictCtx{ .m = m, .ds = ds, .out = out, .prob = prob };
+        pool.parallelFor(ds.n_rows, &ctx, PredictCtx.run, 2048);
     }
 };
 
@@ -115,6 +117,8 @@ const PredictCtx = struct {
     m: *const Model,
     ds: *const Dataset,
     out: []f32,
+    /// Apply the sigmoid: probabilities, not log-odds.
+    prob: bool,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -126,6 +130,9 @@ const PredictCtx = struct {
         for (self.m.trees.items) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
+        if (self.prob) for (out) |*v| {
+            v.* = sigmoid(v.*);
+        };
     }
 };
 
@@ -301,17 +308,13 @@ fn evaluate(
     obj: Objective,
     raw: []const f32,
     labels: []const f32,
-    scratch: []f32,
 ) !f64 {
     return switch (obj) {
         .logistic => blk: {
             // AUC is rank-based: log-odds rank like probabilities, skip the sigmoid.
             break :blk try metric.auc(gpa, raw, labels);
         },
-        .squared_error => blk: {
-            @memcpy(scratch, raw);
-            break :blk metric.rmse(scratch, labels);
-        },
+        .squared_error => metric.rmse(raw, labels),
     };
 }
 
@@ -357,14 +360,11 @@ pub fn train(
     defer gpa.free(grads);
 
     var valid_raw: []f32 = &.{};
-    var valid_scratch: []f32 = &.{};
     if (valid) |v| {
         valid_raw = try gpa.alloc(f32, v.n_rows);
-        valid_scratch = try gpa.alloc(f32, v.n_rows);
         @memset(valid_raw, model.base_score);
     }
     defer if (valid_raw.len != 0) gpa.free(valid_raw);
-    defer if (valid_scratch.len != 0) gpa.free(valid_scratch);
 
     var goss_counts: []u32 = &.{};
     var goss_others: []u32 = &.{};
@@ -455,7 +455,7 @@ pub fn train(
             }
 
             const t_vm = prof.start();
-            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, valid_scratch);
+            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels);
             prof.stop(.valid_metric, t_vm);
             const improved = if (better) score > best_score else score < best_score;
             if (improved) {
