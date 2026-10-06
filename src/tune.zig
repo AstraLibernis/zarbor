@@ -14,7 +14,8 @@
 //!           re-run higher. Assumes cheap score ranks like full score; false
 //!           exactly when a config needs its full budget to show its worth.
 //! All share one evaluator (`cv.crossValidate`) over one binned dataset: no
-//! strategy/data confound, and the CSV is read and binned once per search.
+//! strategy/data confound. The CSV is read once per search, and binned again
+//! only when a trial's binning parameters differ (`Binner`).
 //! The best score on the searched split is optimistic (max of many trials);
 //! re-scoring leaders on unseen fold seeds (CLI `--confirm`) is the one to believe.
 
@@ -199,18 +200,13 @@ pub const Trial = struct {
     text: []const u8,
 };
 
-/// Whether a Config field changes the *binning*, not the fit. Binning happens
-/// before trials, so varying one unnoticed reports a value never used: sixty
-/// trials printed `max_bin=64` but fitted the 256-bin matrix, and the winner
-/// did not reproduce through `cv`.
-pub fn affectsBinning(name: []const u8) bool {
-    return std.mem.eql(u8, name, "max_bin") or
-        std.mem.eql(u8, name, "bin_policy") or
-        std.mem.eql(u8, name, "max_cat_levels");
-}
-
 /// Holds the binned matrix; rebuilds it when a trial's binning differs.
-/// Re-binning costs ~200 ms against seconds of fitting; never doing it is wrong.
+/// Binning happens before trials, so a binning knob varied unnoticed reports a
+/// value never used: sixty trials once printed `max_bin=64` but fitted the
+/// 256-bin matrix, and the winner did not reproduce through `cv`. So the whole
+/// `data.BinParams` is compared, never a hand-kept list of its fields: a list
+/// once missed `min_data_in_bin`, and a knob added later would be missed again.
+/// Re-binning costs far less than fitting; never doing it is wrong.
 pub const Binner = struct {
     gpa: std.mem.Allocator,
     pool: *pool_mod.Pool,
@@ -219,16 +215,12 @@ pub const Binner = struct {
     enc: *data.LabelEncoder,
     drops: []const []const u8,
     ds: data.Dataset,
-    max_bin: u16,
-    /// Tracked like `max_bin`: a matrix cached under another value is wrong.
-    max_cat_levels: u32 = (data.BinParams{}).max_cat_levels,
-    policy: data.BinPolicy,
+    /// The parameters `ds` was binned under; any difference from a trial's re-bins.
+    bin: data.BinParams,
     rebins: usize = 0,
 
     pub fn get(b: *Binner, cfg: config.Config) !*const data.Dataset {
-        if (cfg.bin.max_bin != b.max_bin or cfg.bin.bin_policy != b.policy or
-            cfg.bin.max_cat_levels != b.max_cat_levels)
-        {
+        if (!std.meta.eql(cfg.bin, b.bin)) {
             const next = try data.quantise(
                 b.gpa,
                 b.pool,
@@ -239,9 +231,7 @@ pub const Binner = struct {
             );
             b.ds.deinit();
             b.ds = next;
-            b.max_bin = cfg.bin.max_bin;
-            b.policy = cfg.bin.bin_policy;
-            b.max_cat_levels = cfg.bin.max_cat_levels;
+            b.bin = cfg.bin;
             b.rebins += 1;
         }
         return &b.ds;

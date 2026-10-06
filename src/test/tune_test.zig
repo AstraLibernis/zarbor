@@ -8,7 +8,6 @@ const pool_mod = @import("../pool.zig");
 const cv = @import("../cv.zig");
 const tune = @import("../tune.zig");
 const Binner = tune.Binner;
-const affectsBinning = tune.affectsBinning;
 const defaultSpace = tune.defaultSpace;
 const parseParam = tune.parseParam;
 const Kind = tune.Kind;
@@ -217,17 +216,6 @@ test "TPE does not pile proposals onto a boundary" {
     try testing.expect(on_bound < 30);
 }
 
-test "binning parameters are recognised as such" {
-    // If a new binning knob is added to Config and not listed here, `tune`
-    // will silently report a value it never applied. That failure is invisible
-    // in the output, so the list is asserted rather than assumed.
-    try testing.expect(affectsBinning("max_bin"));
-    try testing.expect(affectsBinning("bin_policy"));
-    try testing.expect(!affectsBinning("max_depth"));
-    try testing.expect(!affectsBinning("lambda"));
-    try testing.expect(!affectsBinning("n_rounds"));
-}
-
 // ----- regression tests
 
 /// Two categorical columns and a numeric target, built directly so the test
@@ -314,8 +302,7 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
         .enc = &numeric_enc,
         .drops = &.{},
         .ds = try data.quantise(gpa, p, &frame, .{ .max_bin = 64 }, null, &.{}),
-        .max_bin = 64,
-        .policy = (data.BinParams{}).bin_policy,
+        .bin = .{ .max_bin = 64 },
     };
     defer b.ds.deinit();
 
@@ -329,11 +316,54 @@ test "Binner: a rebin too narrow for a categorical leaves the cached matrix inta
     );
 
     // The cache must be untouched: same rows, and still the width we loaded.
-    try testing.expectEqual(@as(u16, 64), b.max_bin);
+    try testing.expectEqual(@as(u16, 64), b.bin.max_bin);
     try testing.expectEqual(before, b.ds.n_rows);
 
     // And a later valid request must still rebin normally.
     const ds = try b.get(config.Config.from(.{ .max_bin = 128 }));
     try testing.expectEqual(before, ds.n_rows);
     try testing.expectEqual(@as(usize, 1), b.rebins);
+}
+
+test "Binner: every binning parameter re-bins, including min_data_in_bin" {
+    // The binner used to compare a hand-kept list of fields (`max_bin`,
+    // `bin_policy`, `max_cat_levels`) and missed `min_data_in_bin`: a search
+    // over it under `greedy` printed values it never applied. Each field of
+    // `BinParams` is changed alone here and must cost exactly one re-bin.
+    const gpa = testing.allocator;
+    const p = try pool_mod.Pool.init(gpa, 2);
+    defer p.deinit();
+    var frame = try testFrame(gpa, 10, 300);
+    defer frame.deinit();
+    var numeric_enc = data.LabelEncoder{ .gpa = gpa, .classes = &.{} };
+
+    const base: data.BinParams = .{ .bin_policy = .greedy };
+    var b = Binner{
+        .gpa = gpa,
+        .pool = p,
+        .frame = &frame,
+        .label_col = 1,
+        .enc = &numeric_enc,
+        .drops = &.{},
+        .ds = try data.quantise(gpa, p, &frame, base, null, &.{}),
+        .bin = base,
+    };
+    defer b.ds.deinit();
+
+    // The same parameters: no re-bin.
+    _ = try b.get(config.Config.from(.{ .bin_policy = .greedy }));
+    try testing.expectEqual(@as(usize, 0), b.rebins);
+
+    _ = try b.get(config.Config.from(.{ .bin_policy = .greedy, .min_data_in_bin = 50 }));
+    try testing.expectEqual(@as(usize, 1), b.rebins);
+    try testing.expectEqual(@as(u32, 50), b.bin.min_data_in_bin);
+
+    _ = try b.get(config.Config.from(.{ .bin_policy = .greedy, .min_data_in_bin = 50, .max_bin = 32 }));
+    try testing.expectEqual(@as(usize, 2), b.rebins);
+
+    _ = try b.get(config.Config.from(.{ .min_data_in_bin = 50, .max_bin = 32 }));
+    try testing.expectEqual(@as(usize, 3), b.rebins);
+
+    _ = try b.get(config.Config.from(.{ .min_data_in_bin = 50, .max_bin = 32, .max_cat_levels = 100 }));
+    try testing.expectEqual(@as(usize, 4), b.rebins);
 }
