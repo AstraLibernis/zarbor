@@ -10,6 +10,11 @@ that context or drop it. Until then treat every number below as a historical not
 commit, not as a property of the current code. Several were last rewritten by c43a41f (comment
 compression, 2026-09-29); the "Introduced" commit is where the number first appeared.
 
+**Known error (2026-10-06):** `bench/binshape.zig` listed 203 bins for `Daily_Commute_km`;
+the EV dataset bins it into 202 (checked with `zarbor info` on a model trained at f477167),
+as `bench/layoutbench.zig` always had. So the "559 bins" and "437 of 559" totals quoted below
+should read 558 and 436; binshape's `WIDTHS` is corrected.
+
 ## bench/barrier.zig
 
 ### file doc (cost of one parallel region)

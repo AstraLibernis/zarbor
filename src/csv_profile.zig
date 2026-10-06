@@ -191,13 +191,13 @@ pub fn writeProfile(out: *std.Io.Writer, f: *const Frame, stats: []const ColumnS
     for (stats) |s| {
         if (s.unparsed == 0) continue;
         if (!said) {
-            try out.writeAll(
+            try out.print(
                 \\
                 \\Values that were neither a number nor a recognised missing marker, in
-                \\a column read as numeric. The kind is sniffed from the first 1000 rows,
+                \\a column read as numeric. The kind is sniffed from the first {d} rows,
                 \\so this usually means the column changes character further down:
                 \\
-            );
+            , .{csv.sniff_rows});
             said = true;
         }
         try out.print("  {s: <24}{d} unparsed\n", .{ s.name, s.unparsed });

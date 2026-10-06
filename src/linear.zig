@@ -144,7 +144,7 @@ fn buildDesign(
                     }
                     // Bin 0 (missing) gets the unweighted average of the bin midpoints.
                     // Standardisation centres on the row mean, so it is not zero after it.
-                    table[0] = if (nb <= 1) 0 else @floatCast(sum / @as(f64, @floatFromInt(nb - 1)));
+                    table[0] = @floatCast(sum / @as(f64, @floatFromInt(nb - 1))); // nb >= 2: checked above
                 }
                 try cols.append(gpa, .{ .feature = @intCast(f), .bin = numeric_col, .center = 0, .scale = 1 });
             },

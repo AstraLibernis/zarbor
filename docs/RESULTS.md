@@ -30,6 +30,12 @@ default, and the numbers below are why.
 | C4 | bit-identical across `--n_threads` 1/4/16, with each feature on | **pass** |
 | C5 | a v2 model written by OLD loads and scores identically under NEW | **pass** |
 
+C3 as the protocol words it (reloaded predictions equal the in-process ones,
+exactly) is enforced by unit tests: `model_test.zig`'s "a model carrying
+categorical subset splits round trips exactly" and "linear leaves fire, stay
+off by default, and round trip exactly". `zig build tools -- controls` checks
+the CLI side only: two predictions from the saved file agree.
+
 C1 was re-run after every commit, including after the F2 work, so no result
 below is contaminated by a change made for the other feature.
 

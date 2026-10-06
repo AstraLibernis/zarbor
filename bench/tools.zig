@@ -675,7 +675,8 @@ fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const
 // ---------------------------------------------------------------- controls
 
 /// Controls C3-C5 of docs/PROTOCOL.md (was controls.sh; C1 and C2 are not run here, and
-/// C3 only checks that two predictions from the same saved file agree). NEW is this checkout's
+/// C3 here only checks that two predictions from the same saved file agree; the exact
+/// in-process vs reloaded comparison is in model_test.zig's round-trip tests). NEW is this checkout's
 /// zig-out/bin/zarbor; OLD is `$ZARBOR_OLD` (required); the data is `adult.csv` in the
 /// data directory, label `y`. Exit status 1 when any control fails.
 fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {

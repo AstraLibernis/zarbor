@@ -25,7 +25,7 @@ const N_ROWS: usize = 500_000;
 const REPS: usize = 30;
 
 /// The benchmark dataset's actual bin widths, in column order.
-const WIDTHS = [_]usize{ 47, 234, 203, 6, 17, 22, 7, 4, 4, 5, 3, 3, 4 };
+const WIDTHS = [_]usize{ 47, 234, 202, 6, 17, 22, 7, 4, 4, 5, 3, 3, 4 };
 const N_FEAT = WIDTHS.len;
 
 fn now() u64 {

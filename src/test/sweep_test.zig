@@ -455,7 +455,7 @@ test "histogram sums are the same to the bit at any thread count" {
     for (grads) |*g| {
         const pr: f32 = 0.5 * @exp(-20.0 * prng.random().float(f32));
         const y: f32 = if (prng.random().boolean()) 1 else 0;
-        g.* = .{ .g = pr - y * (1 - 2 * pr), .h = pr * (1 - pr) };
+        g.* = .{ .g = pr - y, .h = pr * (1 - pr) };
     }
     const rows = try gpa.alloc(u32, n);
     defer gpa.free(rows);
