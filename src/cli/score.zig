@@ -117,7 +117,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
     // Decode the holdout's target with the *model's* class order. This file
     // built its own dictionary by first appearance, so reading its raw ids
     // would silently invert the target whenever the two files disagree on
-    // which class appears first -- and an inverted AUC of 0.06 still looks
+    // which class appears first -- and an inverted AUC near 0 still looks
     // like a number, not a bug.
     var enc = bundles.items[0].encoder();
     var label_spec: ?data.LabelSpec = null;
@@ -211,8 +211,9 @@ fn writePredictions(
 ) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
-    // std.ArrayList has no writer in this Zig; format each field into a small
-    // stack buffer and append. One row never exceeds this.
+    // std.ArrayList has no writer in this Zig (0.16); format each field into a
+    // small stack buffer and append. It holds one field (or the header line): a
+    // longer text id or column name fails `bufPrint` with `error.NoSpaceLeft`.
     var line: [512]u8 = undefined;
 
     const idx: ?usize = if (id_col) |name| frame.columnIndex(name) orelse return error.IdColumnNotFound else null;

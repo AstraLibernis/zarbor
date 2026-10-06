@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Regression-tree construction over binned features. A node's rows are contiguous in `rows`;
-//! gradients stay indexed by row id (not permuted): one gather per tree, not per node per feature,
-//! and histogram passes read gradients sequentially. Siblings use the subtraction identity (parent
-//! minus sibling), so only the cheaper child of a pair is accumulated.
+//! Regression trees over binned features: the grow parameters (`Params`), the fitted `Tree` with
+//! its `Node`s and linear-leaf terms, and binned prediction. Construction lives in builder.zig,
+//! re-exported here as `Builder`.
 
 const std = @import("std");
 const data = @import("data.zig");
@@ -68,7 +67,8 @@ pub const Params = struct {
     cat_l2: f32 = 10.0,
     /// Cap on levels sent left; further bounded by half the participating levels, as LightGBM does.
     max_cat_threshold: u32 = 32,
-    /// Up to this many bins: one level vs the rest, no `cat_l2`; <=4 levels leave little to search.
+    /// Up to this many bins, the missing bin included: one level vs the rest, no `cat_l2`; so few
+    /// levels leave little to search.
     max_cat_to_onehot: u32 = 4,
     /// Rows needed since the last evaluated cut before the next, and a right-child floor. Paces
     /// the scan; filtering which levels take part is `cat_smooth`'s job.

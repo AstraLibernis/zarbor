@@ -7,7 +7,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // The library; the CLI, tools and benches all see it as `zarbor`.
+    // The library; the CLI, the bench tools and the widecat/sz benches import it as `zarbor`.
+    // The golden runner drives the CLI binary instead, and the microbenchmarks import at most src/pool.zig.
     const lib = b.addModule("zarbor", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -27,7 +28,7 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
     if (b.args) |args| run.addArgs(args);
-    b.step("run", "Train/predict with the zarbor GBDT").dependOn(&run.step);
+    b.step("run", "Run the zarbor CLI: train (GBDT, forest, linear), predict, blend, cv, tune, info").dependOn(&run.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

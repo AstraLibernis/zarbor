@@ -8,7 +8,7 @@
 //!   zig build tools -- summarise <base.tsv> <new.tsv>    pair two grid runs (seeds)
 //!   zig build tools -- figure [scoreboard.json] [out.html]
 //!   zig build tools -- grid <zarbor> <tag> [flags...]     the PROTOCOL.md grid, TSV out
-//!   zig build tools -- controls                          PROTOCOL.md controls C2-C5
+//!   zig build tools -- controls                          PROTOCOL.md controls C3-C5
 //!   zig build tools -- solver-stress                     do lbfgs and adam meet?
 //!
 //! Paths: `$ZARBOR_BENCH_DATA` overrides `<repo>/bench/data`; the repo root is injected
@@ -674,7 +674,8 @@ fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const
 
 // ---------------------------------------------------------------- controls
 
-/// Controls C2-C5 of docs/PROTOCOL.md (was controls.sh). NEW is this checkout's
+/// Controls C3-C5 of docs/PROTOCOL.md (was controls.sh; C1 and C2 are not run here, and
+/// C3 only checks that two predictions from the same saved file agree). NEW is this checkout's
 /// zig-out/bin/zarbor; OLD is `$ZARBOR_OLD` (required); the data is `adult.csv` in the
 /// data directory, label `y`. Exit status 1 when any control fails.
 fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {
@@ -687,13 +688,13 @@ fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {
     defer Io.Dir.cwd().deleteTree(init.io, t) catch |e| print("note: could not remove {s}: {s}\n", .{ t, @errorName(e) });
     var c: Ctl = .{ .init = init, .gpa = gpa, .w = w, .t = t, .data = try std.fmt.allocPrint(gpa, "{s}/adult.csv", .{try dataDir(init, gpa)}) };
 
-    try w.writeAll("--- C3: save -> load -> predict reproduces in-process predictions\n");
+    try w.writeAll("--- C3: save -> load -> predict twice from the saved file gives identical predictions\n");
     try c.train(new, "m.zm", &.{"--cat_split=optimal"});
     try c.predict(new, "m.zm", "p1.csv");
     try c.predict(new, "m.zm", "p2.csv");
     try c.verdict(c.same("p1.csv", "p2.csv"), "  reload stable: PASS\n", "  reload stable: FAIL\n");
     const info = try run(init, gpa, &.{ new, "info", try c.flag("--model=", "m.zm") });
-    try w.print("  model wrote and reloaded with cat splits enabled (info exit {d})\n", .{info.code});
+    try w.print("  info on the saved cat-split model exited {d}\n", .{info.code});
 
     try w.writeAll("--- C4: bit-identical across --n_threads, with F1 on\n");
     try c.threads(new, "--cat_split=optimal");
@@ -702,9 +703,9 @@ fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {
     try c.train(old, "old.zm", &.{});
     try c.predict(old, "old.zm", "old_pred.csv");
     try c.predict(new, "old.zm", "new_pred.csv");
-    try c.verdict(c.same("old_pred.csv", "new_pred.csv"), "  v2 model, OLD vs NEW predictions: PASS\n", "  FAIL\n");
+    try c.verdict(c.same("old_pred.csv", "new_pred.csv"), "  OLD-written model, OLD vs NEW predictions: PASS\n", "  FAIL\n");
 
-    try w.writeAll("--- C3c: linear leaves survive save -> load -> predict\n");
+    try w.writeAll("--- C3c: linear leaves: two predictions from the saved file agree\n");
     try c.train(new, "lin.zm", &.{"--linear_leaves=1"});
     try c.predict(new, "lin.zm", "l1.csv");
     try c.predict(new, "lin.zm", "l2.csv");
@@ -714,15 +715,15 @@ fn controls(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer) !void {
     try c.threads(new, "--linear_leaves=1");
 
     try w.writeAll("--- C2b: F2 changes nothing when no split is on a numeric feature\n");
-    try w.writeAll("  (not applicable: every dataset here has numeric columns; C2 covers F1)\n");
+    try w.writeAll("  (not applicable: every dataset here has numeric columns; C2 itself, for F1, is not run here)\n");
 
     try w.writeAll("--- C3b: round trip of a NEW model through OLD must be refused, not misread\n");
     const refuse = try run(init, gpa, &.{ old, "predict", c.data, try c.flag("--model=", "m.zm"), try c.flag("--out=", "x.csv") });
     const lower = try std.ascii.allocLowerString(gpa, refuse.text);
     if (std.mem.find(u8, lower, "unsupported") != null or std.mem.find(u8, lower, "version") != null) {
-        try w.writeAll("  OLD rejects a v3 file: PASS\n");
+        try w.writeAll("  OLD rejects a NEW-format file: PASS\n");
     } else {
-        try w.print("  OLD did not reject a v3 file: FAIL\n{s}", .{refuse.text});
+        try w.print("  OLD did not reject a NEW-format file: FAIL\n{s}", .{refuse.text});
         c.fail = true;
     }
     try w.flush();

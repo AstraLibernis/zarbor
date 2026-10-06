@@ -23,11 +23,11 @@ pub fn binMidpoint(edges: []const f32, real_bin: usize) f32 {
 
 /// LightGBM's `GreedyFindBin` (v4.7.0, src/io/bin.cpp). Quantile cuts on a
 /// 92%-zero column (adult `capital-gain`) land in the mass, dedup, and leave a
-/// few bins for the 8% with the signal: 0.6088 AUC vs LightGBM's 0.6224 on
-/// that column alone. Here a value with a bin's worth of rows gets its own
-/// bin and the budget is recomputed over the rest, repeatedly.
+/// few bins for the 8% with the signal, scoring below LightGBM on that column
+/// alone (docs/measurements.md). Here a value with a bin's worth of rows gets
+/// its own bin and the budget is recomputed over the rest, repeatedly.
 ///
-/// `present` must be sorted ascending. Cuts are inclusive upper bounds, as
+/// Sorts `present` in place (any order in). Cuts are inclusive upper bounds, as
 /// `lowerBound` expects; LightGBM's midpoints assign every row the same bin.
 fn greedyBins(
     gpa: std.mem.Allocator,

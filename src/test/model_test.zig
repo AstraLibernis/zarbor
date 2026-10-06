@@ -121,9 +121,9 @@ test "packed offsets never truncate a feature and stay cache-line aligned" {
     // adjacent features' histograms.
     //
     // It also sized *every* feature by the widest one. Real tables are uneven
-    // — 234 bins for a continuous column next to 3 for a boolean — so that
-    // wasted 5.6x the slots on the dataset this was measured against, and the
-    // per-node clear and reduce paid for all of it.
+    // — hundreds of bins for a continuous column next to 3 for a boolean — so
+    // most slots were wasted, and the per-node clear and reduce paid for all of
+    // it (measured: docs/measurements.md).
     const gpa = testing.allocator;
     const widths = [_]u16{ 2, 3, 17, 47, 202, 234, 256, 257 };
 
@@ -481,8 +481,8 @@ fn countCatNodes(b: *const model_mod.Bundle) usize {
 test "cat_l2 penalises the children and not the parent" {
     // The asymmetry is the whole point and it is easy to get wrong: adding
     // cat_l2 to the parent score as well reads as the self-consistent choice,
-    // and cost 36% of the gain the categorical columns carry until LightGBM's
-    // source settled it. See docs/vs-lightgbm.md.
+    // and cost much of the gain the categorical columns carry until LightGBM's
+    // source settled it. See docs/vs-lightgbm.md and docs/measurements.md.
     //
     // Pinned by consequence rather than by a magic number. With the penalty on
     // the children alone, a huge cat_l2 drives every categorical child score
@@ -545,8 +545,8 @@ test "catContains agrees with a linear scan, on every set it can hold" {
 test "greedy binning gives a dominant value its own bin; quantile does not" {
     // The failure this guards is silent and expensive: on a column that is
     // mostly one value a quantile rule spends its budget inside that mass and
-    // leaves the tail a handful of bins. On adult's capital-gain that was
-    // 0.0136 AUC against LightGBM, and no test could see it.
+    // leaves the tail a handful of bins. On adult's capital-gain that cost real
+    // AUC against LightGBM (docs/measurements.md), and no test could see it.
     const gpa = testing.allocator;
     const pool = try Pool.init(gpa, 1);
     defer pool.deinit();
@@ -1108,8 +1108,8 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     // midpoint of the bin's edges is the obvious choice and a biased one: the
     // top bin of a quantile split is unbounded above, so its midpoint is the
     // cut itself no matter how far the values inside run. On the EV set that
-    // bias cost 0.0003 AUC against scikit-learn -- the entire remaining gap
-    // once the solver was fixed.
+    // bias was the entire remaining gap to scikit-learn once the solver was
+    // fixed (docs/measurements.md).
     const gpa = testing.allocator;
     const pool = try Pool.init(gpa, 2);
     defer pool.deinit();

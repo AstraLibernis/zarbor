@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! zarbor — train a gradient-boosted tree ensemble on a CSV.
+//! zarbor — the CLI: fit gradient-boosted trees, a random forest or a linear
+//! model on a CSV (`train`, the default command), and `predict`, `blend`,
+//! `info`, `profile`, `cv`, `tune`.
 //!
-//! Every field of `Config` is exposed as `--field=value` by comptime
-//! reflection, so the flag surface and the struct can never drift apart.
+//! For train, cv and tune every field of `Config` is exposed as `--field=value`
+//! by comptime reflection (`config.applyFlag`), so those flags and the struct
+//! cannot drift apart.
 
 const std = @import("std");
 const train = @import("train.zig");
@@ -25,7 +28,7 @@ pub const usage =
     \\  --valid-frac=F      fraction held out for validation (default 0.2)
     \\  --split-seed=N      seed for the validation split (default 1)
     \\  --max-bytes=N       CSV size cap in bytes (default 1<<31)
-    \\  --split-col=NAME    column assigning rows to train(0)/valid(nonzero);
+    \\  --split-col=NAME    column assigning rows to train(<0.5)/valid(>=0.5);
     \\                      overrides --valid-frac, and is dropped as a feature
     \\  --save=FILE         write the trained model to FILE
     \\

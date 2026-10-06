@@ -171,8 +171,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         target,
         cfg.modelName(),
         pool.workerCount(),
-        // `zig build` defaults to Debug, and a Debug binary is ~8x slower
-        // here. Printing the mode means a benchmark can never quietly measure
+        // `zig build` defaults to Debug, and a Debug binary is many times
+        // slower. Printing the mode means a benchmark can never quietly measure
         // the wrong build -- which is exactly what happened once.
         @tagName(builtin.mode),
         @divTrunc(t_read - t0, 1_000_000),
@@ -193,7 +193,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     if (split_idx) |sc| {
         // Train rows first, validation rows after, so the same `subset` calls
-        // below work unchanged. A non-zero value means validation.
+        // below work unchanged. A value >= 0.5 means validation; below, or
+        // NaN, means training.
         const col = frame.values[sc];
         var head: usize = 0;
         var tail: usize = full.n_rows;
@@ -231,8 +232,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer if (valid_ds) |*v| v.deinit();
 
     // The split owns copies of everything it needs, and a save needs only the schema, so the
-    // CSV frame and the full matrix are dead from here: freed now, not at exit, they were ~66 MB
-    // of the fit's peak on 668k rows.
+    // CSV frame and the full matrix are dead from here: freed now, not at exit, they would
+    // otherwise sit in the fit's peak memory.
     var schema: ?data.Schema = if (save_path != null) try data.Schema.fromDataset(gpa, &full) else null;
     defer if (schema) |*sch| sch.deinit();
     full.deinit();
@@ -342,8 +343,8 @@ fn reportLinearFit(out: *std.Io.Writer, p: linear.Params, m: *const linear.Linea
     try out.print("coefs   {d} ({d} zero)\n", .{ m.w.len, m.nZero() });
     if (fit.stalled()) {
         // Silence here used to mean "fitted". It did not: with
-        // `--lin_standardize=false` on a column reaching 188,000,
-        // the coefficient steps fall under `lin_tol` after four
+        // `--lin_standardize=false` on a column with large values,
+        // the coefficient steps can fall under `lin_tol` within a few
         // iterations while the gradient is still enormous, and the
         // result ranks by that one column and nothing else.
         try out.print(

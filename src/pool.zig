@@ -3,8 +3,10 @@
 
 //! A persistent parallel-for pool. Zig 0.16 dropped `std.Thread.Pool`/`Mutex`
 //! for `std.Io`, built for blocking IO. A round issues hundreds of barriers
-//! over tens-of-microsecond items, so wake latency rules: workers spin then
-//! yield on an epoch counter, no syscall on the fast path. A shared cursor, not
+//! over tens-of-microsecond items, so wake latency rules: workers spin on an
+//! epoch counter, no syscall on the fast path, and past `spin_budget` park on a
+//! futex (Linux) or yield (elsewhere). The submitter waits for the barrier by
+//! spinning, then yielding. A shared cursor, not
 //! a static partition, so a descheduled thread cannot stall the barrier.
 
 const std = @import("std");
@@ -136,7 +138,8 @@ pub const Pool = struct {
     }
 };
 
-/// Spin before yielding; covers a histogram chunk, past which the core goes back.
+/// Spins before a worker parks (Linux; yields elsewhere) or the submitter yields;
+/// covers a histogram chunk, past which the core goes back.
 pub const spin_budget: u32 = 8192;
 
 fn drain(p: *Pool, worker: usize) void {

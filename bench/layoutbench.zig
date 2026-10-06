@@ -3,10 +3,11 @@
 
 //! Uniform stride vs packed per-feature offsets, including the reduce.
 //!
-//! The real dataset's features hold 47, 234, 202, 6, 17, 22, 7, 4, 4, 5, 3, 3
-//! and 4 bins. A uniform stride sized by the widest one allocates 13x240=3120
-//! slots for 558 real bins, so every zeroing, reduction and subtraction does
-//! 5.6x the necessary work, and the histogram spills a cache level it need not.
+//! The real dataset's per-feature bin counts are `REAL_BINS`: two wide columns
+//! and many narrow ones. A uniform stride sized by the widest one allocates
+//! several times as many slots as there are real bins (the bench prints both),
+//! so every zeroing, reduction and subtraction does that many times the
+//! necessary work, and the histogram spills a cache level it need not.
 
 const std = @import("std");
 const linux = std.os.linux;

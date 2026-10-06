@@ -3,10 +3,11 @@
 
 //! What does one wide categorical column cost?
 //!
-//! zarbor stores a bin in a `u8`, so a column with 256 or more levels is
-//! refused. Lifting that ceiling is only worth doing if the tree builder can
-//! afford the wider histogram it implies, and this measures that before the
-//! rewrite rather than after.
+//! When this was written zarbor stored a bin in a `u8`, so a column with 256 or
+//! more levels was refused. Lifting that ceiling was only worth doing if the
+//! tree builder could afford the wider histogram it implies, and this measured
+//! that before the rewrite rather than after. (Wide columns now go in
+//! `Dataset.wide_cols`; see `makeDs`.)
 //!
 //! Two halves, because one of them can be measured with today's code and the
 //! other cannot:
@@ -185,15 +186,7 @@ fn halfB(gpa: std.mem.Allocator, n_rows: usize) !void {
     }
 }
 
-/// Half C: does a `u16` bin index cost the accumulation kernel anything?
-///
-/// This decides the architecture. If widening is near-free the bin type can
-/// just become `u16` everywhere, one code path. If it is not, the type has to
-/// become a comptime parameter with both widths instantiated, so a table that
-/// fits in `u8` keeps today's cost -- a far larger refactor.
-///
-/// Row-major over `n_feat` features, which is the real kernel's shape: the
-/// difference is entirely how many bytes of `bins_rm` a row occupies.
+/// `halfC`'s baseline slot for a node stride (1, 4 or 16).
 fn strideIdx(st: usize) usize {
     return switch (st) {
         1 => 0,
@@ -211,6 +204,12 @@ fn strideIdx(st: usize) usize {
 /// ascending subset, and once the rows thin out each one wants its own line;
 /// then doubling the row stride doubles the lines touched. `stride` here is
 /// how sparse the node is: 1 is the root, 16 is roughly depth four.
+///
+/// If widening is near-free the bin type can just become `u16` everywhere, one
+/// code path; if not, it has to become a comptime parameter with both widths
+/// instantiated, so a table that fits in `u8` keeps its cost -- a far larger
+/// refactor. Row-major over `n_feat` features, which is the real kernel's
+/// shape: the difference is entirely how many bytes of `bins_rm` a row occupies.
 fn halfC(gpa: std.mem.Allocator, n_rows: usize) !void {
     const reps: usize = 30;
     const n_feat: usize = 13;

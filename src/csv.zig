@@ -3,8 +3,8 @@
 
 //! CSV parsing: bytes on disk to a column-major `Frame`. Every model pays
 //! this before any bin, so it has its own module, tests and timings;
-//! `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. 117 ms vs
-//! `pandas.read_csv` 179 ms on a 32 MB / 534,932-row file. See docs/arena.md.
+//! `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. Faster than
+//! `pandas.read_csv`; see docs/measurements.md and docs/arena.md.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
@@ -88,7 +88,8 @@ fn looksNumeric(s: []const u8) bool {
 }
 
 /// Read-time distinct-value ceiling: stops a free-text column allocating a
-/// file-sized dictionary. The real bin limit is `max_bins`, in `binOne`.
+/// file-sized dictionary. The bin limit is in `binOne`, which refuses a
+/// categorical with `card >= max_bins` or `card > max_cat_levels`.
 const max_levels: usize = 1 << 20;
 
 /// Known column kinds by name, from the model's stored schema, so a
@@ -109,8 +110,9 @@ pub const KindHint = struct {
 
 /// Parse a CSV with vendored zsift (`vendor/zsift`): quoted fields may hold
 /// delimiters, newlines, `""`; no column limit. Up to `pool.workerCount()`
-/// workers (zsift may pick fewer), each with own columns and dictionaries,
-/// merged in file order so level ids match a serial read. A stray quote in an
+/// workers, capped at `zsift.parallel.max_workers` and at one per
+/// `bytes_per_worker` of text (`parseText`), each with own columns and
+/// dictionaries, merged in file order so level ids match a serial read. A stray quote in an
 /// unquoted field (not RFC 4180) is re-read serially by the lenient parser.
 pub fn readCsv(
     gpa: std.mem.Allocator,
@@ -154,9 +156,9 @@ pub fn readCsvHinted(
 const Mode = enum { strict, lenient };
 
 /// CSV bytes per worker. zsift's rule (`parallel.forEachField`, serial below
-/// 2 MiB) suits a near-free sink; this one converts every field. Swept 32–256
-/// KiB vs the all-core loader on 7 real files (0.7–45 MB): only 64 KiB won on
-/// every file every round (medians 1.34–1.73×, worst round 1.08×).
+/// `parallel.min_parallel_bytes`) suits a near-free sink; this one converts
+/// every field. Chosen by a sweep; see docs/measurements.md (csv.zig
+/// `bytes_per_worker`).
 const bytes_per_worker: usize = 64 << 10;
 
 /// Scratch per worker for unescaping one quoted field with `""` in it; a longer
@@ -164,8 +166,8 @@ const bytes_per_worker: usize = 64 << 10;
 const field_scratch_max: usize = 16 << 20;
 
 /// Unescape scratch is allocated raw, skipping `alloc`'s fill: Debug and ReleaseSafe write 0xAA over
-/// every allocation and again on free, and this is up to 16 MiB per worker, 272 MB on 16 threads
-/// (ReleaseSafe peaked at 384 MB vs 135 MB in ReleaseFast). Only a field containing `""` writes it.
+/// every allocation and again on free, and this is up to `field_scratch_max` (16 MiB) per worker.
+/// Only a field containing `""` writes it.
 fn allocScratch(gpa: std.mem.Allocator, len: usize) ![]u8 {
     const p = gpa.rawAlloc(len, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
     return p[0..len];

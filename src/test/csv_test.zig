@@ -80,9 +80,9 @@ test "NA is missing in a numeric column and a level in a categorical one" {
 }
 
 // The `unparsed` counter exists for exactly one situation, so the test has to
-// reproduce it: the column kind is sniffed from the first 1000 rows, and junk
+// reproduce it: the column kind is sniffed from the first `sniff_rows` rows, and junk
 // *inside* that window simply makes the column categorical -- correctly, and
-// with nothing to report. Only a value past row 1000 lands in a column already
+// with nothing to report. Only a value past that window lands in a column already
 // committed to numeric, where it used to become a silent NaN.
 test "a non-numeric value past the sniff window is counted, not swallowed" {
     const gpa = testing.allocator;

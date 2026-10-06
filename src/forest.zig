@@ -81,9 +81,9 @@ const PredictCtx = struct {
         const inv: f32 = if (n == 0) 0 else 1.0 / @as(f32, @floatFromInt(n));
         const out = self.out[begin..end];
 
-        // Trees outer, rows inner: a 300 x 1024-leaf forest is ~19.7 MB of nodes,
-        // so row-major scattered each row across 300 uncached arrays; this keeps
-        // one tree (~65 KB) and the chunk's bins in L2. Bit-exact with row-major:
+        // Trees outer, rows inner: a large forest's nodes far exceed the cache, so
+        // row-major scattered each row across every tree's uncached array; this keeps
+        // one tree and the chunk's bins in L2. Bit-exact with row-major:
         // each `out[r]` sums the same trees in the same order, rounding to f32 per step.
         @memset(out, 0);
         for (self.m.trees.items) |t| {
@@ -93,9 +93,7 @@ const PredictCtx = struct {
     }
 };
 
-/// Validation rows per pool chunk, at least. 4096 cut 133k rows into 33 chunks for 16 workers, so the
-/// barrier waited on a worker with three while the average had two; 1024 gives 131. Rows are
-/// independent, so the chunking changes nothing but the wait.
+/// Validation rows per pool chunk, at least; why this size: `booster.valid_min_chunk`.
 const valid_min_chunk = 1024;
 
 /// Running sum of member predictions, so a validation curve costs one tree
@@ -182,8 +180,8 @@ pub fn train(
             prof.stop(.valid_predict, t_vp);
 
             // Score only when consumed: no early stopping, so only the last and logged
-            // rounds use it, and the metric is a single-thread sort (133k rows: 1.18 s
-            // of a 2.35 s fit when scored every round; the booster has the same fix).
+            // rounds use it, and the metric is a single-thread sort that, scored every
+            // round, was a large share of the fit. The booster has the same fix.
             const log_due = log != null and cfg.verbose_eval != 0 and
                 (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
             if (!log_due and round + 1 != cfg.n_rounds) {

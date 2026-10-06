@@ -36,9 +36,10 @@ pub const Cut = struct {
     take: usize,
 };
 
-/// Two 16-bit counting passes over the bit patterns. Quickselect was 768 ms
-/// of a 1.57 s GOSS fit (49%): Hoare's scans branch on a coin flip, so nearly
-/// every element mispredicted; counting branches predictably and streams.
+/// Two counting passes, `radix_bits` each, over the bit patterns. Quickselect was
+/// about half of a GOSS fit (see docs/measurements.md): Hoare's scans branch on a coin
+/// flip, so nearly every element mispredicted; counting branches predictably and
+/// streams.
 /// Exact: every chosen magnitude >= every unchosen one, bit-ties by row order.
 pub fn gossCut(grads: []const hist.GradPair, counts: []u32, k: usize, how: GossRank) Cut {
     std.debug.assert(counts.len == n_radix);
@@ -90,8 +91,8 @@ fn scratchChunks(pool: *const Pool) usize {
 /// (inverse sampling rate) so split gains stay unbiased. Mutates `grads` in
 /// place; the caller recomputes it every round.
 ///
-/// Marking and the final bitset walk run on the pool: they were 65% of a serial 1.5 ms per round,
-/// 35% of a GOSS fit. Every chunk is whole mask words, so each owns its words outright; integer
+/// Marking and the final bitset walk run on the pool: serially they were most of a round's
+/// selection and a large share of a GOSS fit (see docs/measurements.md). Every chunk is whole mask words, so each owns its words outright; integer
 /// prefix counts give each chunk its first kept tie and its first slot in `others`, so the output
 /// is the serial one exactly, for any thread count. The shuffle stays serial: it draws the RNG.
 pub fn gossSelect(
@@ -164,7 +165,7 @@ pub fn gossSelect(
     }
 
     // Ascending row order via the bitset: the histogram kernel wants a
-    // forward walk, and sorting 160k ids would cost more than selection.
+    // forward walk, and sorting the kept ids would cost more than selection.
     // Per-chunk popcounts (reusing `below`) place each chunk's rows in `out`.
     pool.parallelFor(n, &ctx, MarkCtx.popcount, csize);
     var k: usize = 0;

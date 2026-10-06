@@ -4,18 +4,17 @@
 //! What shape should a histogram bin be?
 //!
 //! `histbench.zig` answered "which loop order", but it models every feature as
-//! 256 bins wide. Real tables are not like that: the benchmark dataset has 559
-//! bins across 13 features, and 437 of those belong to just two columns. The
-//! whole histogram is 16 KB and L1-resident, where the uniform-256 model makes
-//! it 80 KB and L2-resident — a different regime, and the regime the code
-//! actually runs in. This file uses the real widths and the real packed
-//! per-feature offsets.
+//! 256 bins wide. Real tables are not like that: in the benchmark dataset
+//! (`WIDTHS`) most bins belong to just two columns. The whole histogram fits in
+//! L1, where the uniform-256 model pushes it out to L2 — a different regime,
+//! and the regime the code actually runs in. This file uses the real widths and
+//! the real packed per-feature offsets.
 //!
-//! The question it exists to answer: the count field. Dropping it is worth
-//! 1.5x in histbench, but `min_child_samples` needs it. Three scattered
-//! read-modify-writes per row-feature is what costs — so the candidate is to
-//! make them *one*: pad the bin to four f64 lanes and let a single 32-byte
-//! vector load-add-store carry g, h and n together.
+//! The question it exists to answer: the count field. Dropping it was a clear
+//! win in histbench (docs/measurements.md), but `min_child_samples` needs it.
+//! Three scattered read-modify-writes per row-feature is what costs — so the
+//! candidate is to make them *one*: pad the bin to four f64 lanes and let a
+//! single 32-byte vector load-add-store carry g, h and n together.
 //!
 //! Run: zig build bench-binshape -Doptimize=ReleaseFast
 
@@ -55,10 +54,11 @@ fn offsetsFor(comptime T: type) [N_FEAT + 1]u32 {
 
 // ------------------------------------------------------------- bin shapes
 
-/// Today's shape: two doubles, a count, padding. Three separate RMWs.
+/// The library's shape when this bench was written (it now uses the `Vec4`
+/// shape below): two doubles, a count, padding. Three separate RMWs.
 const Bin24 = extern struct { g: f64 = 0, h: f64 = 0, n: u32 = 0, _pad: u32 = 0 };
 /// The count dropped. Two RMWs, and the index is a shift rather than a
-/// multiply. This is the 1.5x, and the semantics we cannot afford to lose.
+/// multiply. This is histbench's win, and the semantics we cannot afford to lose.
 const Bin16 = extern struct { g: f64 = 0, h: f64 = 0 };
 /// Four f64 lanes: g, h, n, unused. 32 bytes, naturally aligned, so the whole
 /// update is one vector load, one add, one store -- counts included.
@@ -142,7 +142,8 @@ fn vec4Unrolled(hist: []Vec4, bins: []const u8, rows: []const u32, grads: []cons
     }
 }
 
-/// Today's scalar shape, unrolled by four -- the actual current kernel.
+/// The 24-byte scalar shape, unrolled by four -- the library's kernel when this
+/// bench was written.
 fn scalar24Unrolled(hist: []Bin24, bins: []const u8, rows: []const u32, grads: []const GradPair) void {
     const off = comptime offsetsFor(Bin24);
     for (0..N_FEAT) |f| {
@@ -194,7 +195,7 @@ fn vec4RowMajor(hist: []Vec4, bins_rm: []const u8, rows: []const u32, grads: []c
     }
 }
 
-/// Today's 24-byte bin, but row-major and row-outer. Separates the layout
+/// The old 24-byte bin, but row-major and row-outer. Separates the layout
 /// change from the bin-shape change: whatever this gains is the layout's, and
 /// whatever Vec4 row-major gains on top of it is the vector RMW's.
 fn scalar24RowMajor(hist: []Bin24, bins_rm: []const u8, rows: []const u32, grads: []const GradPair, comptime D: usize) void {

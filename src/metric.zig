@@ -11,7 +11,7 @@ const radix = @import("radix.zig");
 /// arbitrary tie order would bias the result.
 ///
 /// Sorted by LSD radix (`radix.zig`) on `f32Key(score) << 32 | label`, not a comparison sort through an index:
-/// 9x faster on 133k rows (10.3 -> 1.2 ms), and it runs every `verbose_eval` round, every round
+/// much faster (docs/measurements.md, metric.zig `auc`), and it runs every `verbose_eval` round, every round
 /// under early stopping. The value is unchanged to the bit: a tied block is still every row of
 /// one score, and the rank sum adds half-integers far below 2^53, exact in any order.
 /// (NaN scores, which the comparison sort left in undefined places, now group by bit pattern.)

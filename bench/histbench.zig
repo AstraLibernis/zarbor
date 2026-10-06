@@ -3,9 +3,10 @@
 
 //! Standalone microbenchmark for the histogram accumulation kernel.
 //!
-//! hist_build is 45-63% of training, so this isolates it from tree building
-//! entirely: synthetic bins, a shuffled row order standing in for the arbitrary
-//! ids a node holds after partitioning, and one variant per idea. Iterating
+//! hist_build is the largest share of training (docs/measurements.md), so this
+//! isolates it from tree building entirely: synthetic bins, rows in ascending
+//! order as the stable partition leaves a node's ids (`--shuffle` for an
+//! arbitrary order), and one variant per idea. Iterating
 //! here takes seconds instead of a two-minute training run, and removes every
 //! confound the full pipeline brings.
 //!
@@ -27,7 +28,8 @@ fn now() u64 {
 
 const GradPair = extern struct { g: f32, h: f32 };
 
-/// What the code uses today: two doubles, a count, and padding to 24 bytes.
+/// What the library used when this bench was written: two doubles, a count, and padding to 24
+/// bytes. (It now uses four f64 lanes; see `hist.Bin` and binshape.zig.)
 const Bin24 = extern struct {
     g: f64 = 0,
     h: f64 = 0,
@@ -54,7 +56,7 @@ fn strideFor(comptime T: type) usize {
 
 // --------------------------------------------------------------- variants
 
-/// Current implementation: feature-outer, unrolled by four.
+/// The library's kernel when this bench was written: feature-outer, unrolled by four.
 fn featureOuter(comptime T: type, hist: []T, bins: []const u8, rows: []const u32, grads: []const GradPair) void {
     const stride = strideFor(T);
     for (0..N_FEAT) |f| {
@@ -76,8 +78,8 @@ fn featureOuter(comptime T: type, hist: []T, bins: []const u8, rows: []const u32
 }
 
 /// Same, plus an explicit prefetch of the gather target D iterations ahead.
-/// This is the technique xgboost's binary is full of (~4,900 prefetch
-/// instructions, and no AVX-512 at all).
+/// This is the technique xgboost's binary is full of (many prefetch
+/// instructions, and no AVX-512 at all; see docs/measurements.md).
 fn featureOuterPrefetch(comptime T: type, hist: []T, bins: []const u8, rows: []const u32, grads: []const GradPair, comptime D: usize) void {
     const stride = strideFor(T);
     for (0..N_FEAT) |f| {
@@ -128,9 +130,10 @@ fn rowOuterRowMajorPrefetch(comptime T: type, hist: []T, bins_rm: []const u8, ro
 
 /// Gradient sums in a 16-byte bin, counts in a separate u32 array.
 ///
-/// The counts are what force the bin up to 24 bytes today. Split out, the
-/// gradient array is 13x272x16 = 56 KB and the count array 14 KB — and the
-/// count array is small enough to stay in L1 while the gradients stream.
+/// The counts are what forced the bin up to 24 bytes. Split out, the gradient
+/// array is `N_FEAT * strideFor(Bin16)` 16-byte bins and the count array a
+/// quarter of that in bytes — small enough to stay in L1 while the gradients
+/// stream.
 fn rowOuterSplitCounts(hist: []Bin16, counts: []u32, bins_rm: []const u8, rows: []const u32, grads: []const GradPair, comptime D: usize) void {
     const stride = strideFor(Bin16);
     for (rows, 0..) |row, i| {
@@ -307,7 +310,7 @@ pub fn main(init: std.process.Init) !void {
     // is a property of the partition, not a free choice. The parallel
     // partition is a stable count/prefix/scatter, so each child keeps its
     // rows in ascending order; the old Hoare two-pointer swap did not.
-    // ZB_SHUFFLE=1 reproduces the unordered case for comparison.
+    // `--shuffle` reproduces the unordered case for comparison.
     var shuffled = false;
     {
         var it = std.process.Args.Iterator.init(init.minimal.args);

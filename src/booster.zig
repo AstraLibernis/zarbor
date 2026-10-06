@@ -28,14 +28,14 @@ pub const Sampling = enum {
 };
 
 /// Magnitude GOSS ranks rows by to keep in full. The one place the GOSS paper and
-/// LightGBM's code differ; worth 0.0012 AUC on a binary problem (docs/goss.md).
+/// LightGBM's code differ; the choice moves accuracy measurably (docs/goss.md).
 pub const GossRank = enum {
     /// `|g|`: Ke et al. (NeurIPS 2017) and LightGBM's `top_rate` docs. Keeps the
     /// largest residuals.
     gradient,
     /// `|g * h|`: what LightGBM computes in `goss.hpp`; select for LightGBM parity.
     /// The hessian pulls confidently-wrong rows *out* of the kept set: logistic
-    /// `h = p(1-p)`, so p = 0.99 scores ~100x lower than p = 0.5 at equal residual.
+    /// `h = p(1-p)`, so p = 0.99 scores ~25x lower than p = 0.5 at equal residual.
     /// Identical to `gradient` on squared error (`h` = 1).
     gradient_hessian,
 };
@@ -144,10 +144,10 @@ pub inline fn sigmoid(x: f32) f32 {
 pub const lanes = 8;
 pub const F8 = @Vector(lanes, f32);
 
-/// `sigmoid` for eight rows. Scalar `@exp` is a libm call at 7.8 ns/element (glibc
-/// `expf` no faster). Inline `2^(-x*log2e)`, integer part into the exponent field,
-/// fraction by degree-5 minimax polynomial, vectorises to 0.67 ns: 11.7x, and
-/// gradients were 15% of a fit. Error < 1e-6 absolute (a few f32 ulp), pinned by
+/// `sigmoid` for eight rows. Scalar `@exp` is a libm call per element (glibc `expf`
+/// no better), and gradients are a noticeable share of a fit. Inline `2^(-x*log2e)`,
+/// integer part into the exponent field, fraction by degree-5 minimax polynomial,
+/// vectorises and is much faster. Error < 1e-6 absolute (a few f32 ulp), pinned by
 /// `"vectorised sigmoid matches the scalar one"`. Still an approximation, so it is
 /// confined to gradients; predictions use the scalar `sigmoid`.
 pub inline fn sigmoid8(x: F8) F8 {
@@ -285,9 +285,10 @@ const ApplyAllCtx = struct {
     }
 };
 
-/// Validation rows per pool chunk, at least. 4096 cut 133k rows into 33 chunks for 16 workers, so the
-/// barrier waited on a worker with three while the average had two; 1024 gives 131. Rows are
-/// independent, so the chunking changes nothing but the wait.
+/// Validation rows per pool chunk, at least. Too coarse a chunk leaves a typical validation set
+/// with only a couple of chunks per worker, so the barrier waits on whichever worker drew one
+/// extra; smaller chunks even out the load. Rows are independent, so the chunking changes
+/// nothing but the wait. `forest.valid_min_chunk` follows the same reasoning.
 const valid_min_chunk = 1024;
 
 const ValidCtx = struct {
@@ -473,8 +474,8 @@ pub fn train(
             prof.stop(.valid_predict, t_vp);
 
             // Score only when consumed: early stopping (every round), a log line, or the
-            // final round (`best_score`). Unguarded, on 668k rows it was 52% of training:
-            // a single-thread 133k-row sort per round, discarded 199 times in 200.
+            // final round (`best_score`). Unguarded, the metric's single-thread sort ran
+            // every round and was mostly discarded, a large share of training time.
             const log_due = log != null and cfg.verbose_eval != 0 and
                 (round % cfg.verbose_eval == 0 or round + 1 == cfg.n_rounds);
             if (cfg.early_stopping_rounds == 0 and !log_due and round + 1 != cfg.n_rounds) {

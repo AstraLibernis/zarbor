@@ -35,8 +35,9 @@ fn parseInto(comptime T: type, val: []const u8) !T {
 
 /// Set a field by name from its string form in every group that has it (`lambda`
 /// reaches both ensembles' trees and the linear model). False when `key` names no
-/// field, so a caller can fall through to its own flags. Every command uses this,
-/// so flags cannot drift from the structs, and a tuner can pass any field through.
+/// field, so a caller can fall through to its own flags. train, cv and tune parse
+/// flags through this, so their flags cannot drift from the structs, and a tuner can
+/// pass any field through; predict and blend parse their few flags by hand.
 pub fn applyFlag(cfg: *Config, key: []const u8, val: []const u8) !bool {
     return applyIn(cfg, key, val);
 }

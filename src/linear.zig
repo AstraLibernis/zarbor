@@ -60,7 +60,9 @@ pub const Params = struct {
     lin_tol: f32 = 1e-7,
     /// Standardise columns to zero mean, unit variance. Off (scale-dependent penalties) is rarely right.
     lin_standardize: bool = true,
-    /// Print per-round metrics every N rounds. 0 silences training.
+    /// Log solver progress (objective and gradient norm; `adam` logs the largest
+    /// coefficient step instead of the objective) every N iterations for `lbfgs`,
+    /// every 10*N epochs for `adam`, plus the last. 0 silences training.
     verbose_eval: u32 = 10,
 
     pub fn validate(p: Params) !void {
@@ -131,7 +133,7 @@ fn buildDesign(
                 const table = try gpa.alloc(f32, nb);
                 repr[f] = table;
                 // Binning's per-bin value means. Without `quantise`, fall back to edge
-                // midpoints: biased under skew, 0.0003 AUC worse on the EV set.
+                // midpoints: biased under skew, and measurably less accurate.
                 if (ds.means[f].len == nb) {
                     @memcpy(table, ds.means[f]);
                 } else {
@@ -140,7 +142,8 @@ fn buildDesign(
                         table[b] = data.binMidpoint(ds.edges[f], b - 1);
                         sum += table[b];
                     }
-                    // Bin 0 (missing) gets the feature mean: zero once standardised.
+                    // Bin 0 (missing) gets the unweighted average of the bin midpoints.
+                    // Standardisation centres on the row mean, so it is not zero after it.
                     table[0] = if (nb <= 1) 0 else @floatCast(sum / @as(f64, @floatFromInt(nb - 1)));
                 }
                 try cols.append(gpa, .{ .feature = @intCast(f), .bin = numeric_col, .center = 0, .scale = 1 });
@@ -216,7 +219,8 @@ pub const Linear = struct {
         };
     }
 
-    /// Number of coefficients L1 drove exactly to zero.
+    /// Number of coefficients exactly zero: those L1 drove there, plus those of
+    /// constant columns (scale 0 when standardised), which never leave their zero start.
     pub fn nZero(m: *const Linear) usize {
         var n: usize = 0;
         for (m.w) |c| {

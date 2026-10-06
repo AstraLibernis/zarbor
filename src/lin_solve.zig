@@ -263,8 +263,10 @@ pub fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
     }
 }
 
-/// How a fit ended. `converged`: coefficients stopped moving *and* the gradient came
-/// down. Stopping with a large gradient is a stall, not success.
+/// How a fit ended. `converged` is false only when L-BFGS's line search found no
+/// improvement; stopping on `lin_tol`, the gradient floor or the `lin_epochs` cap
+/// leaves it true. Whether the gradient came down is `stalled()`'s test: stopping
+/// with a large gradient is a stall, not success.
 pub const Fit = struct {
     iters: u32,
     /// Pseudo-gradient infinity-norm at the first iteration and the last.
@@ -273,8 +275,8 @@ pub const Fit = struct {
     converged: bool = true,
 
     /// The gradient vanishes at an optimum under any scaling, so its fall is the
-    /// scale-free arrival test. Measured: healthy runs end 4-5 orders down (1.4e-5),
-    /// runs stalled by bad conditioning 3 (3e-3); 1e-3 sits between.
+    /// scale-free arrival test. The 1e-3 ratio sits between where healthy runs end
+    /// and where runs stalled by bad conditioning end.
     pub fn stalled(f: Fit) bool {
         return !f.converged or f.g_last > 1e-3 * f.g_first;
     }

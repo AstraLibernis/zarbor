@@ -13,8 +13,10 @@ const Work = builder.Work;
 const max_path = builder.max_path;
 
 /// In-place Cholesky solve of a small SPD system. Reads `a`'s upper triangle and overwrites it;
-/// `rhs` returns the solution. False on a non-positive pivot: a feature constant within the leaf,
-/// common near the bottom of a tree. The caller takes that as "no slopes", the admissible `beta =
+/// `rhs` returns the solution. False when a pivot is not above 1e-12 (or is NaN): with
+/// `lin_leaf_lambda` 0 that means collinear path features within the leaf; a positive lambda keeps
+/// the standardised system positive definite. (A feature constant within the leaf never gets here:
+/// `fitLinearLeaf` returns first.) The caller takes false as "no slopes", the admissible `beta =
 /// 0`, not a failure.
 fn choleskySolve(a: *[max_path][max_path]f64, rhs: *[max_path]f64, n: usize) bool {
     var l: [max_path][max_path]f64 = undefined;
@@ -33,7 +35,7 @@ fn choleskySolve(a: *[max_path][max_path]f64, rhs: *[max_path]f64, n: usize) boo
             }
         }
     }
-    // Forward, then back.
+    // Solve L y = rhs by forward substitution, then L^T x = y by back substitution, in place.
     for (0..n) |i| {
         var sum = rhs[i];
         for (0..i) |k| sum -= l[i][k] * rhs[k];

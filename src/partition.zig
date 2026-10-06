@@ -11,14 +11,15 @@ const tree = @import("tree.zig");
 const builder = @import("builder.zig");
 const Builder = builder.Builder;
 
-/// Below this many rows the barriers cost more than the scan saves. Tuned: on a 200-tree fit 32768
-/// (the original guess) spends 360 ms in partition, 2048 spends 271 ms; the curve rises
-/// monotonically above that. Output identical at every setting.
+/// Below this many rows the barriers cost more than the scan saves. Tuned by a sweep (cost rises
+/// steadily above this value); see docs/measurements.md. Output identical at every setting.
+/// builder.zig's `batch_max_rows` must stay below it (asserted in `partitionSmall`, Debug only).
 const parallel_partition_min: usize = 2048;
 
-/// Takes the four scalars the decision needs, not the whole 160-byte `Split` (inline categorical id
-/// array): read per row per pass, it put partition at 2.2x. Bin element width, blamed twice, was
-/// worth nothing.
+/// Takes the four fields the decision needs (`split.SplitTest`), not the whole `Split`, which is
+/// large (`@sizeOf(Split)`, inline categorical id array): read per row per pass, it slowed
+/// partition severely (see docs/measurements.md). Bin element width, blamed twice, was worth
+/// nothing.
 pub inline fn goesLeft(bin: data.BinIdx, t: split.SplitTest) bool {
     if (bin == 0) return t.missing_left;
     if (t.is_cat) return split.catContains(t.ids, bin);
@@ -54,9 +55,9 @@ const CatTest = struct {
 };
 
 /// Reorder `rows[start..end]` so the left child's rows come first; only row ids move (gradients are
-/// looked up by id). Count / prefix-sum / scatter in three parallel passes: done serially, this
-/// per-level O(rows) work capped 16 threads at 1.66x over 1 and made time scale with depth, not
-/// node count.
+/// looked up by id). Count / prefix-sum / scatter, with count and scatter (and the copy back) on the
+/// pool: done serially, this per-level O(rows) work capped thread scaling (see
+/// docs/measurements.md) and made time scale with depth, not node count.
 pub fn partition(b: *Builder, start: usize, end: usize, sp: split.Split) usize {
     if (b.ds.isWide(sp.feature))
         return partitionOn(b, data.BinIdx, b.ds.columnWide(sp.feature), start, end, sp);
@@ -175,10 +176,13 @@ fn partitionSerial(
 
 /// Generic over the column element type so byte-wide tables keep reading bytes. The one place bin
 /// width is visibly paid: one feature walked down scattered rows costs a cache line per row, so the
-/// element size is not amortised. Whole matrix as `u16`: 51 -> 110 ms on adult, row-major
-/// accumulate unmoved. So the row-major mirror is uniformly `u16` and only this stays narrow.
-/// `parallelFor` hands out fixed-size chunks, so `begin / chunk` recovers the chunk: count and
-/// scatter agree on each chunk's output position with no coordination.
+/// element size is not amortised. Making the whole matrix `u16` made partition much slower while
+/// the row-major accumulate did not move (see docs/measurements.md). So the row-major mirror is
+/// uniformly `u16` and only this stays narrow.
+/// `parallelFor` hands out fixed-size chunks of exactly `chunk` rows (`partitionWith` asks for the
+/// size the pool would pick and never runs this with one worker or a range of one chunk, where a
+/// single call would get everything), so `begin / chunk` recovers the chunk: count and scatter
+/// agree on each chunk's output position with no coordination.
 /// The loops copy what they read into locals first: through `self` the compiler reloaded every
 /// field per row, since a store to `rows_out` might alias it.
 fn PartCtx(comptime C: type, comptime T: type) type {

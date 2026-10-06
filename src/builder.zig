@@ -35,8 +35,11 @@ pub const Work = struct {
     n_path: u8 = 0,
 };
 
-/// `expandBatch` takes runs of pending nodes up to this many rows. At most `2 * parallel_threshold`,
-/// so the smaller child is built serially either way and the batch's trees stay bit-identical.
+/// `expandBatch` takes runs of pending nodes up to this many rows. Two invariants keep a batch's
+/// trees bit-identical to one-at-a-time expansion: at most `2 * hist.parallel_threshold`, so the
+/// smaller child is at most `hist.parallel_threshold` and `hist.build` would build it serially
+/// too; and below partition.zig's `parallel_partition_min`, so `partition` would run serially too
+/// (`partitionSmall` asserts this, in Debug only).
 const batch_max_rows: usize = 2 * hist.parallel_threshold;
 const batch_max_nodes: usize = 256;
 /// Fewer nodes than this are not worth two barriers.
@@ -105,8 +108,8 @@ const BatchBuildCtx = struct {
 
 const partitionSmall = @import("partition.zig").partitionSmall;
 
-/// `Builder.clearCounts` / `emitSample` over row ids, in chunks of `chunk`; each pass walks its range
-/// chunk by chunk, since one worker gets the whole range in one call.
+/// `Builder.clearCounts` / `emitSample` over row ids, in chunks of `chunk`; `total` and `emit` walk
+/// their range chunk by chunk, since one worker can get the whole range in one call.
 const SampleCtx = struct {
     b: *Builder,
     chunk: usize,
@@ -160,29 +163,31 @@ pub const Builder = struct {
     cfg: Params,
     bank: hist.Bank,
 
-    /// `n_slots` histograms, each `bank.slotLen()` bins.
+    /// `cfg.leafBudget() + 2` histograms (`want_slots` in `init`), each `bank.slotLen()` bins.
     slots: []hist.Bin,
     free_slots: std.ArrayList(u32),
 
     rows: []u32,
     /// Gradients indexed by original row id, borrowed for the current tree. Not permuted to match
     /// `rows`: that paid off when the histogram loop was feature-outer, but row-outer reads each
-    /// once per row, and permuting tripled partition traffic (12 bytes a row vs 4): gather 4 ms vs
-    /// moving 100+ ms per 200-tree fit.
+    /// once per row, and permuting makes the partition move a `hist.GradPair` with every row id;
+    /// the gather costs far less than that traffic (see docs/measurements.md).
     g: []const hist.GradPair,
     /// Destination for the parallel partition, which cannot be done in place.
     rows_out: []u32,
     /// Per-chunk partial sums for `totalOf`.
     total_partial: []hist.Bin,
-    /// Per-chunk left-hand counts, plus one for the total.
+    /// Per-chunk left-hand counts for the parallel `partition`; `part_left` / `part_right` hold
+    /// each chunk's first left and right output position. All three are `workerCount() * 4 + 2`
+    /// long; `partition` uses at most `workerCount() * 4` chunks.
     part_counts: []usize,
     part_left: []usize,
     part_right: []usize,
     /// Rows active for the current tree: `rows[0..n_active]`.
     n_active: usize,
-    /// Per-row draw counts for putting a sampled tree's rows in ascending order (`sortSample`).
+    /// Per-row draw counts for putting a sampled tree's rows in ascending order (`emitSample`).
     row_counts: []u32,
-    /// Per-chunk row totals, then output offsets, for `sortSample`'s parallel emit.
+    /// Per-chunk row totals, then output offsets, for `emitSample`'s parallel emit (`SampleCtx`).
     sample_at: []usize,
 
     nodes: std.ArrayList(Node),
@@ -190,8 +195,8 @@ pub const Builder = struct {
     lin: std.ArrayList(LinTerm),
     queue: std.ArrayList(Work),
     /// Depthwise pops `queue.items[queue_head]` and advances; the items before it are spent.
-    /// `orderedRemove(0)` shifted the whole frontier of 256-byte `Work`s on every pop: 1.6 ms of a
-    /// 17.7 ms 1,024-leaf forest tree. Lossguide still removes in place (its queue is short, and
+    /// `orderedRemove(0)` shifted the whole frontier of `Work`s (`@sizeOf(Work)` each) on every
+    /// pop, a measurable share of a large forest tree (see docs/measurements.md). Lossguide still removes in place (its queue is short, and
     /// the remaining order breaks gain ties), so its head stays 0.
     queue_head: usize = 0,
     leaves: std.ArrayList(LeafSpan),
@@ -446,11 +451,11 @@ pub const Builder = struct {
     const fitLinearLeaf = @import("leaf_linear.zig").fitLinearLeaf;
 
     /// Gradient and hessian sums over a node's rows. Only the root needs it (others inherit from
-    /// the parent's split), but the root is every row: on 668k rows x 200 trees the serial version
-    /// was 46 ms, 7% of a fit and one of three things holding 8-thread scaling to 4.8x vs xgboost's
-    /// 5.3x. Fixed chunk count, reduced in chunk order at any thread count: a plain `parallelFor`
-    /// over rows would group additions per thread count, making the model depend on `--n_threads`,
-    /// which matters more than the milliseconds.
+    /// the parent's split), but the root is every row, and done serially it was one of the things
+    /// holding back thread scaling against xgboost (see docs/measurements.md). Fixed chunk count,
+    /// reduced in chunk order at any thread count: a plain `parallelFor` over rows would group
+    /// additions per thread count, making the model depend on `--n_threads`, which matters more
+    /// than the speed.
     fn totalOf(b: *Builder, rows: []const u32) hist.Bin {
         const n = rows.len;
         // Deliberately not conditioned on worker count: that would group additions differently at
@@ -527,19 +532,19 @@ pub const Builder = struct {
         b.n_active = k;
     }
 
-    /// A sampled tree's rows go in ascending order, duplicates adjacent: the histogram kernel walks
-    /// rows in order through the row-major matrix and the gradients, and the stable partition keeps
-    /// the root's order all the way down. In draw order every row was a cache miss: one histogram
-    /// over the root's 535k bootstrap rows took 6.14 ms against 2.83 ms for the same rows sorted.
-    /// Same rows, same multiplicities, same RNG draws (so every later sample is unchanged); only
-    /// the order of additions inside a histogram moves. Rows are counted as drawn, then written out
-    /// by row id on the pool: chunk totals, a prefix, and each chunk fills its own range, so the
-    /// order is the same at any thread count.
+    /// Zero `row_counts` on the pool, ready for a sampled tree's draws to be counted into it.
     fn clearCounts(b: *Builder) void {
         var ctx = SampleCtx{ .b = b, .chunk = b.sampleChunk() };
         b.pool.parallelFor(b.row_counts.len, &ctx, SampleCtx.clear, ctx.chunk);
     }
 
+    /// Write the `k` rows counted in `row_counts` into `rows[0..k]` in ascending order, duplicates
+    /// adjacent, and set `n_active`. The histogram kernel walks rows in order through the row-major
+    /// matrix and the gradients, and the stable partition keeps the root's order all the way down;
+    /// in draw order every row was a cache miss (see docs/measurements.md). Same rows, same
+    /// multiplicities, same RNG draws (so every later sample is unchanged); only the order of
+    /// additions inside a histogram moves. On the pool: per-chunk totals, a serial prefix, and each
+    /// chunk fills its own output range, so the order is the same at any thread count.
     fn emitSample(b: *Builder, k: usize) void {
         var ctx = SampleCtx{ .b = b, .chunk = b.sampleChunk() };
         const n = b.row_counts.len;
@@ -831,14 +836,16 @@ pub const Builder = struct {
     }
 
     /// Expand the next `k` pending nodes together. A forest's lower levels are thousands of nodes of
-    /// a few hundred rows, each too small to spread over the pool, so one at a time 16 threads ran
-    /// a tree 2.9x faster than one (52 -> 17.7 ms). Here the per-node work (partition, histogram,
+    /// a few hundred rows, each too small to spread over the pool, so one at a time scaled poorly
+    /// with threads (see docs/measurements.md). Here the per-node work (partition, histogram,
     /// subtraction, split search) runs one node per task, while everything order-sensitive -- leaf
     /// order, node and category ids, slot takes, RNG draws, queue order -- happens on this thread
     /// in pop order, exactly as the one-at-a-time loop does it. Every node here is small enough
-    /// that the one-at-a-time loop would partition and build it serially too, with the same
-    /// kernels, so the trees are identical. Only histogram slot ids differ: parents' slots go back
-    /// after the batch, not per node, and slot ids reach nothing in the model.
+    /// (`batch_max_rows`, below partition.zig's `parallel_partition_min` and at most
+    /// `2 * hist.parallel_threshold`) that the one-at-a-time loop would partition it and build its
+    /// smaller child serially too, with the same kernels, so the trees are identical. Only
+    /// histogram slot ids differ: parents' slots go back after the batch, not per node, and slot
+    /// ids reach nothing in the model.
     fn expandBatch(b: *Builder, k: usize, p: split.SplitParams, leaf_cap: usize, tree_feats: []const u32) !void {
         const work = b.batch_work[0..k];
         @memcpy(work, b.queue.items[b.queue_head..][0..k]);

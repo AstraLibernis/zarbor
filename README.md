@@ -125,7 +125,7 @@ a boosting tree fed `g = -y, h = 1` with shrinkage off.
 | `gbdt` (default) | XGBoost-style depthwise boosting |
 | `gbdt --grow_policy=lossguide --sampling=goss` | LightGBM-style |
 | `random_forest` | bagged unshrunk trees, `sqrt(p)` features per split |
-| `linear` | the two standard simple models: **logistic regression** (`--objective=logistic`) and **linear regression / OLS** (`--objective=squared_error`). L-BFGS with OWL-QN for L1; `--lin_solver=adam` as a first-order fallback. See `docs/linear-solvers.md`. |
+| `linear` | the two standard simple models: **logistic regression** (`--objective=logistic`) and **linear regression** (`--objective=squared_error`; ridge at the default `--lambda=1`, OLS with `--lambda=0`). L-BFGS with OWL-QN for L1; `--lin_solver=adam` as a first-order fallback. See `docs/linear-solvers.md`. |
 
 Every `Config` field is exposed as `--field=value` by comptime reflection, so
 the flag surface and the struct cannot drift apart.
@@ -275,6 +275,9 @@ light/dark modes.
 The two harnesses overlap -- both compare every model with its reference --
 and merging them is still open: `compare.py` is the one-shot check on any CSV,
 `arena.py` the pre-registered protocol behind `docs/arena.md`.
+
+Measurements that used to live in code comments (timings, speedups, sweep
+results) are collected, unrefined, in `docs/measurements.md`.
 
 ## License
 

@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! CSV ingest and quantisation. Every column becomes bin indices up front so
-//! the design stays in cache (668k rows x 13 features: 17 MB as bins, 35 MB
-//! as f32). Split finding uses bins; raw values only report thresholds.
+//! Quantisation, plus re-exports of the CSV, schema and binning modules (CSV
+//! ingest itself lives in `csv.zig`). Every column becomes bin indices up front
+//! so the design stays in cache: bins are smaller than the f32 values. Split
+//! finding uses bins; raw values only report thresholds.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;
 
-/// `u16` so categoricals can exceed 255 levels (ZIP3, city, metro). 0.98-1.01x
-/// of `u8` in the accumulation kernel (bound by the scattered histogram
+/// `u16` so categoricals can exceed 255 levels (ZIP3, city, metro). Measured at
+/// parity with `u8` in the accumulation kernel (bound by the scattered histogram
 /// update), so it costs memory only. See docs/wide-categoricals.md.
 pub const BinIdx = u16;
 
@@ -35,8 +36,9 @@ pub const BinParams = struct {
     bin_policy: BinPolicy = .quantile,
     /// Rows a bin must hold under `greedy` before a cut. LightGBM's `min_data_in_bin`.
     min_data_in_bin: u32 = 3,
-    /// Bins per feature. Capped at 256 so the column-major `bins` stays one
-    /// byte per bin, which keeps the feature matrix inside L3.
+    /// Bins per feature. Capped at 256 so every numeric feature's bin indices
+    /// fit the one-byte column-major `Dataset.bins`; only categoricals wider
+    /// than that go to `wide_cols`.
     max_bin: u16 = 256,
     /// Categorical cardinality refused outright, so a free-text column cannot
     /// become an unaffordable histogram. Default 255 (the old `u8` limit) so
@@ -48,8 +50,8 @@ pub const BinParams = struct {
     }
 };
 
-/// Re-exported from `csv.zig`, `label_encoder.zig`, `schema.zig` so call
-/// sites did not move when the code did.
+/// Re-exported from `csv.zig`, `label_encoder.zig`, `schema.zig`,
+/// `bin_edges.zig` so call sites did not move when the code did.
 pub const ColumnKind = csv.ColumnKind;
 pub const Frame = csv.Frame;
 pub const readCsv = csv.readCsv;
@@ -76,16 +78,16 @@ pub const Dataset = struct {
     n_features: usize,
     /// Column-major, one byte per bin: `bins[f * n_rows + r]`, read by partition
     /// one feature over scattered rows. Too-wide columns go to `wide_cols`.
-    /// The 51 -> 110 ms partition slowdown once blamed on `u16` bins was
-    /// `goesLeft` taking a 160-byte `Split` by value; the bin width "was never
-    /// the cost" (docs/wide-categoricals.md, "Three wrong guesses").
+    /// A partition slowdown once blamed on `u16` bins was `goesLeft` taking
+    /// the whole `Split` by value (it now takes a `split.SplitTest`); the bin
+    /// width "was never the cost" (docs/wide-categoricals.md, "Three wrong guesses").
     bins: []u8,
     /// Column-major bins for features with more than 256 bins; empty otherwise.
     wide_cols: [][]BinIdx,
-    /// Row-major copy: `bins_rm[r * n_features + f]`. Histogram building gains
-    /// 1.74x from a contiguous row; partition would touch 13x the cache lines
-    /// here. Cost: 2 bytes per feature per row (13 features: 17.4 MB on 668k
-    /// rows; the 93 MB peak was measured at 1 byte) and one transpose at load.
+    /// Row-major copy: `bins_rm[r * n_features + f]`. Histogram building is
+    /// faster on a contiguous row; partition would touch `n_features` times the
+    /// cache lines here. Cost: `@sizeOf(BinIdx)` bytes per feature per row and
+    /// one transpose at load. See docs/measurements.md (data.zig `bins_rm`).
     bins_rm: []BinIdx,
     /// Bins actually in use per feature, including the missing bin.
     n_bins: []u16,
@@ -133,7 +135,7 @@ pub const Dataset = struct {
         return d.wide_cols[f].len != 0;
     }
 
-    /// Asserts, not optional: both callers dispatch on `isWide` first, and a
+    /// Asserts, not optional: callers dispatch on `isWide` first, and a
     /// silent wrong answer is a mis-partitioned tree.
     pub inline fn columnNarrow(d: *const Dataset, f: usize) []const u8 {
         std.debug.assert(!d.isWide(f));

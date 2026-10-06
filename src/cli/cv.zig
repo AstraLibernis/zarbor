@@ -164,7 +164,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
 
     // Past binning the frame is read for one column, the groups, once per repeat: keep a copy of
-    // that and free the rest (~40 MB on 668k x 15) before the folds run.
+    // that and free the rest before the folds run.
     const groups: ?[]f32 = if (group_idx) |gi| try gpa.dupe(f32, frame.values[gi]) else null;
     defer if (groups) |g| gpa.free(g);
     frame.deinit();
@@ -225,7 +225,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
         const r = try crossValidate(gpa, io, pool, &full, cfg, fold_of, n_folds, .{
             .oof = oof,
-            // Per-fold progress on every repeat is 5N lines nobody reads.
+            // Per-fold progress on every repeat is `n_folds` x N lines nobody reads.
             .progress = if (quiet or repeats > 1) null else out,
         });
         try pooled_buf.append(gpa, r.pooled);

@@ -126,8 +126,8 @@ const ApplyCtx = struct {
 
 /// The bin of each of a new file's level ids: the saved level's position + 1, or 0 (missing) for a
 /// level the model never saw. Translating per row scanned the saved levels with a string compare
-/// each time, O(rows x levels): 136 ms to bin 668k rows of one 255-level column, 10 ms to parse
-/// them. A first match wins, as it did in that scan, should a saved level ever repeat.
+/// each time, O(rows x levels), which cost far more than parsing the column (docs/measurements.md).
+/// A first match wins, as it did in that scan, should a saved level ever repeat.
 fn levelBins(gpa: std.mem.Allocator, saved: []const []const u8, src_levels: []const []const u8) ![]BinIdx {
     var index: std.StringHashMapUnmanaged(u32) = .empty;
     defer index.deinit(gpa);

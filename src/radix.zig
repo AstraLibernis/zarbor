@@ -3,7 +3,7 @@
 
 //! LSD radix sort on an f32 key carried in the high half of a u64, for the two places that sort
 //! hundreds of thousands of floats: the AUC (every logged round) and the column profile (every
-//! numeric column at load). Both comparison sorts it replaced were 7-9x slower.
+//! numeric column at load). Both comparison sorts it replaced were slower (docs/measurements.md).
 
 const std = @import("std");
 

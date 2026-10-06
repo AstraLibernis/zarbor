@@ -27,9 +27,10 @@ const split = @import("split.zig");
 pub const magic = "ZMDL";
 /// 2 added the label encoding. A version-1 file still loads; it simply has
 /// no class order, which the scoring path rejects rather than guessing at.
-/// 3 added categorical subset splits. A version-2 file still loads: it has no
-/// mask store and no node claiming one, which is exactly what an ordinal-split
-/// model is.
+/// 3 added categorical subset splits and linear leaves (per-node `n_lin`/`lin_ofs`
+/// and a per-tree term table). A version-2 file still loads: it has no mask store,
+/// no term table and no node claiming either, which is exactly what an
+/// ordinal-split, constant-leaf model is.
 /// 4 widened the bin index to `u16` and replaced the categorical bitmask with
 /// a sorted list of the level ids on the left. Versions 2 and 3 still load;
 /// their thresholds are read a byte at a time and their masks expanded into
@@ -276,8 +277,10 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU8(gpa, b, n.n_lin);
             try putU32(gpa, b, n.lin_ofs);
         }
-        // Mask store last, so the node loop above stays the same shape as the
-        // version-2 one and the two readers differ only in what they skip.
+        // After the nodes, the tree's two side tables that nodes index into:
+        // the categorical level ids (`cat_ofs`/`n_cat`), then the linear-leaf
+        // terms (`lin_ofs`/`n_lin`). `readTrees` branches on the version for
+        // the fields and tables older formats lack or encode differently.
         try putU32(gpa, b, @intCast(t.cat_ids.len));
         for (t.cat_ids) |id| try putU16(gpa, b, id);
         try putU32(gpa, b, @intCast(t.lin.len));
@@ -330,10 +333,11 @@ fn expandV3Masks(
 }
 
 fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![]tree.Tree {
-    // Per node: feature, left, right, weight, two flags, then what each version added.
+    // Per node: feature, left, right, weight, two flags, the threshold (u16 from
+    // version 4, u8 before), then what each version added.
     const node_bytes: usize = 16 + 2 + @as(usize, if (ver >= 4) 2 else 1) +
         @as(usize, if (ver >= 3) 10 else 0) + @as(usize, if (ver >= 4) 1 else 0);
-    const nt = try r.count(if (ver >= 3) 12 else 4); // node count, then mask and term counts
+    const nt = try r.count(if (ver >= 3) 12 else 4); // node count, then cat-id (v3: mask-word) and term counts
     const trees = try gpa.alloc(tree.Tree, nt);
     var made: usize = 0;
     errdefer {
@@ -401,9 +405,6 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
                     try expandV3Masks(gpa, r, nm, nodes, &trees[made - 1]);
                 }
             }
-            // A mask offset past the store would read out of bounds at
-            // prediction time, which is the same class of fault as a bad
-            // child index and is rejected the same way.
             const nl = try r.count(12);
             if (nl != 0) {
                 const terms = try gpa.alloc(tree.LinTerm, nl);
@@ -416,6 +417,9 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
                     term.* = .{ .feature = feature, .coef = coef, .center = center };
                 }
             }
+            // A node's `cat_ofs` range past `cat_ids`, or `lin_ofs` range past the
+            // term table, would read out of bounds at prediction time: the same
+            // class of fault as a bad child index, rejected the same way.
             const n_ids = trees[made - 1].cat_ids.len;
             for (nodes) |n| {
                 if (n.is_cat and n.cat_ofs + n.n_cat > n_ids) return error.BadModelFile;

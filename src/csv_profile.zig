@@ -70,7 +70,7 @@ pub fn profile(gpa: std.mem.Allocator, f: *const Frame) ![]ColumnStat {
     errdefer gpa.free(stats);
 
     // Sorted by radix on (key << 32 | bits), not std.mem.sort on f64: the stable block sort was
-    // 171 ms of a 221 ms load on 668k rows x 8 numeric columns. The order is the same element for
+    // most of the load time (docs/measurements.md, csv_profile.zig). The order is the same element for
     // element: f32 -> f64 is exact and order-preserving, the key orders as `<` does (-0 and +0
     // equal), and LSD radix is stable as the block sort was, so even signed zeros keep their places.
     const keys = try gpa.alloc(u64, 2 * f.n_rows);
@@ -218,6 +218,8 @@ pub fn writeProfile(out: *std.Io.Writer, f: *const Frame, stats: []const ColumnS
 
     var wide = false;
     for (stats) |s| {
+        // Hardcoded `< 256`: tracks the default `data.BinParams.max_cat_levels` the text below
+        // names, not the run's actual limit.
         if (s.kind != .categorical or s.distinct < 256) continue;
         if (!wide) {
             try out.writeAll(

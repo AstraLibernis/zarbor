@@ -47,8 +47,8 @@ pub const Split = struct {
 };
 
 /// The four fields the partition row loop needs, lifted out of `Split`, built once per partition.
-/// `Split` is 160 bytes (inline categorical id array); reading through it cost partition 2.2x wall
-/// clock.
+/// `Split` is large (`@sizeOf(Split)`, inline categorical id array); reading through it slowed
+/// partition severely (see docs/measurements.md).
 pub const SplitTest = struct {
     missing_left: bool,
     is_cat: bool,
@@ -140,28 +140,32 @@ const CatKey = struct {
     }
 };
 
+/// Levels the sorted categorical search orders on the stack. Sized to cover
+/// `data.BinParams.max_cat_levels`'s default; wider columns go through `bestCatSplitWide`.
+/// bestSplit used to declare a `data.max_bins`-long `CatKey` scratch on every call, cat search or
+/// not: Debug and ReleaseSafe fill an `undefined` array with 0xAA, and that fill was most of a
+/// large ReleaseSafe slowdown on a forest (see docs/measurements.md); the big frame also cost a
+/// stack probe per call in every mode.
+const cat_scratch_small = 256;
+
+/// The `data.max_bins` scratch, in its own frame so only a categorical search over a wide column
+/// pays for it.
+noinline fn bestCatSplitWide(best: *Split, fid: u32, h: []const Bin, nb: u16, total: Bin, p: SplitParams) void {
+    var scratch: [data.max_bins]CatKey = undefined; // zsnag:ok — R015: wide columns only
+    bestCatSplit(best, fid, h, nb, total, p, &scratch);
+}
+
 /// Best split for one categorical feature. Follows LightGBM `FindBestThresholdCategoricalInner`
 /// (v4.7.0, src/treelearner/feature_histogram.cpp) step for step; docs/vs-lightgbm.md records the
-/// cost of six earlier differences (zarbor got 64% of LightGBM's gain on the same columns). Subtle:
+/// cost of six earlier differences (zarbor fell well short of LightGBM's gain on the same columns;
+/// see docs/measurements.md). Subtle:
 /// - `cat_smooth` is also the participation threshold in rows, not just sort-key padding; a level
 ///   with fewer rows stays out of the order and falls right.
 /// - `cat_l2` goes into the children's scores, not the parent's. Adding it to both looks consistent
 ///   but biases the comparison against categorical splits instead of regularising them.
 /// Missing is not searched: bin 0 always goes right (LightGBM `default_left = false`), so
 /// `missing_left` is forced false rather than searched in a direction LightGBM never considers.
-/// Levels the sorted categorical search orders on the stack. `max_cat_levels` defaults to 255, so this
-/// covers it; wider columns go through `bestCatSplitWide`. bestSplit used to declare a `max_bins`
-/// (65,535 x 16 B = 1 MB) scratch on every call, cat search or not: Debug and ReleaseSafe fill an
-/// `undefined` array with 0xAA, and that fill was most of a 12x ReleaseSafe slowdown on a forest;
-/// the 1 MB frame also cost a stack probe per call in every mode.
-const cat_scratch_small = 256;
-
-/// The 1 MB scratch, in its own frame so only a categorical search over a wide column pays for it.
-noinline fn bestCatSplitWide(best: *Split, fid: u32, h: []const Bin, nb: u16, total: Bin, p: SplitParams) void {
-    var scratch: [data.max_bins]CatKey = undefined; // zsnag:ok — R015: wide columns only
-    bestCatSplit(best, fid, h, nb, total, p, &scratch);
-}
-
+/// `scratch` holds at least `nb` entries.
 fn bestCatSplit(
     best: *Split,
     fid: u32,
@@ -174,7 +178,8 @@ fn bestCatSplit(
     std.debug.assert(scratch.len >= nb);
     const min_n: f64 = @floatFromInt(p.min_child_samples);
 
-    // Few levels: one vs the rest, without `cat_l2` (LightGBM adds it only on the sorted path).
+    // Few bins (the missing bin counts): one level vs the rest, without `cat_l2` (LightGBM adds
+    // it only on the sorted path).
     if (nb <= p.max_cat_to_onehot) {
         const parent_score = nodeScore(total.g, total.h, p);
         var b: usize = 1;
@@ -213,8 +218,9 @@ fn bestCatSplit(
     }
     if (n_ord < 2) return;
 
-    // Stable, allocation-free; one element per level present, so at most 255 at the default
-    // `max_cat_levels`, where it is far cheaper than the histogram. Quadratic above that.
+    // Stable, allocation-free; one element per level present, so few at the default
+    // `data.BinParams.max_cat_levels`, where it is far cheaper than the histogram. Quadratic, so
+    // it grows fast on columns wider than that.
     std.sort.insertion(CatKey, scratch[0..n_ord], {}, CatKey.lessThan);
 
     // Children carry the extra L2; the parent does not.
@@ -290,7 +296,7 @@ fn bestCatSplit(
 /// the default direction per split. With none it is scanned once: both directions score
 /// identically, and `consider` keeps the first strictly-better candidate, so `missing_left = true`
 /// would win by loop order, not evidence. That flag routes missing values at prediction time, and a
-/// column complete in training often has holes later (Kaggle House Prices: fifteen columns missing
+/// column complete in training often has holes later (Kaggle House Prices has many columns missing
 /// only in the test half). With no evidence, send missing to the larger child: it holds more of the
 /// node, so it is the smaller bet.
 pub fn bestSplit(

@@ -3,11 +3,12 @@
 
 //! How expensive is `sigmoid`, and whose fault is it?
 //!
-//! Gradients were 15% of a boosting fit and almost all of it was `@exp`.
-//! Three candidates: Zig's `@exp` (compiler_rt), glibc's `expf`, and an
-//! inlined vector `2^x`. glibc is *not* faster -- scalar transcendental
+//! Gradients were a real share of a boosting fit and almost all of it was
+//! `@exp`. Three candidates: Zig's `@exp` (compiler_rt), glibc's `expf`, and
+//! an inlined vector `2^x`. glibc was *not* faster -- scalar transcendental
 //! evaluation is the cost, not anyone's implementation -- and the vector form
-//! is 11.7x, accurate to under 1e-6 absolute.
+//! won by a wide margin while staying accurate (results in
+//! docs/measurements.md).
 //!
 //! Run: zig build bench-exp -Doptimize=ReleaseFast
 

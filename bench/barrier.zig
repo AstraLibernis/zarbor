@@ -6,10 +6,10 @@
 //! Tree building submits a `parallelFor` per node -- per histogram build, per
 //! reduce, per partition pass -- where xgboost batches a whole level. That
 //! looked like an obvious explanation for a scaling gap, so it was measured
-//! before anything was restructured: ~0.51 us at 8 threads, against roughly
-//! 57,000 submissions in a 200-tree fit, is about 29 ms. Not the answer. The
-//! answer turned out to be serial work inside the loop (the root gradient
-//! sum, the split search) rather than the cost of going parallel at all.
+//! before anything was restructured. It was not the answer (results in
+//! docs/measurements.md): that turned out to be serial work inside the loop
+//! (the root gradient sum, the split search) rather than the cost of going
+//! parallel at all.
 //!
 //! Run: zig build bench-barrier -Doptimize=ReleaseFast
 

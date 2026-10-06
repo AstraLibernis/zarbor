@@ -2,8 +2,8 @@
 // Copyright (C) 2026 AstraLibernis
 
 //! K-fold cross-validation in one process (the CLI is src/cli/cv.zig).
-//! Driving `train` per fold from outside re-reads and re-bins the same CSV ten
-//! times per config (with `predict`); a search pays that every trial. Here the
+//! Driving `train` per fold from outside re-reads and re-bins the same CSV twice
+//! per fold per config (`train`, then `predict`); a search pays that every trial. Here the
 //! caller bins once and folds loop over that matrix. The headline is the
 //! out-of-fold score: each row predicted by the model that did not train on
 //! it, pooled into one vector. Stricter than the per-fold mean, and the one to
@@ -153,9 +153,11 @@ pub const Outcome = struct {
 
 pub const Opts = struct {
     /// Evaluate only the first N folds (0 = all): a cheap search fidelity, a
-    /// hopeless config shows on two folds without paying for five.
+    /// hopeless config shows on two folds without paying for all `n_folds`.
     use_folds: u32 = 0,
-    /// Filled with the out-of-fold prediction for every evaluated row.
+    /// Filled with the out-of-fold prediction for every evaluated row; length
+    /// `full.n_rows`. Optional in type only: `crossValidate` pools from it and
+    /// returns `error.PooledScoreNeedsOofBuffer` (after fitting every fold) if null.
     oof: ?[]f32 = null,
     /// One line per fold while it runs.
     progress: ?*std.Io.Writer = null,

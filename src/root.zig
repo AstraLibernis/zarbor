@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! zarbor — gradient-boosted decision trees for binned tabular data.
+//! zarbor — tabular models on binned data: gradient-boosted trees, random forest
+//! and linear/logistic regression, plus cross-validation and tuning.
 
 pub const config = @import("config.zig");
 pub const csv = @import("csv.zig");

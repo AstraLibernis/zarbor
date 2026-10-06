@@ -157,7 +157,8 @@ pub fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
 }
 
 /// Default space per model, so a search needs no explicit params. Ranges
-/// bracket the shipped defaults, so a search can move in either direction.
+/// include the shipped defaults; where a default sits at a range's edge
+/// (e.g. `max_bin` 256, `subsample` 1.0), the search can only move one way.
 pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const specs: []const []const u8 = switch (algo) {
         .gbdt => &.{
