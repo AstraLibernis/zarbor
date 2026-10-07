@@ -12,14 +12,14 @@ bin # ms
 encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
-[   0] valid=0.873222  best=0.873222 @0
-[  10] valid=0.879100  best=0.879100 @10
-[  20] valid=0.885757  best=0.885757 @20
-[  30] valid=0.883873  best=0.885757 @20
-[  39] valid=0.883289  best=0.885757 @20
+[   0] valid=0.856790  best=0.856790 @0
+[  10] valid=0.866890  best=0.866890 @10
+[  20] valid=0.868448  best=0.868448 @20
+[  30] valid=0.868351  best=0.868448 @20
+[  39] valid=0.877703  best=0.877703 @39
 
 rounds  40
 train # ms  ( # ms/tree)
-valid   auc=0.883289  logloss=0.408048
+valid   auc=0.877703  logloss=0.415123
 --- stderr
 --- files

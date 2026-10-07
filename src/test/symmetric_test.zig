@@ -383,7 +383,7 @@ test "a CTR row sees only the rows before it; Counter sees every row" {
     for (cases) |c| {
         var got: [6]u8 = undefined;
         var final: [4]u8 = undefined;
-        const uniq = try symmetric.ctrColumn(gpa, &ds, 0, c.t, &got, &final);
+        const uniq = try symmetric.ctrColumn(gpa, &ds, 0, c.t, &.{}, &got, &final);
         try testing.expectEqual(@as(u32, 3), uniq);
         try testing.expectEqualSlices(u8, &c.want, &got);
         try testing.expectEqualSlices(u8, &c.final, &final);
@@ -554,7 +554,7 @@ test "the ordered root split is the argmax of body estimates scored against tail
                 }
             }
         }
-        var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 1, .lambda = @as(f32, 3.0), .boosting_type = .ordered });
+        var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 1, .lambda = @as(f32, 3.0), .boosting_type = .ordered, .has_time = true });
         defer m.deinit();
         const root = m.trees.items[0].nodes[0];
         try testing.expectEqual(best[0], root.feature);
@@ -612,4 +612,77 @@ test "a model with combination splits survives save and load exactly" {
     m.predict(pool, &ds, &want);
     back.predict(pool, &ds, &got);
     try testing.expectEqualSlices(f32, &want, &got);
+}
+
+test "a block shuffle permutes whole blocks and keeps each block's order" {
+    const gpa = testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(77);
+    for ([_][2]usize{ .{ 1000, 7 }, .{ 10, 3 }, .{ 5, 10 }, .{ 256, 1 } }) |nb| {
+        const n = nb[0];
+        const block = nb[1];
+        const out = try symmetric.blockShuffle(gpa, &.{}, n, block, prng.random());
+        defer gpa.free(out);
+        var seen = try gpa.alloc(bool, n);
+        defer gpa.free(seen);
+        @memset(seen, false);
+        for (out) |r| {
+            try testing.expect(!seen[r]);
+            seen[r] = true;
+        }
+        // Inside a run that starts a block, rows follow on by one.
+        var pos: usize = 0;
+        while (pos < n) {
+            const start = out[pos];
+            try testing.expect(start % block == 0);
+            const len = @min(block, n - start);
+            for (0..len) |i| try testing.expectEqual(start + @as(u32, @intCast(i)), out[pos + i]);
+            pos += len;
+        }
+        // And it does move them: 143 blocks left in place would be a 1-in-143! accident.
+        if (n == 1000) {
+            var moved = false;
+            for (out, 0..) |rr, i| moved = moved or rr != i;
+            try testing.expect(moved);
+        }
+    }
+}
+
+fn ctrFixture(gpa: std.mem.Allocator) !data.Dataset {
+    const n = n_rows;
+    var a: [n]u8 = undefined;
+    var c: [n]u8 = undefined;
+    var x: [n]u8 = undefined;
+    var y: [n]f32 = undefined;
+    var prng: std.Random.DefaultPrng = .init(52);
+    const r = prng.random();
+    for (0..n) |i| {
+        a[i] = r.intRangeAtMost(u8, 1, 6);
+        c[i] = r.intRangeAtMost(u8, 1, 4);
+        x[i] = r.intRangeAtMost(u8, 1, 8);
+        const s: f32 = (if (a[i] % 3 == 0) @as(f32, 1.0) else -0.5) + @as(f32, @floatFromInt(x[i])) * 0.1 + r.floatNorm(f32) * 0.6;
+        y[i] = if (s > 0) 1 else 0;
+    }
+    var ds = try fromBins(gpa, &.{ &a, &c, &x }, &.{ 7, 5, 9 }, &y);
+    ds.kinds[0] = .categorical;
+    ds.kinds[1] = .categorical;
+    return ds;
+}
+
+test "permutations: the same model at 1, 3 and 16 threads; the seed matters only without has_time" {
+    const gpa = testing.allocator;
+    var ds = try ctrFixture(gpa);
+    defer ds.deinit();
+    inline for (.{ .plain, .ordered }) |bt| {
+        const opts = .{ .n_rounds = 10, .max_depth = 3, .cat_split = .ctr, .boosting_type = bt, .seed = @as(u64, 4) };
+        const one = try predictWith(gpa, 1, &ds, opts);
+        for ([_]u32{ 3, 16 }) |t| {
+            const other = try predictWith(gpa, t, &ds, opts);
+            try testing.expectEqualSlices(f32, &one, &other);
+        }
+        const s5 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 10, .max_depth = 3, .cat_split = .ctr, .boosting_type = bt, .seed = @as(u64, 5) });
+        try testing.expect(!std.mem.eql(f32, &one, &s5));
+        const t4 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 10, .max_depth = 3, .cat_split = .ctr, .boosting_type = bt, .has_time = true, .seed = @as(u64, 4) });
+        const t5 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 10, .max_depth = 3, .cat_split = .ctr, .boosting_type = bt, .has_time = true, .seed = @as(u64, 5) });
+        try testing.expectEqualSlices(f32, &t4, &t5);
+    }
 }

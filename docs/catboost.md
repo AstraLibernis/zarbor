@@ -1,6 +1,6 @@
 # CatBoost-style training
 
-**Status: stages 1–5 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
+**Status: all six stages done, [MEASURED] 2026-10-07** against catboost 1.2.10.
 
 CatBoost is the same family as XGBoost and LightGBM: gradients and hessians, histogram split
 search, Newton leaf values, shrinkage. What is genuinely different is how a tree is grown and how
@@ -207,11 +207,47 @@ data, row for row on training and held-out rows (harness `parity/cat_combo.py`):
 CatBoost visits its bases in hash order, zarbor in split order, so candidates with exactly equal
 scores could break the other way; none did here.
 
-## Still to build
+## Stage 6: CatBoost's permutations (done)
 
-| stage | what | how it can be checked |
-|---|---|---|
-| 6 | CatBoost's default permutations | statistically only |
+`--has_time` (default **false**, CatBoost's default) decides how target statistics and ordered
+boosting read the rows. With it, one fold in file order, shared with the model: stages 3–5 as
+above, and what every exact comparison uses. Without it, and with target statistics or ordered
+boosting, CatBoost's folds (learn_context.cpp):
+
+- `--permutation_count - 1` (3) **learning folds**. With target statistics the rows are first
+  shuffled once; fold 0 keeps that order, the others shuffle it in blocks of
+  `--permutation_block` rows (default `min(256, n/1000 + 1)`). Ordered boosting alone shuffles
+  only the folds after the first.
+- Each learning fold has its own online statistics along its order and its own scores (per row
+  under plain boosting, per prefix under ordered). Each tree searches one fold, drawn at random;
+  after it, every learning fold takes its own Newton step on its own leaf membership.
+- The **averaging fold** (shuffled when there are target statistics) gives the model's leaves: leaf
+  membership from its own online statistics, Newton over all rows.
+
+CatBoost's random draws cannot be reproduced, so this is checked statistically: hold-out AUC over
+10 seeds each on the stage-3 data, 200 trees (harness `parity/cat_perm.py`):
+
+| case | catboost | zarbor | difference / s.e. |
+|---|---|---|---|
+| plain, CTRs | 0.945326 ± 0.000260 | 0.945267 ± 0.000202 | -0.56 |
+| plain, combinations (complexity 4) | 0.945375 ± 0.000422 | 0.945325 ± 0.000314 | -0.30 |
+| ordered, CTRs | 0.944993 ± 0.000398 | 0.945087 ± 0.000376 | 0.55 |
+| CatBoost's defaults (MVS 0.8, noise 1, complexity 4) | 0.945536 ± 0.000236 | 0.945493 ± 0.000257 | -0.38 |
+
+Every random stream is keyed by seed and purpose, so models are the same at 1, 3 and 16 threads
+(tested), and with `has_time` the seed changes nothing unless bootstrap or noise are on.
+
+## Using it
+
+The closest zarbor gets to `CatBoostClassifier()` with its defaults:
+
+    --grow_policy=symmetric --cat_split=ctr --lambda=3 --base_score=0
+    --bin_policy=logsum --bootstrap_type=mvs --subsample=0.8 --random_strength=1
+
+plus an explicit `--learning_rate` and `--n_rounds` (CatBoost picks the rate by a formula), and
+CatBoost's 10 backtracking leaf steps are not built (`--leaf_estimation_iterations` takes steps
+without backtracking). Every part is its own flag and can be mixed with the rest of zarbor where
+it makes sense; combinations that are not verified are refused.
 
 CatBoost's CPU default is **plain** boosting at every data size; ordered boosting runs only when
 asked for. Its defaults otherwise are MVS bootstrap at 0.8, `random_strength=1`, 10 Newton steps

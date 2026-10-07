@@ -448,6 +448,9 @@ pub fn train(
         .model_size_reg = cfg.tree.model_size_reg,
         .ordered = cfg.tree.boosting_type == .ordered,
         .max_ctr_complexity = cfg.tree.max_ctr_complexity,
+        .has_time = cfg.tree.has_time,
+        .permutation_count = cfg.tree.permutation_count,
+        .permutation_block = cfg.tree.permutation_block,
     }) else null;
     defer if (sym) |*s| s.deinit();
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;
@@ -483,7 +486,7 @@ pub fn train(
             errdefer t.deinit(gpa);
             try model.trees.append(gpa, t);
             const t_ap = prof.start();
-            var sctx = SymApplyCtx{ .leaf = s.leaf, .values = s.values, .raw = raw };
+            var sctx = SymApplyCtx{ .leaf = s.leaf_model, .values = s.values, .raw = raw };
             pool.parallelFor(ds.n_rows, &sctx, SymApplyCtx.run, 8192);
             prof.stop(.apply, t_ap);
         } else {

@@ -93,7 +93,67 @@ pub const Settings = struct {
     ordered: bool = false,
     /// Most columns a CTR may combine (CatBoost's `max_ctr_complexity`); 1 is single columns only.
     max_ctr_complexity: u32 = 4,
+    /// Rows are in time order: one learning fold in file order, shared with the model. Off, with
+    /// target statistics or ordered boosting, CatBoost's permutations apply (`Fold`).
+    has_time: bool = true,
+    /// Learning folds are `permutation_count - 1` (CatBoost's default 4, so 3).
+    permutation_count: u32 = 4,
+    /// Rows shuffled together as a block in folds after the first; 0 is CatBoost's
+    /// `min(256, n / 1000 + 1)`.
+    permutation_block: u32 = 0,
 };
+
+/// One ordering of the training rows and the state that follows it (CatBoost's `TFold`): its
+/// online target statistics, and its own scores (plain: one per row; ordered: each prefix
+/// model's). Learning folds choose tree structure, one drawn per tree, and each takes its own
+/// Newton step after every tree; the averaging fold's leaf membership gives the model's leaves.
+/// With `has_time` (or nothing to permute) there is one fold in file order, and its scores are
+/// the model's own.
+const Fold = struct {
+    /// Position to row; empty is file order.
+    order: []u32 = &.{},
+    /// Online buckets per single-column CTR (`Cand.slot`), by row.
+    ctr: [][]u8 = &.{},
+    /// Plain boosting with its own scores: one per row. Empty: the model's scores.
+    approx: []f64 = &.{},
+    /// Ordered boosting: prefix models' scores and derivatives, by position (`Builder.ap_off`).
+    papprox: []f64 = &.{},
+    pderiv: []f64 = &.{},
+
+    inline fn row(f: *const Fold, pos: usize) usize {
+        return if (f.order.len == 0) pos else f.order[pos];
+    }
+
+    fn deinit(f: *Fold, gpa: std.mem.Allocator) void {
+        if (f.order.len != 0) gpa.free(f.order);
+        for (f.ctr) |c| gpa.free(c);
+        if (f.ctr.len != 0) gpa.free(f.ctr);
+        if (f.approx.len != 0) gpa.free(f.approx);
+        if (f.papprox.len != 0) gpa.free(f.papprox);
+        if (f.pderiv.len != 0) gpa.free(f.pderiv);
+        f.* = .{};
+    }
+};
+
+/// CatBoost's block shuffle (fold.cpp, `Shuffle`): positions cut into blocks of `block` rows, the
+/// blocks permuted, rows keeping their order inside a block. Caller owns the result.
+pub fn blockShuffle(gpa: std.mem.Allocator, base: []const u32, n: usize, block: usize, r: std.Random) ![]u32 {
+    const n_blocks = (n + block - 1) / block;
+    const blocks = try gpa.alloc(u32, n_blocks);
+    defer gpa.free(blocks);
+    for (blocks, 0..) |*x, i| x.* = @intCast(i);
+    r.shuffle(u32, blocks);
+    const out = try gpa.alloc(u32, n);
+    var o: usize = 0;
+    for (blocks) |bi| {
+        const lo = @as(usize, bi) * block;
+        for (lo..@min(lo + block, n)) |pos| {
+            out[o] = if (base.len == 0) @intCast(pos) else base[pos];
+            o += 1;
+        }
+    }
+    return out;
+}
 
 /// One prefix of the ordered rows: a model trained on rows `0..body` scores rows `body..tail`.
 pub const BodyTail = struct { body: usize, tail: usize };
@@ -155,6 +215,10 @@ pub const Cand = struct {
     unseen: u8 = 0,
     /// The four CTRs of a combination share `parts`; the first owns it.
     owns_parts: bool = false,
+    /// Single-column CTR: its index in every fold's `ctr`. Its `col` then views the current
+    /// learning fold's column and is not owned.
+    slot: u32 = 0,
+    owns_col: bool = true,
 
     fn isCounter(c: Cand) bool {
         return c.ctr_type == ctr_priors.len;
@@ -168,7 +232,7 @@ pub const Cand = struct {
     }
 
     fn freeOwned(c: Cand, gpa: std.mem.Allocator) void {
-        if (c.col.len != 0) gpa.free(c.col);
+        if (c.owns_col and c.col.len != 0) gpa.free(c.col);
         if (c.final.len != 0) gpa.free(c.final);
         if (c.present.len != 0) gpa.free(c.present);
         if (c.owns_parts) gpa.free(c.parts);
@@ -186,8 +250,22 @@ pub const Builder = struct {
     pool: *Pool,
     ds: *const Dataset,
     s: Settings,
-    /// Each row's leaf index in the tree being grown.
+    /// Each row's leaf index in the tree being grown, on the learning fold that chose it.
     leaf: []u16,
+    /// Each row's leaf on the averaging fold: what the model's leaves are fitted on and what the
+    /// caller applies `values` by. `leaf` itself when the two folds agree.
+    leaf_model: []u16,
+    leaf_buf: []u16,
+    leaf_tmp: []u16,
+    /// Learning folds (`folds[0]` doubles as the averaging fold when `avg_alias`), the averaging
+    /// fold otherwise, and the fold the current tree searches.
+    folds: []Fold,
+    avg: Fold = .{},
+    avg_alias: bool = true,
+    fold_k: usize = 0,
+    /// Derivatives on a learning fold with its own scores; empty when the fold is the model.
+    fold_grads: []hist.GradPair = &.{},
+    combo_buf: []u8 = &.{},
     /// Split candidates of the level being searched, CatBoost's order: numeric columns, then
     /// one-hot, then single-column CTRs, then this level's combinations. Ties go to the earlier
     /// one. A view of `all`, whose first `n_static` are fixed and whose rest each level rebuilds.
@@ -227,8 +305,6 @@ pub const Builder = struct {
     /// `tail` long), its derivatives there, a second histogram bank for the tails, per-candidate
     /// score accumulators, and the derivative each row is weighted by (its own tail's).
     bts: []BodyTail = &.{},
-    approx: []f64 = &.{},
-    deriv: []f64 = &.{},
     ap_off: []usize = &.{},
     cells_tail: []Cell = &.{},
     acc_num: []f64 = &.{},
@@ -295,6 +371,32 @@ pub const Builder = struct {
         errdefer gpa.free(mvs_scratch);
         var ord: Ordered = .{};
         if (s.ordered) ord = try Ordered.init(gpa, ds, cands, all.len, cells.len, max_combos * ctr_buckets);
+        errdefer ord.deinit(gpa);
+
+        // Single-column CTRs get a slot in every fold; their columns move into the folds.
+        var n_slots: u32 = 0;
+        for (cands) |*c| if (c.kind == .ctr) {
+            c.slot = n_slots;
+            n_slots += 1;
+            if (c.owns_col and c.col.len != 0) gpa.free(c.col);
+            c.col = &.{};
+            c.owns_col = false;
+        };
+        const folds_made = try makeFolds(gpa, ds, s, n_slots, cands, ord.ap_off);
+        errdefer {
+            for (folds_made.learning) |*f| f.deinit(gpa);
+            gpa.free(folds_made.learning);
+            var a = folds_made.avg;
+            if (!folds_made.avg_alias) a.deinit(gpa);
+        }
+        const leaf_buf = try gpa.alloc(u16, ds.n_rows);
+        errdefer gpa.free(leaf_buf);
+        const leaf_tmp = try gpa.alloc(u16, ds.n_rows);
+        errdefer gpa.free(leaf_tmp);
+        const fold_grads = try gpa.alloc(hist.GradPair, if (folds_made.learning[0].approx.len != 0) ds.n_rows else 0);
+        errdefer gpa.free(fold_grads);
+        const combo_buf = try gpa.alloc(u8, if (max_combos != 0) ds.n_rows else 0);
+        errdefer gpa.free(combo_buf);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -314,9 +416,15 @@ pub const Builder = struct {
             .values = values,
             .weights = weights,
             .mvs_scratch = mvs_scratch,
+            .leaf_model = leaf,
+            .leaf_buf = leaf_buf,
+            .leaf_tmp = leaf_tmp,
+            .folds = folds_made.learning,
+            .avg = folds_made.avg,
+            .avg_alias = folds_made.avg_alias,
+            .fold_grads = fold_grads,
+            .combo_buf = combo_buf,
             .bts = ord.bts,
-            .approx = ord.approx,
-            .deriv = ord.deriv,
             .ap_off = ord.ap_off,
             .cells_tail = ord.cells_tail,
             .acc_num = ord.acc_num,
@@ -343,9 +451,16 @@ pub const Builder = struct {
         b.gpa.free(b.weights);
         b.gpa.free(b.mvs_scratch);
         if (b.bts.len != 0) {
-            const ord: Ordered = .{ .bts = b.bts, .approx = b.approx, .deriv = b.deriv, .ap_off = b.ap_off, .cells_tail = b.cells_tail, .acc_num = b.acc_num, .acc_den = b.acc_den, .acc_off = b.acc_off, .tail_grads = b.tail_grads };
+            const ord: Ordered = .{ .bts = b.bts, .ap_off = b.ap_off, .cells_tail = b.cells_tail, .acc_num = b.acc_num, .acc_den = b.acc_den, .acc_off = b.acc_off, .tail_grads = b.tail_grads };
             ord.deinit(b.gpa);
         }
+        for (b.folds) |*f| f.deinit(b.gpa);
+        b.gpa.free(b.folds);
+        if (!b.avg_alias) b.avg.deinit(b.gpa);
+        b.gpa.free(b.leaf_buf);
+        b.gpa.free(b.leaf_tmp);
+        b.gpa.free(b.fold_grads);
+        b.gpa.free(b.combo_buf);
         b.* = undefined;
     }
 
@@ -364,32 +479,52 @@ pub const Builder = struct {
         @memset(b.leaf, 0);
         var splits: [max_depth]Split = undefined;
         var depth: u32 = 0;
-        // Under ordered boosting the derivatives a split is judged by are each prefix model's, and
-        // bootstrap weights and noise follow the tail rows' (CatBoost's mvs.cpp, greedy_tensor_search).
-        if (b.s.ordered) {
-            // Every prefix model starts where the booster does.
-            if (b.iteration == 0) for (b.bts, 0..) |bt, k| {
-                for (b.approx[b.ap_off[k]..][0..bt.tail], raw[0..bt.tail]) |*a, r0| a.* = r0;
+
+        // Every fold's own scores start where the booster's do.
+        if (b.iteration == 0) for (b.folds) |*fd| {
+            if (fd.approx.len != 0) for (fd.approx, raw) |*a, r0| {
+                a.* = r0;
             };
-            b.prefixDerivatives(labels, objective, scale_pos_weight);
+            if (fd.papprox.len != 0) for (b.bts, 0..) |bt, k| {
+                for (fd.papprox[b.ap_off[k]..][0..bt.tail], 0..) |*a, pos| a.* = raw[fd.row(pos)];
+            };
+        };
+        // The learning fold this tree searches on (CatBoost: `Folds[rand % count]`), and its
+        // columns for the single-column CTRs.
+        b.fold_k = if (b.folds.len == 1) 0 else @intCast(mix(b.s.seed, b.iteration, 0xF01D, 0) % b.folds.len);
+        const fold = &b.folds[b.fold_k];
+        for (b.all[0..b.n_static]) |*c| if (c.kind == .ctr) {
+            c.col = fold.ctr[c.slot];
+        };
+        // The derivatives a split is judged by: the fold's own (each prefix model's, under ordered;
+        // bootstrap weights and noise follow the tail rows'), or the model's when they coincide.
+        var search_grads = grads;
+        if (b.s.ordered) {
+            b.prefixDerivatives(fold, labels, objective, scale_pos_weight);
+        } else if (fold.approx.len != 0) {
+            for (b.fold_grads, fold.approx, labels) |*o, a, y| {
+                const d = derivatives(objective, a, y, scale_pos_weight);
+                o.* = .{ .g = @floatCast(d.g), .h = @floatCast(d.h) };
+            }
+            search_grads = b.fold_grads;
         }
-        const sample_grads = if (b.s.ordered) b.tail_grads else grads;
+        const sample_grads = if (b.s.ordered) b.tail_grads else search_grads;
         if (b.s.bootstrap != .none) b.sampleWeights(sample_grads);
         b.sigma = if (b.s.random_strength > 0) b.noiseScale(sample_grads) else 0;
 
         defer b.dropCombos();
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
-            try b.levelCombos(splits[0..depth]);
+            try b.levelCombos(splits[0..depth], fold.order);
             if (b.s.ordered) {
                 @memset(b.acc_num, 0);
                 @memset(b.acc_den, 0);
                 for (b.bts, 0..) |_, k| {
-                    var octx = OrderedCtx{ .b = b, .bt = k, .n_leaves = n_leaves };
+                    var octx = OrderedCtx{ .b = b, .fold = fold, .bt = k, .n_leaves = n_leaves };
                     b.pool.parallelFor(b.cands.len, &octx, OrderedCtx.run, 1);
                 }
             } else {
-                var hctx = HistCtx{ .b = b, .grads = grads, .n_leaves = n_leaves };
+                var hctx = HistCtx{ .b = b, .grads = search_grads, .n_leaves = n_leaves };
                 b.pool.parallelFor(b.cands.len, &hctx, HistCtx.run, 1);
             }
             var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves, .level = depth };
@@ -422,6 +557,7 @@ pub const Builder = struct {
             // A chosen combination is stored now: next level rebuilds the candidates it lives in.
             if (b.cands[f].parts.len != 0) {
                 sp.combo = @intCast(b.tree_combos.items.len);
+                sp.ctr_type = b.cands[f].ctr_type;
                 try b.tree_combos.append(b.gpa, try b.storedCombo(&b.cands[f]));
             }
             splits[depth] = sp;
@@ -442,8 +578,24 @@ pub const Builder = struct {
             }
         }
 
-        try b.leafValues(depth, grads, raw, labels, objective, scale_pos_weight);
-        if (b.s.ordered) try b.updatePrefixes(depth, labels, objective, scale_pos_weight);
+        // The model's leaves: membership on the averaging fold, whose online statistics may place a
+        // row differently from the fold that chose the splits.
+        b.leaf_model = b.leaf;
+        if (!(b.avg_alias and b.fold_k == 0)) {
+            try b.assignLeaves(&b.avg, splits[0..depth], b.leaf_buf);
+            b.leaf_model = b.leaf_buf;
+        }
+        try b.leafValues(depth, grads, raw, labels, objective, scale_pos_weight, b.leaf_model);
+        // Every learning fold takes its own step, on its own membership.
+        for (b.folds, 0..) |*fd, j| {
+            if (fd.approx.len == 0 and fd.papprox.len == 0) continue;
+            var lj = b.leaf;
+            if (j != b.fold_k) {
+                try b.assignLeaves(fd, splits[0..depth], b.leaf_tmp);
+                lj = b.leaf_tmp;
+            }
+            if (b.s.ordered) try b.updatePrefixes(fd, depth, lj, labels, objective, scale_pos_weight) else try b.updatePlain(fd, depth, lj, labels, objective, scale_pos_weight);
+        }
         const n_leaves = @as(usize, 1) << @intCast(depth);
         var sum_abs: f64 = 0;
         for (b.values[0..n_leaves]) |v| sum_abs += @abs(v);
@@ -454,35 +606,77 @@ pub const Builder = struct {
 
     /// Each prefix model's derivatives on its rows, and per row its own tail's (rows of the first
     /// body take the first prefix's): what ordered scoring, bootstrap and noise read.
-    fn prefixDerivatives(b: *Builder, labels: []const f32, objective: Objective, scale_pos_weight: f32) void {
+    fn prefixDerivatives(b: *Builder, fold: *const Fold, labels: []const f32, objective: Objective, scale_pos_weight: f32) void {
         for (b.bts, 0..) |bt, k| {
-            const a = b.approx[b.ap_off[k]..][0..bt.tail];
-            const d = b.deriv[b.ap_off[k]..][0..bt.tail];
-            for (a, d, labels[0..bt.tail]) |x, *o, y| o.* = derivatives(objective, x, y, scale_pos_weight).g;
+            const a = fold.papprox[b.ap_off[k]..][0..bt.tail];
+            const d = fold.pderiv[b.ap_off[k]..][0..bt.tail];
+            for (a, d, 0..) |x, *o, pos| o.* = derivatives(objective, x, labels[fold.row(pos)], scale_pos_weight).g;
             const from = if (k == 0) 0 else bt.body;
-            for (d[from..], b.tail_grads[from..bt.tail]) |x, *o| o.* = .{ .g = @floatCast(x), .h = 0 };
+            for (d[from..], from..) |x, pos| b.tail_grads[fold.row(pos)] = .{ .g = @floatCast(x), .h = 0 };
         }
     }
 
     /// After a tree: each prefix model takes Newton steps fitted on its body rows only and applies
     /// them to every row it scores (CatBoost's approx_calcer, ordered branch).
-    fn updatePrefixes(b: *Builder, depth: u32, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
+    fn updatePrefixes(b: *Builder, fold: *Fold, depth: u32, leaf: []const u16, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
         const n_leaves = @as(usize, 1) << @intCast(depth);
         const g = try b.gpa.alloc(f64, n_leaves);
         defer b.gpa.free(g);
         const h = try b.gpa.alloc(f64, n_leaves);
         defer b.gpa.free(h);
         for (b.bts, 0..) |bt, k| {
-            const a = b.approx[b.ap_off[k]..][0..bt.tail];
+            const a = fold.papprox[b.ap_off[k]..][0..bt.tail];
             @memset(g, 0);
             @memset(h, 0);
-            for (a[0..bt.body], labels[0..bt.body], b.leaf[0..bt.body]) |x, y, l| {
-                const d = derivatives(objective, x, y, scale_pos_weight);
-                g[l] += d.g;
-                h[l] += d.h;
+            for (a[0..bt.body], 0..) |x, pos| {
+                const r = fold.row(pos);
+                const d = derivatives(objective, x, labels[r], scale_pos_weight);
+                g[leaf[r]] += d.g;
+                h[leaf[r]] += d.h;
             }
             for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
-            for (a, b.leaf[0..bt.tail]) |*x, l| x.* += g[l];
+            for (a, 0..) |*x, pos| x.* += g[leaf[fold.row(pos)]];
+        }
+    }
+
+    /// A plain learning fold's own step: Newton over all rows on its membership, as the model's
+    /// leaves are (one step; CatBoost's `UpdateLearningFold`).
+    fn updatePlain(b: *Builder, fold: *Fold, depth: u32, leaf: []const u16, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
+        const n_leaves = @as(usize, 1) << @intCast(depth);
+        const g = try b.gpa.alloc(f64, n_leaves);
+        defer b.gpa.free(g);
+        const h = try b.gpa.alloc(f64, n_leaves);
+        defer b.gpa.free(h);
+        @memset(g, 0);
+        @memset(h, 0);
+        for (fold.approx, labels, leaf) |x, y, l| {
+            const d = derivatives(objective, x, y, scale_pos_weight);
+            g[l] += d.g;
+            h[l] += d.h;
+        }
+        for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
+        for (fold.approx, leaf) |*x, l| x.* += g[l];
+    }
+
+    /// Each row's leaf under `splits` on `fold`: its own online statistics for CTR splits.
+    fn assignLeaves(b: *Builder, fold: *const Fold, splits: []const Split, out: []u16) !void {
+        @memset(out, 0);
+        for (splits, 0..) |sp, d| {
+            const bit: u4 = @intCast(d);
+            if (sp.combo != no_combo) {
+                try comboOnline(b.gpa, b.ds, b.tree_combos.items[sp.combo].parts, sp.ctr_type, fold.order, b.combo_buf);
+                for (out, b.combo_buf) |*o, bk| o.* |= @as(u16, @intFromBool(bk > sp.threshold)) << bit;
+                continue;
+            }
+            const c = b.all[sp.cand];
+            for (out, 0..) |*o, r| {
+                const one = switch (c.kind) {
+                    .numeric => binAt(b.ds, c.feature, r) > sp.threshold,
+                    .onehot => binAt(b.ds, c.feature, r) == sp.threshold,
+                    .ctr => fold.ctr[c.slot][r] > sp.threshold,
+                };
+                o.* |= @as(u16, @intFromBool(one)) << bit;
+            }
         }
     }
 
@@ -557,7 +751,7 @@ pub const Builder = struct {
     /// skipped. Length is CatBoost's `GetFullProjectionLength`: its categoricals, plus one if it
     /// has any split bits at all, however many.
     /// Every new projection becomes four CTR candidates after the static ones.
-    fn levelCombos(b: *Builder, above: []const Split) !void {
+    fn levelCombos(b: *Builder, above: []const Split, order: []const u32) !void {
         b.dropCombos();
         b.max_uniq = b.static_max_uniq;
         if (!b.s.ctr or b.s.max_ctr_complexity <= 1 or above.len == 0 or b.wide.len == 0) return;
@@ -624,7 +818,7 @@ pub const Builder = struct {
                 while (i < n) : (i += n_ctr_types) dup = dup or partsEql(b.all[i].parts, proj);
                 if (dup) continue;
                 std.debug.assert(n + n_ctr_types <= b.all.len);
-                try comboCands(gpa, b.ds, proj, b.all[n..][0..n_ctr_types]);
+                try comboCands(gpa, b.ds, proj, order, b.all[n..][0..n_ctr_types]);
                 proj_owned = false; // the first candidate owns it; the rest borrow
                 max_uniq = @max(max_uniq, b.all[n].uniq);
                 n += n_ctr_types;
@@ -685,6 +879,7 @@ pub const Builder = struct {
         labels: []const f32,
         objective: Objective,
         scale_pos_weight: f32,
+        leaf: []const u16,
     ) !void {
         const n_leaves = @as(usize, 1) << @intCast(depth);
         const g = try b.gpa.alloc(f64, n_leaves);
@@ -699,12 +894,12 @@ pub const Builder = struct {
             @memset(g, 0);
             @memset(h, 0);
             if (it == 0) {
-                for (b.leaf, grads) |l, gp| {
+                for (leaf, grads) |l, gp| {
                     g[l] += gp.g;
                     h[l] += gp.h;
                 }
             } else {
-                for (b.leaf, raw, labels) |l, r0, y| {
+                for (leaf, raw, labels) |l, r0, y| {
                     const d = derivatives(objective, @as(f64, r0) + delta[l], y, scale_pos_weight);
                     g[l] += d.g;
                     h[l] += d.h;
@@ -810,9 +1005,87 @@ pub const Builder = struct {
     }
 };
 
+const MadeFolds = struct { learning: []Fold, avg: Fold, avg_alias: bool };
+
+/// CatBoost's folds (learn_context.cpp, `TFoldsCreationParams`): without `has_time`, target
+/// statistics or ordered boosting make `permutation_count - 1` learning folds. With target
+/// statistics the rows are first shuffled once; fold 0 keeps that order, later folds and the
+/// averaging fold block-shuffle it. Ordered boosting alone shuffles only learning folds after the
+/// first. Otherwise one fold in file order, shared with the model and as the averaging fold.
+fn makeFolds(gpa: std.mem.Allocator, ds: *const Dataset, s: Settings, n_slots: u32, cands: []const Cand, ap_off: []const usize) !MadeFolds {
+    const n = ds.n_rows;
+    const has_ctr = n_slots != 0;
+    const permute = !s.has_time and (has_ctr or s.ordered);
+    const n_folds: usize = if (permute) @max(1, s.permutation_count -| 1) else 1;
+    const block: usize = if (s.permutation_block != 0) s.permutation_block else @min(256, n / 1000 + 1);
+    var prng = std.Random.DefaultPrng.init(mix(s.seed, 0xF01D5, 0, 0));
+    const r = prng.random();
+
+    const learning = try gpa.alloc(Fold, n_folds);
+    for (learning) |*f| f.* = .{};
+    var made: MadeFolds = .{ .learning = learning, .avg = .{}, .avg_alias = !permute };
+    errdefer {
+        for (made.learning) |*f| f.deinit(gpa);
+        gpa.free(made.learning);
+        if (!made.avg_alias) made.avg.deinit(gpa);
+    }
+    // The order fold 0 keeps: a full shuffle when there are statistics to make order-free.
+    if (!s.has_time and has_ctr) {
+        const base = try gpa.alloc(u32, n);
+        for (base, 0..) |*x, i| x.* = @intCast(i);
+        r.shuffle(u32, base);
+        learning[0].order = base;
+    }
+    for (learning[1..]) |*f| f.order = try blockShuffle(gpa, learning[0].order, n, block, r);
+    if (!made.avg_alias and !s.has_time and has_ctr) made.avg.order = try blockShuffle(gpa, learning[0].order, n, block, r);
+
+    for (learning) |*f| f.ctr = try foldColumns(gpa, ds, cands, n_slots, f.order);
+    if (!made.avg_alias) made.avg.ctr = try foldColumns(gpa, ds, cands, n_slots, made.avg.order);
+
+    if (permute) {
+        for (learning) |*f| {
+            if (s.ordered) {
+                f.papprox = try gpa.alloc(f64, ap_off[ap_off.len - 1]);
+                @memset(f.papprox, 0);
+                f.pderiv = try gpa.alloc(f64, ap_off[ap_off.len - 1]);
+            } else {
+                f.approx = try gpa.alloc(f64, n);
+                @memset(f.approx, 0);
+            }
+        }
+    } else if (s.ordered) {
+        learning[0].papprox = try gpa.alloc(f64, ap_off[ap_off.len - 1]);
+        @memset(learning[0].papprox, 0);
+        learning[0].pderiv = try gpa.alloc(f64, ap_off[ap_off.len - 1]);
+    }
+    if (made.avg_alias) made.avg = learning[0];
+    return made;
+}
+
+/// Online columns of every single-column CTR along `order`. Caller owns the result.
+fn foldColumns(gpa: std.mem.Allocator, ds: *const Dataset, cands: []const Cand, n_slots: u32, order: []const u32) ![][]u8 {
+    const cols = try gpa.alloc([]u8, n_slots);
+    var made: usize = 0;
+    errdefer {
+        for (cols[0..made]) |c| gpa.free(c);
+        gpa.free(cols);
+    }
+    var widest: usize = 0;
+    for (ds.n_bins) |nb| widest = @max(widest, nb);
+    const scratch = try gpa.alloc(u8, widest);
+    defer gpa.free(scratch);
+    for (cands) |c| {
+        if (c.kind != .ctr) continue;
+        cols[c.slot] = try gpa.alloc(u8, ds.n_rows);
+        made += 1;
+        _ = try ctrColumn(gpa, ds, c.feature, c.ctr_type, order, cols[c.slot], scratch[0..ds.n_bins[c.feature]]);
+    }
+    return cols;
+}
+
 /// Candidate index and its threshold (for one-hot, the level); a chosen combination also records
 /// its slot in the builder's `tree_combos`.
-const Split = struct { cand: u32, threshold: u32, combo: u32 = no_combo };
+const Split = struct { cand: u32, threshold: u32, combo: u32 = no_combo, ctr_type: u8 = 0 };
 const no_combo = std.math.maxInt(u32);
 
 fn partsEql(a: []const tree.Part, c: []const tree.Part) bool {
@@ -826,10 +1099,44 @@ fn rowCtxBin(ctx: RowCtx, f: u32) data.BinIdx {
     return binAt(ctx.ds, f, ctx.r);
 }
 
+/// One CTR type's online buckets for a combination along `order` (by row), for a fold other than
+/// the one that chose it.
+fn comboOnline(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Part, t: u8, order: []const u32, col: []u8) !void {
+    const Counts = struct { good: u32 = 0, total: u32 = 0 };
+    var running: std.AutoHashMapUnmanaged(u64, Counts) = .empty;
+    defer running.deinit(gpa);
+    const key = struct {
+        fn f(p: []const tree.Part, d: *const Dataset, r: usize) u64 {
+            return tree.comboKey(p, RowCtx{ .ds = d, .r = r }, rowCtxBin);
+        }
+    }.f;
+    if (t < ctr_priors.len) {
+        for (0..ds.n_rows) |pos| {
+            const r = if (order.len == 0) pos else order[pos];
+            const gop = try running.getOrPut(gpa, key(proj, ds, r));
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            col[r] = bucketOf((@as(f32, @floatFromInt(gop.value_ptr.good)) + ctr_priors[t]) / (@as(f32, @floatFromInt(gop.value_ptr.total)) + 1));
+            gop.value_ptr.total += 1;
+            gop.value_ptr.good += @intFromBool(ds.labels[r] > 0.5);
+        }
+        return;
+    }
+    for (0..ds.n_rows) |r| {
+        const gop = try running.getOrPut(gpa, key(proj, ds, r));
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        gop.value_ptr.total += 1;
+    }
+    var largest: u32 = 0;
+    var it = running.valueIterator();
+    while (it.next()) |v| largest = @max(largest, v.total);
+    const den: f32 = @floatFromInt(largest + 1);
+    for (col, 0..) |*o, r| o.* = bucketOf(@as(f32, @floatFromInt(running.get(key(proj, ds, r)).?.total)) / den);
+}
+
 /// The four CTR candidates of a combination `proj` (owned by the first afterwards): each row's key,
 /// then online buckets (Borders: earlier rows only; Counter: all rows) and the stored table from
 /// counts over every row.
-fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, out: []Cand) !void {
+fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, order: []const u32, out: []Cand) !void {
     const n = ds.n_rows;
     const keys = try gpa.alloc(u64, n);
     defer gpa.free(keys);
@@ -849,8 +1156,10 @@ fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, out
         c.col = try gpa.alloc(u8, n);
         made += 1;
     }
-    // Borders, online.
-    for (keys, 0..) |k, r| {
+    // Borders, online along `order`.
+    for (0..n) |pos| {
+        const r = if (order.len == 0) pos else order[pos];
+        const k = keys[r];
         const gop = try running.getOrPut(gpa, k);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         const cnt = gop.value_ptr.*;
@@ -893,11 +1202,7 @@ fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, out
 }
 
 pub fn freeCands(gpa: std.mem.Allocator, cands: []Cand) void {
-    for (cands) |c| {
-        if (c.col.len != 0) gpa.free(c.col);
-        if (c.final.len != 0) gpa.free(c.final);
-        if (c.present.len != 0) gpa.free(c.present);
-    }
+    for (cands) |c| c.freeOwned(gpa);
     gpa.free(cands);
 }
 
@@ -946,7 +1251,7 @@ pub fn candidates(gpa: std.mem.Allocator, ds: *const Dataset, s: Settings) ![]Ca
             errdefer gpa.free(c.col);
             c.final = try gpa.alloc(u8, ds.n_bins[f]);
             errdefer gpa.free(c.final);
-            c.uniq = try ctrColumn(gpa, ds, f, @intCast(t), c.col, c.final);
+            c.uniq = try ctrColumn(gpa, ds, f, @intCast(t), &.{}, c.col, c.final);
             try list.append(gpa, c);
         }
     }
@@ -958,11 +1263,11 @@ inline fn bucketOf(value: f32) u8 {
     return @intFromFloat(@min(@trunc(value * 15), 15));
 }
 
-/// One CTR's training buckets (`col`, online: each row sees only the rows before it, in row
-/// order, CatBoost's `has_time`) and final buckets per level (`final`, counts over every row).
+/// One CTR's training buckets (`col`, by row, online: each row sees only the rows before it in
+/// `order`, file order when empty) and final buckets per level (`final`, counts over every row).
 /// Borders: `(positives + prior) / (count + 1)`. Counter: `count / (largest count + 1)` over all
 /// rows, online or not (CatBoost's `SkipTest`). Returns the number of levels present.
-pub fn ctrColumn(gpa: std.mem.Allocator, ds: *const Dataset, f: u32, t: u8, col: []u8, final: []u8) !u32 {
+pub fn ctrColumn(gpa: std.mem.Allocator, ds: *const Dataset, f: u32, t: u8, order: []const u32, col: []u8, final: []u8) !u32 {
     const nl = ds.n_bins[f];
     const total = try gpa.alloc(u32, nl);
     defer gpa.free(total);
@@ -972,9 +1277,10 @@ pub fn ctrColumn(gpa: std.mem.Allocator, ds: *const Dataset, f: u32, t: u8, col:
     @memset(good, 0);
     if (t < ctr_priors.len) {
         const prior = ctr_priors[t];
-        for (col, 0..) |*o, r| {
+        for (0..ds.n_rows) |pos| {
+            const r = if (order.len == 0) pos else order[pos];
             const k = binAt(ds, f, r);
-            o.* = bucketOf((@as(f32, @floatFromInt(good[k])) + prior) / (@as(f32, @floatFromInt(total[k])) + 1));
+            col[r] = bucketOf((@as(f32, @floatFromInt(good[k])) + prior) / (@as(f32, @floatFromInt(total[k])) + 1));
             total[k] += 1;
             good[k] += @intFromBool(ds.labels[r] > 0.5);
         }
@@ -1237,6 +1543,7 @@ const ScoreCtx = struct {
 /// candidate; prefixes run one after another, so the sums keep a fixed order.
 const OrderedCtx = struct {
     b: *Builder,
+    fold: *const Fold,
     bt: usize,
     n_leaves: usize,
 
@@ -1251,21 +1558,22 @@ const OrderedCtx = struct {
         const c = b.cands[f];
         const nb: usize = c.nb;
         const bt = b.bts[self.bt];
-        const d = b.deriv[b.ap_off[self.bt]..][0..bt.tail];
+        const d = self.fold.pderiv[b.ap_off[self.bt]..][0..bt.tail];
         const body = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
         const tail = b.cells_tail[b.off[f]..][0 .. self.n_leaves * nb];
         @memset(body, .{});
         @memset(tail, .{});
-        for (0..bt.tail) |r| {
+        for (0..bt.tail) |pos| {
+            const r = self.fold.row(pos);
             const bin: usize = if (c.kind == .ctr) c.col[r] else binAt(b.ds, c.feature, r);
             const i = @as(usize, b.leaf[r]) * nb + bin;
-            if (r < bt.body) {
-                body[i].g += d[r];
+            if (pos < bt.body) {
+                body[i].g += d[pos];
                 body[i].n += 1;
             } else {
                 const s: f64 = if (b.weights.len != 0) b.weights[r] else 1;
                 if (s == 0) continue;
-                tail[i].g += s * d[r];
+                tail[i].g += s * d[pos];
                 tail[i].n += s;
             }
         }
@@ -1318,8 +1626,6 @@ const OrderedCtx = struct {
 /// Ordered boosting's buffers; owned by the builder, gathered here so init and deinit agree.
 const Ordered = struct {
     bts: []BodyTail = &.{},
-    approx: []f64 = &.{},
-    deriv: []f64 = &.{},
     ap_off: []usize = &.{},
     cells_tail: []Cell = &.{},
     acc_num: []f64 = &.{},
@@ -1334,9 +1640,6 @@ const Ordered = struct {
         o.ap_off = try gpa.alloc(usize, o.bts.len + 1);
         o.ap_off[0] = 0;
         for (o.bts, 0..) |bt, k| o.ap_off[k + 1] = o.ap_off[k] + bt.tail;
-        o.approx = try gpa.alloc(f64, o.ap_off[o.bts.len]);
-        @memset(o.approx, 0);
-        o.deriv = try gpa.alloc(f64, o.ap_off[o.bts.len]);
         o.cells_tail = try gpa.alloc(Cell, n_cells);
         o.acc_off = try gpa.alloc(usize, capacity + 1);
         o.acc_off[0] = 0;
@@ -1349,8 +1652,6 @@ const Ordered = struct {
 
     fn deinit(o: Ordered, gpa: std.mem.Allocator) void {
         if (o.bts.len != 0) gpa.free(o.bts);
-        if (o.approx.len != 0) gpa.free(o.approx);
-        if (o.deriv.len != 0) gpa.free(o.deriv);
         if (o.ap_off.len != 0) gpa.free(o.ap_off);
         if (o.cells_tail.len != 0) gpa.free(o.cells_tail);
         if (o.acc_num.len != 0) gpa.free(o.acc_num);

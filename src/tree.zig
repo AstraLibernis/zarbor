@@ -114,6 +114,13 @@ pub const Params = struct {
     /// Under `cat_split = ctr`: most columns one target statistic may combine (CatBoost's
     /// `max_ctr_complexity`, default 4 there); 1 keeps every statistic to a single column.
     max_ctr_complexity: u32 = 4,
+    /// Rows are in time order (CatBoost's `has_time`): target statistics and ordered boosting read
+    /// them in file order, one fold. Off (CatBoost's default), they use `permutation_count - 1`
+    /// random orderings, one drawn per tree. Only matters under `cat_split = ctr` or `ordered`.
+    has_time: bool = false,
+    permutation_count: u32 = 4,
+    /// Rows shuffled together; 0 is CatBoost's `min(256, n / 1000 + 1)`.
+    permutation_block: u32 = 0,
     /// `ordered`: CatBoost's ordered boosting under `symmetric` (about 4x the work of `plain`).
     boosting_type: BoostingType = .plain,
     seed: u64 = 0,
