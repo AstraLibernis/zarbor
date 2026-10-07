@@ -132,6 +132,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     var frame_live = true;
     defer if (frame_live) frame.deinit();
+    try data.checkShape(&frame, out);
 
     if (!quiet) {
         const stats = try csv_profile.profile(gpa, &frame);

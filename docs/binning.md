@@ -144,6 +144,42 @@ or 100 (California). The bin count acts as regularisation, so it is a setting to
 `tune`'s default space searches `max_bin` 8..16384 and `min_data_in_bin` 1..300 (both
 log), and `tune` prints an `edge` line when the winner lands in the outer 5% of any range.
 
+### CV sweep (5-fold), 2026-10-07
+
+**[MEASURED]** at 055a295 (before the floor applied to all policies), ReleaseFast, default
+gbdt, `quantile`, `min_data_in_bin` 3. Each cell is the out-of-fold score from one CV run
+with one fold seed: AUC for adult, bank and airline (higher is better); RMSE for California,
+Ames and housing (lower is better). Bold marks the best in each row. Harness:
+`~/workspace/research/tune-ranges/ramp.py` plus direct `zarbor cv` runs above 512.
+
+| data (rows) | 8 | 16 | 64 | 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| adult (49k) | | .90530 | .92228 | .92787 | .92755 | | .92767 | .92770 | .92794 | **.92806** |
+| bank (45k) | | .92870 | .93162 | .93285 | .93306 | .93290 | .93321 | .93329 | .93327 | **.93338** |
+| airline (100k) | | .95456 | .95495 | .95521 | .95559 | .95550 | .95583 | **.95593** | .95589 | .95589 |
+| California (20k) | | .5035 | .4573 | .4502 | .4489 | .4489 | **.4485** | .4503 | .4509 | .4535 |
+| Ames (1.5k) | **30041** | 30719 | 31400 | 30923 | 30943 | | | | | |
+| housing (6.8k) | | 14.513 | 14.253 | 14.137 | 14.026 | 13.920 | **13.889** | 13.905 | | |
+
+Ames was also run at 4 (32659) and 32 (30815). The scores do not climb to a single peak:
+airline and bank dip at 512 and rise again, so a search that stops at the first decline
+finds a false optimum.
+
+`min_data_in_bin`, with `max_bin` 16384 and `greedy` (the only policy that used it then):
+
+| data | 1 | 3 | 10 | 30 | 100 | 300 |
+|---|---|---|---|---|---|---|
+| adult (AUC) | **.92831** | .92815 | .92761 | .92720 | .92520 | .91988 |
+| bank (AUC) | .93336 | **.93338** | .93330 | .93300 | .93264 | .93195 |
+| California (RMSE) | .45286 | .45055 | .44963 | .44895 | **.44874** | .45792 |
+| Ames (RMSE) | 31711 | 31569 | 31092 | **30404** | 31628 | 30938 |
+| housing (RMSE) | **13.915** | 13.945 | 13.926 | 13.995 | 14.152 | 14.408 |
+| airline (AUC) | .95590 | .95589 | **.95604** | .95579 | .95573 | .95530 |
+
+With the best floor for each dataset, `greedy` with an unbounded `max_bin` beats the old
+default (`quantile` at 256) on all six. The AUC gains are about 0.0003 to 0.0008, close to
+the noise of a single CV run. The regression gains are clearer: Ames −1.7%, housing −0.8%.
+
 ## Not offered
 
 - CatBoost's exact optimisers (`MaxLogSum`, `MinEntropy`): the same objective as `logsum`

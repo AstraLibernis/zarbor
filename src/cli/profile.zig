@@ -49,5 +49,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     try out.print("file    {s}\nread    {d} ms\nprofile {d} ms\n", .{
         p, @divTrunc(t_read - t0, 1_000_000), @divTrunc(t_prof - t_read, 1_000_000),
     });
+    // Profile reports a ragged file rather than refusing it: finding that out is its job.
+    data.checkShape(&frame, out) catch |e| if (e != error.RaggedRows) return e;
     try csv_profile.writeProfile(out, &frame, stats);
 }

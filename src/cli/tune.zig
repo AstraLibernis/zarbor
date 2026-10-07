@@ -186,6 +186,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const t0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     var frame = try data.readCsv(gpa, io, pool, path, max_bytes);
     defer frame.deinit();
+    try data.checkShape(&frame, out);
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
     var group_idx: ?usize = null;
     if (group_col) |name| {

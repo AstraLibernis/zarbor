@@ -26,6 +26,16 @@ pub const Frame = struct {
     /// sniffed-numeric column. Nonzero means an unrepresentative sniff prefix
     /// or junk; reported rather than silently stored as NaN.
     unparsed: []u32 = &.{},
+    /// Records with more fields than the header. Their extra fields are not
+    /// stored, so a nonzero count means the columns may not line up with the
+    /// header: callers refuse the file (`checkShape`).
+    long_rows: usize = 0,
+    /// The first such record, counting data records from 1.
+    first_long: usize = 0,
+    /// Most fields in any record.
+    max_fields: usize = 0,
+    /// Records with fewer fields than the header; their missing fields are NaN.
+    short_rows: usize = 0,
 
     pub fn deinit(f: *Frame) void {
         const gpa = f.gpa;
@@ -305,6 +315,18 @@ fn parseText(
         for (sinks) |*s| s.cols[c].clearAndFree(gpa);
     }
 
+    var shape: struct { long: usize = 0, first: usize = 0, max: usize = 0, short: usize = 0 } = .{};
+    var before: usize = 0;
+    for (sinks) |*s| {
+        if (s.first_long) |r| if (shape.long == 0) {
+            shape.first = before + r + 1;
+        };
+        shape.long += s.long_rows;
+        shape.short += s.short_rows;
+        shape.max = @max(shape.max, s.max_fields);
+        before += s.rows;
+    }
+
     return .{
         .gpa = gpa,
         .n_rows = n_rows,
@@ -313,7 +335,31 @@ fn parseText(
         .values = values,
         .levels = levels,
         .unparsed = unparsed,
+        .long_rows = shape.long,
+        .first_long = shape.first,
+        .max_fields = shape.max,
+        .short_rows = shape.short,
     };
+}
+
+/// Refuses a frame whose records have more fields than its header, saying
+/// why, since the extra fields were dropped and the columns may be shifted;
+/// mentions short records, which are kept with NaN for their missing fields.
+pub fn checkShape(f: *const Frame, out: *std.Io.Writer) !void {
+    if (f.short_rows != 0) try out.print(
+        "note: {d} record(s) have fewer fields than the header's {d}; their missing fields are read as missing\n",
+        .{ f.short_rows, f.names.len },
+    );
+    if (f.long_rows == 0) return;
+    try out.print(
+        \\{d} record(s) have more fields than the header's {d} (up to {d}), the first being data
+        \\record {d}. Their extra fields would be dropped and the columns may not line up. Usually
+        \\the first line is not the header (a comment or title line), or a field holds an unquoted
+        \\comma. Fix the file; zarbor does not guess.
+        \\
+    , .{ f.long_rows, f.names.len, f.max_fields, f.first_long });
+    try out.flush();
+    return error.RaggedRows;
 }
 
 /// Concatenate column `c` of every range into `out`; categorical local ids are
@@ -369,6 +415,11 @@ const RangeSink = struct {
     levels: []std.ArrayList([]u8) = &.{},
     bad: []u32 = &.{},
     err: ?anyerror = null,
+    long_rows: usize = 0,
+    /// The first long record, counting this range's records from 0.
+    first_long: ?usize = null,
+    max_fields: usize = 0,
+    short_rows: usize = 0,
 
     fn alloc(s: *RangeSink) !void {
         const n = s.kinds.len;
@@ -401,12 +452,20 @@ const RangeSink = struct {
             if (last) s.skip_header = false;
             return;
         }
+        // A blank line is no record, as in pandas: it would otherwise be a row with every
+        // field missing, an extra prediction row in `predict`'s output.
+        if (last and s.col == 0 and trimField(bytes).len == 0) return;
         if (s.col < s.kinds.len) s.put(s.col, bytes) catch |e| {
             s.err = e;
         };
         s.col += 1;
         if (last) {
-            // A short record: its missing columns are NaN. Extra fields were ignored.
+            s.max_fields = @max(s.max_fields, s.col);
+            if (s.col > s.kinds.len) {
+                s.long_rows += 1;
+                if (s.first_long == null) s.first_long = s.rows;
+            } else if (s.col < s.kinds.len) s.short_rows += 1;
+            // A short record: its missing columns are NaN. Extra fields are counted, not stored.
             while (s.col < s.kinds.len) : (s.col += 1) s.cols[s.col].append(s.gpa, std.math.nan(f32)) catch |e| {
                 s.err = e;
             };

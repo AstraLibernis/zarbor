@@ -339,7 +339,10 @@ test "a file large enough to parse on many workers loads exactly as on one" {
     for (0..150_000) |i| {
         const cat = r.uintLessThan(u32, 40 + @as(u32, @intCast(i / 2000)));
         const x = if (r.uintLessThan(u8, 20) == 0) "NA" else try std.fmt.bufPrint(buf[48..], "{d}", .{r.uintLessThan(u32, 1000)});
-        const line = if (r.uintLessThan(u8, 50) == 0)
+        // Two long records, both past the first range: the first must be found in file order.
+        const line = if (i == 100_000 or i == 120_000)
+            try std.fmt.bufPrint(&buf, "{s},c{d},1,n,extra\n", .{ x, cat })
+        else if (r.uintLessThan(u8, 50) == 0)
             try std.fmt.bufPrint(&buf, "{s},c{d}\n", .{ x, cat })
         else
             try std.fmt.bufPrint(&buf, "{s},c{d},{d},\"n\n{d}\"\n", .{ x, cat, r.uintLessThan(u32, 100), i % 7 });
@@ -357,11 +360,52 @@ test "a file large enough to parse on many workers loads exactly as on one" {
     defer m.deinit();
 
     try testing.expectEqual(a.n_rows, m.n_rows);
+    try testing.expectEqual(@as(usize, 2), m.long_rows);
+    try testing.expectEqual(@as(usize, 100_001), m.first_long);
+    try testing.expectEqual(@as(usize, 5), m.max_fields);
+    try testing.expectEqual(a.first_long, m.first_long);
+    try testing.expectEqual(a.short_rows, m.short_rows);
+    try testing.expect(m.short_rows > 0);
     for (0..a.names.len) |c| {
         try testing.expectEqual(a.kinds[c], m.kinds[c]);
         try testing.expectEqual(a.unparsed[c], m.unparsed[c]);
         try testing.expectEqual(a.levels[c].len, m.levels[c].len);
         for (a.levels[c], m.levels[c]) |x, y| try testing.expectEqualStrings(x, y);
         for (a.values[c], m.values[c]) |x, y| try testing.expectEqual(@as(u32, @bitCast(x)), @as(u32, @bitCast(y)));
+    }
+}
+
+test "records longer than the header are counted and refused, short ones noted" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    // A title line read as the header: one column, then rows of three.
+    var f = try readText(testing.io, gpa, pool, "a,b\n1,2\n3,4,5\n6\n7,8,9,10\n");
+    defer f.deinit();
+    try testing.expectEqual(@as(usize, 4), f.n_rows);
+    try testing.expectEqual(@as(usize, 2), f.long_rows);
+    try testing.expectEqual(@as(usize, 2), f.first_long);
+    try testing.expectEqual(@as(usize, 4), f.max_fields);
+    try testing.expectEqual(@as(usize, 1), f.short_rows);
+    var sink: std.Io.Writer.Allocating = .init(gpa);
+    defer sink.deinit();
+    try testing.expectError(error.RaggedRows, csv.checkShape(&f, &sink.writer));
+    try testing.expect(std.mem.find(u8, sink.written(), "record 2.") != null);
+}
+
+test "blank lines are no records, and a well-formed file passes the shape check" {
+    const gpa = testing.allocator;
+    var pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    for ([_][]const u8{
+        "a,b\n1,2\n3,4\n",       "a,b\n1,2\n3,4",          "a,b\r\n1,2\r\n3,4\r\n",
+        "a,b\n1,2\n\n3,4\n\n", "a,b\n1,2\n  \n3,4\r\n\r\n",
+    }) |text| {
+        var f = try readText(testing.io, gpa, pool, text);
+        defer f.deinit();
+        try testing.expectEqual(@as(usize, 2), f.n_rows);
+        try testing.expectEqual(@as(usize, 0), f.long_rows);
+        try testing.expectEqual(@as(usize, 0), f.short_rows);
+        try testing.expectEqual(@as(f32, 3), f.values[0][1]);
     }
 }

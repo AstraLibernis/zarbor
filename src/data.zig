@@ -65,6 +65,7 @@ pub const BinParams = struct {
 pub const ColumnKind = csv.ColumnKind;
 pub const Frame = csv.Frame;
 pub const readCsv = csv.readCsv;
+pub const checkShape = csv.checkShape;
 
 const label_encoder = @import("label_encoder.zig");
 pub const LabelEncoder = label_encoder.LabelEncoder;

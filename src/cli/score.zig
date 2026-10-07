@@ -112,6 +112,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
         .kinds = sch.kinds,
     });
     defer frame.deinit();
+    try csv.checkShape(&frame, out);
     const t_read = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     // Decode the holdout's target with the *model's* class order. This file
