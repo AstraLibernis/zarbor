@@ -82,6 +82,48 @@ pub const Settings = struct {
     /// the model grows; 0 disables.
     random_strength: f64 = 0,
     seed: u64 = 0,
+    /// Categorical columns as CatBoost has them: one-hot up to `one_hot_max_size` levels, ordered
+    /// target statistics (CTRs) above. Off: categoricals split on their ordinal ids.
+    ctr: bool = false,
+    one_hot_max_size: u32 = 2,
+    /// Penalty on CTRs not yet used in any tree, by their number of distinct keys.
+    model_size_reg: f64 = 0.5,
+};
+
+/// What a candidate split tests.
+pub const CandKind = enum {
+    /// `bin > threshold` on a dataset column (numeric, or a categorical's ordinal ids).
+    numeric,
+    /// `bin == level` on a categorical with at most `one_hot_max_size` levels.
+    onehot,
+    /// `bucket > threshold` on one of a categorical's ordered target statistics.
+    ctr,
+};
+
+/// CTR types per categorical, in CatBoost's default order: Borders with priors 0, 0.5 and 1, then
+/// Counter.
+const ctr_priors = [3]f32{ 0, 0.5, 1 };
+const n_ctr_types = ctr_priors.len + 1;
+/// A CTR value in [0, 1] becomes `trunc(value * 15)`: 16 buckets.
+const ctr_buckets = 16;
+
+pub const Cand = struct {
+    kind: CandKind,
+    /// Dataset column.
+    feature: u32,
+    /// CTR type: 0..2 Borders with `ctr_priors[t]`, 3 Counter.
+    ctr_type: u8 = 0,
+    /// Bins of the column this candidate scores.
+    nb: u16,
+    /// CTR: training bucket per row (online: counts over earlier rows only).
+    col: []u8 = &.{},
+    /// CTR: bucket per level from counts over every training row, what prediction uses.
+    final: []u8 = &.{},
+    /// CTR: distinct levels in training, for `model_size_reg`.
+    uniq: u32 = 0,
+    /// CTR: chosen at some level already, so `model_size_reg` no longer applies. CatBoost keys
+    /// this on (Borders or Counter, column), so choosing one prior frees the other two.
+    used: bool = false,
 };
 
 pub const Builder = struct {
@@ -91,15 +133,20 @@ pub const Builder = struct {
     s: Settings,
     /// Each row's leaf index in the tree being grown.
     leaf: []u16,
-    /// Histograms for every feature over the deepest scored level: feature f's leaf l bin b is
-    /// `cells[off[f] + l * nb_f + b]`.
+    /// Split candidates, CatBoost's order: numeric columns, then one-hot, then CTRs. Ties go to
+    /// the earlier one.
+    cands: []Cand,
+    /// Histograms for every candidate over the deepest scored level: candidate c's leaf l bin b is
+    /// `cells[off[c] + l * nb_c + b]`.
     cells: []Cell,
     off: []usize,
-    /// Whether feature f has any missing row: the missing-vs-present cut (threshold 0) is offered
-    /// only then, as CatBoost adds its `nan_mode = Min` border only for columns with NaN.
+    /// Whether candidate c's column has a missing row: the missing-vs-present cut (threshold 0) is
+    /// offered only then, as CatBoost adds its `nan_mode = Min` border only for columns with NaN.
     has_missing: []bool,
-    /// Per-feature best split of the level being searched.
+    /// Per-candidate best split of the level being searched.
     best: []Best,
+    /// Largest `uniq` among CTR candidates.
+    max_uniq: u32 = 0,
     /// Leaf values of the last grown tree, already scaled by the learning rate.
     values: []f64,
     /// Bootstrap weight per row for the tree being grown; empty without bootstrap.
@@ -117,25 +164,32 @@ pub const Builder = struct {
 
     pub fn init(gpa: std.mem.Allocator, pool: *Pool, ds: *const Dataset, s: Settings) !Builder {
         if (s.depth == 0 or s.depth > max_depth) return error.BadSymmetricDepth;
+        const cands = try candidates(gpa, ds, s);
+        errdefer freeCands(gpa, cands);
+        var max_uniq: u32 = 0;
+        for (cands) |c| if (c.kind == .ctr) {
+            max_uniq = @max(max_uniq, c.uniq);
+        };
         const leaf = try gpa.alloc(u16, ds.n_rows);
         errdefer gpa.free(leaf);
-        const off = try gpa.alloc(usize, ds.n_features + 1);
+        const off = try gpa.alloc(usize, cands.len + 1);
         errdefer gpa.free(off);
         const scored_leaves: usize = @as(usize, 1) << @intCast(s.depth - 1);
         off[0] = 0;
-        for (0..ds.n_features) |f| off[f + 1] = off[f] + scored_leaves * ds.n_bins[f];
-        const cells = try gpa.alloc(Cell, off[ds.n_features]);
+        for (cands, 0..) |c, i| off[i + 1] = off[i] + scored_leaves * c.nb;
+        const cells = try gpa.alloc(Cell, off[cands.len]);
         errdefer gpa.free(cells);
-        const has_missing = try gpa.alloc(bool, ds.n_features);
+        const has_missing = try gpa.alloc(bool, cands.len);
         errdefer gpa.free(has_missing);
-        for (has_missing, 0..) |*m, f| {
+        for (has_missing, cands) |*m, c| {
             m.* = false;
-            for (0..ds.n_rows) |r| if (binAt(ds, f, r) == 0) {
+            if (c.kind != .numeric) continue;
+            for (0..ds.n_rows) |r| if (binAt(ds, c.feature, r) == 0) {
                 m.* = true;
                 break;
             };
         }
-        const best = try gpa.alloc(Best, ds.n_features);
+        const best = try gpa.alloc(Best, cands.len);
         errdefer gpa.free(best);
         const values = try gpa.alloc(f64, @as(usize, 1) << @intCast(s.depth));
         errdefer gpa.free(values);
@@ -148,6 +202,8 @@ pub const Builder = struct {
             .ds = ds,
             .s = s,
             .leaf = leaf,
+            .cands = cands,
+            .max_uniq = max_uniq,
             .cells = cells,
             .off = off,
             .has_missing = has_missing,
@@ -159,6 +215,7 @@ pub const Builder = struct {
     }
 
     pub fn deinit(b: *Builder) void {
+        freeCands(b.gpa, b.cands);
         b.gpa.free(b.leaf);
         b.gpa.free(b.cells);
         b.gpa.free(b.off);
@@ -191,26 +248,39 @@ pub const Builder = struct {
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
             var hctx = HistCtx{ .b = b, .grads = grads, .n_leaves = n_leaves };
-            b.pool.parallelFor(ds.n_features, &hctx, HistCtx.run, 1);
+            b.pool.parallelFor(b.cands.len, &hctx, HistCtx.run, 1);
             var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves, .level = depth };
-            b.pool.parallelFor(ds.n_features, &sctx, ScoreCtx.run, 1);
+            b.pool.parallelFor(b.cands.len, &sctx, ScoreCtx.run, 1);
 
-            // Strict `>` in feature order: ties go to the lower feature index, then (within a
-            // feature, in `ScoreCtx`) to the lower threshold, as CatBoost's scan does. With noise,
-            // each feature's best (noise-free) score gets a fresh draw here, in feature order.
+            // Strict `>` in candidate order: ties go to the earlier candidate, then (within one,
+            // in `ScoreCtx`) to the lower threshold, as CatBoost's scan does. With noise, each
+            // candidate's best (noise-free) score gets a fresh draw here, in order. A CTR not yet
+            // used by any tree is scaled down by `model_size_reg` (CatBoost's `GetCatFeatureWeight`).
             var sel = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, depth, std.math.maxInt(u32)));
             var win: ?usize = null;
             var win_score: f64 = -std.math.inf(f64);
-            for (b.best, 0..) |c, f| {
+            for (b.best, b.cands, 0..) |c, cand, f| {
                 if (!std.math.isFinite(c.score)) continue;
-                const s = if (b.sigma > 0) c.score + b.sigma * sel.random().floatNorm(f64) else c.score;
+                var s = if (b.sigma > 0) c.score + b.sigma * sel.random().floatNorm(f64) else c.score;
+                if (cand.kind == .ctr and !cand.used and b.s.model_size_reg > 0) {
+                    const ratio = @as(f64, @floatFromInt(cand.uniq)) / @as(f64, @floatFromInt(b.max_uniq));
+                    s *= std.math.pow(f64, 1 + ratio, -b.s.model_size_reg);
+                }
                 if (win == null or s > win_score) {
                     win = f;
                     win_score = s;
                 }
             }
             const f = win orelse break;
-            const sp: Split = .{ .feature = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
+            const sp: Split = .{ .cand = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
+            // Marked on choice, as CatBoost does: later levels of this tree see it as used, even
+            // if the redundancy rule removes the split.
+            if (b.cands[f].kind == .ctr) {
+                const counter = b.cands[f].ctr_type == ctr_priors.len;
+                for (b.cands) |*c| {
+                    if (c.kind == .ctr and c.feature == b.cands[f].feature and (c.ctr_type == ctr_priors.len) == counter) c.used = true;
+                }
+            }
             splits[depth] = sp;
 
             var actx = ApplySplit{ .b = b, .sp = sp, .bit = @intCast(depth) };
@@ -339,40 +409,179 @@ pub const Builder = struct {
         for (delta) |*dl| dl.* *= b.s.learning_rate;
     }
 
-    /// A complete binary tree: every node at depth d tests split d, left = `bin <= threshold`.
+    /// A complete binary tree: every node at depth d tests split d. A numeric split sends
+    /// `bin <= threshold` left (leaf bit 0). One-hot and CTR splits become categorical set nodes;
+    /// a CTR's set is the levels whose *final* bucket (counts over all training rows) is <= the
+    /// threshold, which is what CatBoost predicts with. A node whose stored set holds the bit-1
+    /// side is `inverted`: its left child is the bit-1 subtree.
     fn toTree(b: *Builder, sp: []const Split) !tree.Tree {
         const d = sp.len;
         const n_nodes = (@as(usize, 1) << @intCast(d + 1)) - 1;
         const nodes = try b.gpa.alloc(tree.Node, n_nodes);
         errdefer b.gpa.free(nodes);
+        var ids: std.ArrayList(data.BinIdx) = .empty;
+        defer ids.deinit(b.gpa);
+
+        var proto: [max_depth]tree.Node = undefined;
+        var inverted = [_]bool{false} ** max_depth;
+        for (sp, 0..) |s, level| {
+            const c = b.cands[s.cand];
+            switch (c.kind) {
+                .numeric => proto[level] = .{ .feature = c.feature, .threshold = @intCast(s.threshold), .missing_left = true, .is_leaf = false },
+                .onehot => {
+                    // `bin == level` is leaf bit 1, and the set {level} goes left.
+                    const ofs = ids.items.len;
+                    try ids.append(b.gpa, @intCast(s.threshold));
+                    proto[level] = .{ .feature = c.feature, .is_cat = true, .cat_ofs = @intCast(ofs), .n_cat = 1, .missing_left = s.threshold == 0, .is_leaf = false };
+                    inverted[level] = true;
+                },
+                .ctr => {
+                    // Bit 0 is `final bucket <= threshold`; store whichever side is smaller.
+                    var low: usize = 0;
+                    for (c.final[1..]) |bk| low += @intFromBool(bk <= s.threshold);
+                    const high = c.final.len - 1 - low;
+                    const keep_low = low <= high;
+                    if (@min(low, high) > std.math.maxInt(u8)) return error.CtrSetTooLarge;
+                    const ofs = ids.items.len;
+                    for (c.final[1..], 1..) |bk, lvl| {
+                        if ((bk <= s.threshold) == keep_low) try ids.append(b.gpa, @intCast(lvl));
+                    }
+                    const missing_low = c.final[0] <= s.threshold;
+                    proto[level] = .{
+                        .feature = c.feature,
+                        .is_cat = true,
+                        .cat_ofs = @intCast(ofs),
+                        .n_cat = @intCast(ids.items.len - ofs),
+                        .missing_left = missing_low == keep_low,
+                        .is_leaf = false,
+                    };
+                    inverted[level] = !keep_low;
+                },
+            }
+        }
+
         // Breadth-first: node i's children are 2i+1 and 2i+2; depth-d nodes start at 2^d - 1.
         for (nodes, 0..) |*nd, i| {
             const level = std.math.log2_int(usize, i + 1);
             if (level < d) {
-                nd.* = .{
-                    .feature = sp[level].feature,
-                    .threshold = @intCast(sp[level].threshold),
-                    .missing_left = true,
-                    .is_leaf = false,
-                    .left = @intCast(2 * i + 1),
-                    .right = @intCast(2 * i + 2),
-                };
+                nd.* = proto[level];
+                nd.left = @intCast(2 * i + 1);
+                nd.right = @intCast(2 * i + 2);
             } else {
                 // Position among the leaves, read root to leaf, has bit `level - 1 - k` set when
-                // the k-th split went right; the leaf index has split k at bit k.
+                // the k-th split went right; the leaf index has split k at bit k, flipped where the
+                // node is inverted.
                 const pos = i + 1 - (@as(usize, 1) << @intCast(d));
                 var idx: usize = 0;
                 for (0..d) |k| {
-                    if ((pos >> @intCast(d - 1 - k)) & 1 != 0) idx |= @as(usize, 1) << @intCast(k);
+                    const went_right = (pos >> @intCast(d - 1 - k)) & 1 != 0;
+                    if (went_right != inverted[k]) idx |= @as(usize, 1) << @intCast(k);
                 }
                 nd.* = .{ .weight = @floatCast(b.values[idx]), .is_leaf = true };
             }
         }
-        return .{ .nodes = nodes };
+        return .{ .nodes = nodes, .cat_ids = try ids.toOwnedSlice(b.gpa) };
     }
 };
 
-const Split = struct { feature: u32, threshold: u32 };
+/// Candidate index and its threshold (for one-hot, the level).
+const Split = struct { cand: u32, threshold: u32 };
+
+pub fn freeCands(gpa: std.mem.Allocator, cands: []Cand) void {
+    for (cands) |c| {
+        if (c.col.len != 0) gpa.free(c.col);
+        if (c.final.len != 0) gpa.free(c.final);
+    }
+    gpa.free(cands);
+}
+
+/// Numeric columns in order, then one-hot categoricals, then four CTRs per wider categorical. A
+/// categorical with one level in training offers nothing and is skipped. Without `ctr` every
+/// column is numeric (ordinal ids for categoricals). Caller owns the result (`freeCands`).
+pub fn candidates(gpa: std.mem.Allocator, ds: *const Dataset, s: Settings) ![]Cand {
+    var list: std.ArrayList(Cand) = .empty;
+    errdefer {
+        for (list.items) |c| {
+            if (c.col.len != 0) gpa.free(c.col);
+            if (c.final.len != 0) gpa.free(c.final);
+        }
+        list.deinit(gpa);
+    }
+    for (0..ds.n_features) |f| {
+        if (s.ctr and ds.kinds[f] == .categorical) continue;
+        try list.append(gpa, .{ .kind = .numeric, .feature = @intCast(f), .nb = ds.n_bins[f] });
+    }
+    if (!s.ctr) return list.toOwnedSlice(gpa);
+    if (ds.labels.len != ds.n_rows) return error.CtrNeedsLabels;
+
+    // Levels present in training, per categorical: one-hot or CTR.
+    var wide: std.ArrayList(u32) = .empty;
+    defer wide.deinit(gpa);
+    for (0..ds.n_features) |f| {
+        if (ds.kinds[f] != .categorical) continue;
+        const present = try gpa.alloc(bool, ds.n_bins[f]);
+        defer gpa.free(present);
+        @memset(present, false);
+        for (0..ds.n_rows) |r| present[binAt(ds, f, r)] = true;
+        var levels: u32 = 0;
+        for (present) |p| levels += @intFromBool(p);
+        if (levels <= 1) continue;
+        if (levels <= s.one_hot_max_size) {
+            try list.append(gpa, .{ .kind = .onehot, .feature = @intCast(f), .nb = ds.n_bins[f] });
+        } else try wide.append(gpa, @intCast(f));
+    }
+    for (wide.items) |f| {
+        for (0..n_ctr_types) |t| {
+            var c: Cand = .{ .kind = .ctr, .feature = f, .ctr_type = @intCast(t), .nb = ctr_buckets };
+            c.col = try gpa.alloc(u8, ds.n_rows);
+            errdefer gpa.free(c.col);
+            c.final = try gpa.alloc(u8, ds.n_bins[f]);
+            errdefer gpa.free(c.final);
+            c.uniq = try ctrColumn(gpa, ds, f, @intCast(t), c.col, c.final);
+            try list.append(gpa, c);
+        }
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+/// `trunc(value * 15)` in f32, as CatBoost buckets a CTR value in [0, 1].
+inline fn bucketOf(value: f32) u8 {
+    return @intFromFloat(@min(@trunc(value * 15), 15));
+}
+
+/// One CTR's training buckets (`col`, online: each row sees only the rows before it, in row
+/// order, CatBoost's `has_time`) and final buckets per level (`final`, counts over every row).
+/// Borders: `(positives + prior) / (count + 1)`. Counter: `count / (largest count + 1)` over all
+/// rows, online or not (CatBoost's `SkipTest`). Returns the number of levels present.
+pub fn ctrColumn(gpa: std.mem.Allocator, ds: *const Dataset, f: u32, t: u8, col: []u8, final: []u8) !u32 {
+    const nl = ds.n_bins[f];
+    const total = try gpa.alloc(u32, nl);
+    defer gpa.free(total);
+    const good = try gpa.alloc(u32, nl);
+    defer gpa.free(good);
+    @memset(total, 0);
+    @memset(good, 0);
+    if (t < ctr_priors.len) {
+        const prior = ctr_priors[t];
+        for (col, 0..) |*o, r| {
+            const k = binAt(ds, f, r);
+            o.* = bucketOf((@as(f32, @floatFromInt(good[k])) + prior) / (@as(f32, @floatFromInt(total[k])) + 1));
+            total[k] += 1;
+            good[k] += @intFromBool(ds.labels[r] > 0.5);
+        }
+        for (final, total, good) |*o, n, g| o.* = bucketOf((@as(f32, @floatFromInt(g)) + prior) / (@as(f32, @floatFromInt(n)) + 1));
+    } else {
+        for (0..ds.n_rows) |r| total[binAt(ds, f, r)] += 1;
+        var largest: u32 = 0;
+        for (total) |n| largest = @max(largest, n);
+        const den: f32 = @floatFromInt(largest + 1);
+        for (final, total) |*o, n| o.* = bucketOf(@as(f32, @floatFromInt(n)) / den);
+        for (col, 0..) |*o, r| o.* = final[binAt(ds, f, r)];
+    }
+    var uniq: u32 = 0;
+    for (total) |n| uniq += @intFromBool(n != 0);
+    return uniq;
+}
 
 /// A random stream key from four integers (splitmix64 rounds), so every stream is fixed by what it
 /// is for, not by which worker draws it.
@@ -466,14 +675,16 @@ const HistCtx = struct {
         const self: *HistCtx = @ptrCast(@alignCast(ctx));
         const b = self.b;
         for (begin..end) |f| {
-            const nb: usize = b.ds.n_bins[f];
+            const cand = b.cands[f];
+            const nb: usize = cand.nb;
             const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
             @memset(slice, .{});
             const w = b.weights;
             for (b.leaf, self.grads, 0..) |l, gp, r| {
                 const s: f64 = if (w.len != 0) w[r] else 1;
                 if (s == 0) continue;
-                const c = &slice[@as(usize, l) * nb + binAt(b.ds, f, r)];
+                const bin: usize = if (cand.kind == .ctr) cand.col[r] else binAt(b.ds, cand.feature, r);
+                const c = &slice[@as(usize, l) * nb + bin];
                 c.g += s * gp.g;
                 c.n += s;
                 c.h += s * gp.h;
@@ -494,11 +705,31 @@ const ScoreCtx = struct {
         for (begin..end) |f| self.b.best[f] = self.feature(f);
     }
 
+    /// One leaf side's contribution to the level's score.
+    inline fn side(b: *const Builder, c: Cell, num: *f64, den: *f64) void {
+        switch (b.s.score) {
+            .cosine, .l2, .auto => {
+                const v = if (c.n > 0) c.g / (c.n + b.s.lambda) else 0;
+                num.* += v * c.g;
+                den.* += v * v * c.n;
+            },
+            .gain => num.* += c.g * c.g / (c.h + b.s.lambda),
+        }
+    }
+
+    inline fn total(b: *const Builder, num: f64, den: f64) f64 {
+        return switch (b.s.score) {
+            .cosine, .auto => num / @sqrt(den + 1e-100),
+            .l2, .gain => num,
+        };
+    }
+
     fn feature(self: *ScoreCtx, f: usize) Builder.Best {
         const b = self.b;
-        const nb: usize = b.ds.n_bins[f];
+        const nb: usize = b.cands[f].nb;
         var best: Builder.Best = .{ .score = -std.math.inf(f64), .threshold = 0 };
         if (nb < 2) return best;
+        if (b.cands[f].kind == .onehot) return self.oneHot(f);
         const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
         // Each leaf's bins become running sums in place (rebuilt every level): `slice[l*nb + k]`
         // is then the left side of threshold k and the last cell the leaf's total.
@@ -506,8 +737,8 @@ const ScoreCtx = struct {
             const cells = slice[l * nb ..][0..nb];
             for (1..nb) |i| cells[i] = cells[i - 1].add(cells[i]);
         }
-        const lambda = b.s.lambda;
-        const first: usize = if (b.has_missing[f]) 0 else 1;
+        // A CTR bucket has no missing value: every threshold is a cut.
+        const first: usize = if (b.has_missing[f] or b.cands[f].kind == .ctr) 0 else 1;
         // With noise, thresholds compete on noisy scores and the winner keeps its noise-free one;
         // the comparison across features draws fresh noise (CatBoost's `SetBestScore`).
         var prng = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, self.level, f));
@@ -520,24 +751,45 @@ const ScoreCtx = struct {
             for (0..self.n_leaves) |l| {
                 const left = slice[l * nb + k];
                 // CatBoost forms the right side by subtraction from the total; so does this.
-                const right = slice[l * nb + nb - 1].sub(left);
-                for ([2]Cell{ left, right }) |side| switch (b.s.score) {
-                    .cosine, .l2, .auto => {
-                        const v = if (side.n > 0) side.g / (side.n + lambda) else 0;
-                        num += v * side.g;
-                        den += v * v * side.n;
-                    },
-                    .gain => num += side.g * side.g / (side.h + lambda),
-                };
+                side(b, left, &num, &den);
+                side(b, slice[l * nb + nb - 1].sub(left), &num, &den);
             }
-            const s = switch (b.s.score) {
-                .cosine, .auto => num / @sqrt(den + 1e-100),
-                .l2, .gain => num,
-            };
+            const s = total(b, num, den);
             const noisy = if (b.sigma > 0) s + b.sigma * prng.random().floatNorm(f64) else s;
             if (noisy > best_noisy) {
                 best_noisy = noisy;
                 best = .{ .score = s, .threshold = @intCast(k) };
+            }
+        }
+        return best;
+    }
+
+    /// `bin == v` against the rest, for each level v present in training, levels in id order.
+    fn oneHot(self: *ScoreCtx, f: usize) Builder.Best {
+        const b = self.b;
+        const nb: usize = b.cands[f].nb;
+        const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
+        var best: Builder.Best = .{ .score = -std.math.inf(f64), .threshold = 0 };
+        var prng = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, self.level, f));
+        var best_noisy = -std.math.inf(f64);
+        for (0..nb) |v| {
+            var present = false;
+            for (0..self.n_leaves) |l| present = present or slice[l * nb + v].n > 0;
+            if (!present) continue;
+            var num: f64 = 0;
+            var den: f64 = 0;
+            for (0..self.n_leaves) |l| {
+                var all: Cell = .{};
+                for (slice[l * nb ..][0..nb]) |c| all = all.add(c);
+                const eq = slice[l * nb + v];
+                side(b, all.sub(eq), &num, &den);
+                side(b, eq, &num, &den);
+            }
+            const s = total(b, num, den);
+            const noisy = if (b.sigma > 0) s + b.sigma * prng.random().floatNorm(f64) else s;
+            if (noisy > best_noisy) {
+                best_noisy = noisy;
+                best = .{ .score = s, .threshold = @intCast(v) };
             }
         }
         return best;
@@ -553,9 +805,14 @@ const ApplySplit = struct {
         _ = worker;
         const self: *ApplySplit = @ptrCast(@alignCast(ctx));
         const ds = self.b.ds;
+        const c = self.b.cands[self.sp.cand];
         for (begin..end) |r| {
-            const right = binAt(ds, self.sp.feature, r) > self.sp.threshold;
-            self.b.leaf[r] |= @as(u16, @intFromBool(right)) << self.bit;
+            const one = switch (c.kind) {
+                .numeric => binAt(ds, c.feature, r) > self.sp.threshold,
+                .onehot => binAt(ds, c.feature, r) == self.sp.threshold,
+                .ctr => c.col[r] > self.sp.threshold,
+            };
+            self.b.leaf[r] |= @as(u16, @intFromBool(one)) << self.bit;
         }
     }
 };

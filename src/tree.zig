@@ -34,6 +34,9 @@ pub const CatSplit = enum {
     ordinal,
     /// Sort levels by smoothed gradient ratio and cut that. See docs/categorical-splits.md.
     optimal,
+    /// CatBoost's: one-hot up to `one_hot_max_size` levels, ordered target statistics above.
+    /// `symmetric` trees and logistic loss only (docs/catboost.md).
+    ctr,
 };
 
 /// How one tree is grown. Booster and forest each carry their own copy with their own defaults.
@@ -101,6 +104,12 @@ pub const Params = struct {
     /// Normal noise on `symmetric` split scores, scaled by the gradients and fading as the model
     /// grows (CatBoost's `random_strength`, default 1 there). 0 is deterministic.
     random_strength: f32 = 0.0,
+    /// Under `cat_split = ctr`: categoricals with up to this many levels are one-hot (CatBoost's
+    /// default 2), wider ones get target statistics.
+    one_hot_max_size: u32 = 2,
+    /// Under `cat_split = ctr`: shrinks a target statistic no tree has used yet, the more distinct
+    /// levels it has (CatBoost's default 0.5).
+    model_size_reg: f32 = 0.5,
     seed: u64 = 0,
 
     /// Upper bound on leaves for allocation sizing.
@@ -121,8 +130,9 @@ pub const Params = struct {
         if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
         if (p.leaf_estimation_iterations == 0) return error.BadLeafIterations;
         if (p.random_strength < 0 or p.bagging_temperature < 0) return error.NegativeRandomness;
-        if (p.grow_policy != .symmetric and (p.bootstrap_type != .none or p.random_strength != 0))
+        if (p.grow_policy != .symmetric and (p.bootstrap_type != .none or p.random_strength != 0 or p.cat_split == .ctr))
             return error.OnlyForSymmetric;
+        if (p.model_size_reg < 0) return error.NegativeRegularisation;
         if (p.grow_policy == .symmetric) {
             if (p.max_depth == 0 or p.max_depth > @import("symmetric.zig").max_depth) return error.BadSymmetricDepth;
             // Rows are subsampled only through the bootstrap types that define it.
@@ -131,7 +141,7 @@ pub const Params = struct {
             // Not built for symmetric trees yet; refused rather than silently ignored.
             if (p.colsample_bytree != 1 or p.colsample_bylevel != 1 or
                 p.colsample_bynode != 1 or p.bootstrap or p.linear_leaves or
-                p.cat_split != .ordinal or p.alpha != 0 or p.max_delta_step != 0)
+                p.cat_split == .optimal or p.alpha != 0 or p.max_delta_step != 0)
                 return error.SymmetricUnsupported;
         }
     }

@@ -72,6 +72,8 @@ pub const Params = struct {
         // With replacement a row's gradient counts more than once, meaningless when
         // next round's gradient comes from one accumulated score per row.
         if (p.tree.bootstrap) return error.BootstrapWithBoosting;
+        // Target statistics count positives: a binary target.
+        if (p.tree.cat_split == .ctr and p.objective != .logistic) return error.CtrNeedsLogistic;
         if (p.sampling == .goss) {
             if (p.tree.grow_policy == .symmetric) return error.SymmetricUnsupported;
             if (p.top_rate <= 0 or p.top_rate >= 1) return error.BadTopRate;
@@ -441,6 +443,9 @@ pub fn train(
         .mvs_reg = if (cfg.tree.mvs_reg) |m| m else null,
         .random_strength = cfg.tree.random_strength,
         .seed = cfg.tree.seed,
+        .ctr = cfg.tree.cat_split == .ctr,
+        .one_hot_max_size = cfg.tree.one_hot_max_size,
+        .model_size_reg = cfg.tree.model_size_reg,
     }) else null;
     defer if (sym) |*s| s.deinit();
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;

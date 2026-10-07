@@ -1,0 +1,27 @@
+$ zarbor titanic3.csv --label=survived --grow_policy=symmetric --cat_split=ctr --lambda=3 --n_rounds=60 --bootstrap_type=mvs --subsample=0.8 --random_strength=1 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (symmetric, CatBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.838248  best=0.838248 @0
+[  10] valid=0.872638  best=0.872638 @10
+[  20] valid=0.867831  best=0.872638 @10
+[  30] valid=0.866305  best=0.872638 @10
+[  40] valid=0.870234  best=0.872638 @10
+[  50] valid=0.871404  best=0.872638 @10
+[  59] valid=0.871858  best=0.872638 @10
+
+rounds  60
+train # ms  ( # ms/tree)
+valid   auc=0.871858  logloss=0.414349
+--- stderr
+--- files

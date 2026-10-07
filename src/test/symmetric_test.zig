@@ -357,3 +357,67 @@ test "weights that are all one change nothing; noise changes the model only when
     const n2 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .random_strength = @as(f32, 5.0), .seed = @as(u64, 2) });
     try testing.expect(!std.mem.eql(f32, &n1, &n2));
 }
+
+test "a CTR row sees only the rows before it; Counter sees every row" {
+    // One categorical, levels 1 2 1 1 2 3, labels 1 0 0 1 1 0. Borders with prior p for row i is
+    // (positives before i with i's level + p) / (rows before i with i's level + 1), bucketed by
+    // trunc(15 v); Counter is count(level) / (largest count + 1) over all rows.
+    const gpa = testing.allocator;
+    const col = [_]u8{ 1, 2, 1, 1, 2, 3 };
+    const y = [_]f32{ 1, 0, 0, 1, 1, 0 };
+    var ds = try fromBins(gpa, &.{&col}, &.{4}, &y);
+    defer ds.deinit();
+    ds.kinds[0] = .categorical;
+
+    const Case = struct { t: u8, want: [6]u8, final: [4]u8 };
+    const cases = [_]Case{
+        // prior 0: 0/1, 0/1, 1/2, 1/3, 0/2, 0/1
+        .{ .t = 0, .want = .{ 0, 0, 7, 5, 0, 0 }, .final = .{ 0, 7, 5, 0 } },
+        // prior 0.5: .5/1, .5/1, 1.5/2, 1.5/3, .5/2, .5/1
+        .{ .t = 1, .want = .{ 7, 7, 11, 7, 3, 7 }, .final = .{ 7, 9, 7, 3 } },
+        // prior 1: 1/1, 1/1, 2/2, 2/3, 1/2, 1/1
+        .{ .t = 2, .want = .{ 15, 15, 15, 10, 7, 15 }, .final = .{ 15, 11, 10, 7 } },
+        // Counter: counts 3, 2, 1 of 6 rows; largest 3, so value = count / 4
+        .{ .t = 3, .want = .{ 11, 7, 11, 11, 7, 3 }, .final = .{ 0, 11, 7, 3 } },
+    };
+    for (cases) |c| {
+        var got: [6]u8 = undefined;
+        var final: [4]u8 = undefined;
+        const uniq = try symmetric.ctrColumn(gpa, &ds, 0, c.t, &got, &final);
+        try testing.expectEqual(@as(u32, 3), uniq);
+        try testing.expectEqualSlices(u8, &c.want, &got);
+        try testing.expectEqualSlices(u8, &c.final, &final);
+    }
+}
+
+test "categoricals: one-hot up to one_hot_max_size levels, four CTRs above, one level dropped" {
+    const gpa = testing.allocator;
+    var a: [12]u8 = undefined; // two levels
+    var w: [12]u8 = undefined; // four levels
+    var k: [12]u8 = undefined; // one level
+    var y: [12]f32 = undefined;
+    for (0..12) |i| {
+        a[i] = @intCast(1 + i % 2);
+        w[i] = @intCast(1 + i % 4);
+        k[i] = 1;
+        y[i] = @floatFromInt(i % 3 % 2);
+    }
+    var ds = try fromBins(gpa, &.{ &a, &w, &k, &a }, &.{ 3, 5, 2, 3 }, &y);
+    defer ds.deinit();
+    ds.kinds[0] = .categorical;
+    ds.kinds[1] = .categorical;
+    ds.kinds[2] = .categorical;
+    // Column 3 stays numeric.
+    const cands = try symmetric.candidates(gpa, &ds, .{ .depth = 2, .lambda = 1, .learning_rate = 0.1, .score = .auto, .leaf_iterations = 1, .ctr = true });
+    defer symmetric.freeCands(gpa, cands);
+    try testing.expectEqual(@as(usize, 6), cands.len);
+    try testing.expectEqual(symmetric.CandKind.numeric, cands[0].kind);
+    try testing.expectEqual(@as(u32, 3), cands[0].feature);
+    try testing.expectEqual(symmetric.CandKind.onehot, cands[1].kind);
+    try testing.expectEqual(@as(u32, 0), cands[1].feature);
+    for (cands[2..], 0..) |c, t| {
+        try testing.expectEqual(symmetric.CandKind.ctr, c.kind);
+        try testing.expectEqual(@as(u32, 1), c.feature);
+        try testing.expectEqual(@as(u8, @intCast(t)), c.ctr_type);
+    }
+}

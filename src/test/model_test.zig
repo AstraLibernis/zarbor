@@ -613,6 +613,7 @@ test "optimal categorical splits actually fire, and ordinal ones never do" {
             // Without this the round-trip test below would pass vacuously.
             .optimal => try testing.expect(n > 0),
             .ordinal => try testing.expectEqual(@as(usize, 0), n),
+            .ctr => unreachable, // symmetric trees only; not in this loop
         }
     }
 }

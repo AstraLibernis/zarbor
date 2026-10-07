@@ -222,6 +222,11 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         }
         n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(full.n_rows)) * valid_frac));
         n_train = full.n_rows - n_valid;
+        // The shuffle picks which rows validate; each side then goes back to file order. Row order
+        // is the time order that ordered target statistics read (`--cat_split=ctr`, CatBoost's
+        // `has_time`), so a shuffled training set would change what each row may see.
+        std.sort.pdq(u32, perm[0..n_train], {}, std.sort.asc(u32));
+        std.sort.pdq(u32, perm[n_train..], {}, std.sort.asc(u32));
     }
 
     var train_ds = try data.subset(gpa, &full, perm[0..n_train]);

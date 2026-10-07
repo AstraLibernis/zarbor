@@ -1,6 +1,6 @@
 # CatBoost-style training
 
-**Status: stages 1–2 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
+**Status: stages 1–3 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
 
 CatBoost is the same family as XGBoost and LightGBM: gradients and hessians, histogram split
 search, Newton leaf values, shrinkage. What is genuinely different is how a tree is grown and how
@@ -34,8 +34,8 @@ that depth, so a depth-6 tree is six yes/no questions and 64 leaves (`symmetric.
 
 Not yet supported under `symmetric`, and refused rather than ignored: column sampling, GOSS,
 linear leaves, `alpha`, `max_delta_step`, `cat_split=optimal`; row sampling only through a
-bootstrap type (stage 2). Categorical columns are
-split on their ordinal ids until stage 3.
+bootstrap type (stage 2). Without `--cat_split=ctr`, categorical columns split on their ordinal
+ids.
 
 ### Matching CatBoost
 
@@ -101,11 +101,51 @@ seeds each, same split, 200 trees, depth 6 (harness `parity/cat_stat.py`):
 difference accumulates over trees and its cause is not found. zarbor's Bernoulli is the better of
 the two, not the worse.
 
+## Stage 3: categoricals as CatBoost has them (done)
+
+`--cat_split=ctr` (symmetric trees, logistic loss) turns each categorical into split candidates
+the CatBoost way:
+
+- **One level** in training: dropped. **Up to `--one_hot_max_size` (2)**: one-hot, a split
+  `level == v`.
+- **Wider**: four *ordered target statistics* (CTRs), each a 16-bucket column: Borders with
+  priors 0, 0.5 and 1, `(positives + prior) / (count + 1)`, and Counter,
+  `count / (largest count + 1)`, bucketed `trunc(15 * value)` in f32. During training a row's
+  Borders value counts **only the rows before it** in file order (CatBoost's `has_time`), so a
+  row's own label never reaches its own feature. Counter uses every row, as CatBoost's
+  `SkipTest` does.
+- **Prediction** uses the counts over every training row. For a CTR on one column that is a fixed
+  function of the level, so a fitted CTR split is stored as an ordinary categorical set split (the
+  smaller side, the node marked inverted when that side is the bit-1 one): no new node kind and no
+  model-format change. A level never seen in training gets bin 0, whose counts are the prior's
+  unless training had missing values in that column.
+- **Candidate order** is CatBoost's, for ties: numeric columns, then one-hot, then CTRs.
+- **`--model_size_reg`** (0.5) shrinks a CTR's score by `(1 + uniq / max_uniq)^-0.5` until a CTR of
+  the same type (Borders or Counter) on that column has been chosen. It counts as chosen the moment
+  it is picked at a level, even if the redundancy rule then removes it, as in CatBoost.
+
+Measured against catboost 1.2.10 with `has_time=True, one_hot_max_size=2, max_ctr_complexity=1`
+on 20,000 training rows of S6E10 (three two-level categoricals, `Class` with three levels, `Age`
+as a 75-level categorical, three numeric columns), predictions row for row on training and
+held-out rows (harness `parity/cat_ctr.py`):
+
+| case | train max diff | held-out max diff |
+|---|---|---|
+| 1 tree | 5.4e-7 | 5.4e-7 |
+| 50 trees, `model_size_reg` 0 | 6.2e-7 | 5.8e-7 |
+| 50 trees, `model_size_reg` 0.5 | 5.9e-7 | 5.8e-7 |
+| 200 trees, `model_size_reg` 0.5 | 7.3e-7 | 7.3e-7 |
+
+**A fix this found elsewhere.** `zarbor train` shuffled every row, even with `--valid-frac=0`, to
+pick the validation rows. Row order is the time order a CTR reads, so CatBoost parity broke at tree
+5. The shuffle now only chooses which rows validate; both sides go back to file order. Six golden
+outputs changed, all from seeded row sampling (forest bootstrap, `subsample`, GOSS) picking by
+position; runs without sampling are bit-identical. `cv` already kept file order.
+
 ## Still to build
 
 | stage | what | how it can be checked |
 |---|---|---|
-| 3 | ordered target statistics for categoricals (CTRs), one-hot for two-level columns | row for row with `has_time=True` |
 | 4 | ordered boosting | row for row with `has_time=True`; about 4x CatBoost's plain cost |
 | 5 | categorical feature combinations | row for row with `has_time=True` |
 | 6 | CatBoost's default permutations | statistically only |
