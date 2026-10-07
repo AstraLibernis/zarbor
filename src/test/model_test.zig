@@ -1531,3 +1531,38 @@ test "histogram_pool_size below three histograms is refused, not overrun" {
     defer ds.deinit();
     try testing.expectError(error.TreeTooLargeForHistogramBudget, builder.Builder.init(gpa, pool, &ds, .{ .histogram_pool_size = 1 }));
 }
+
+test "GOSS warm-up rounds train on every row: the same trees as no sampling" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try manyNumeric(gpa, pool, 4_000, 4);
+    defer ds.deinit();
+    const labels = try gpa.alloc(f32, ds.n_rows);
+    for (labels, 0..) |*l, i| l.* = @floatFromInt(@intFromBool(((i * 7) % 1000) + ((i *% 2654435761) >> 20) % 300 > 600));
+    ds.labels = labels;
+    // 10 rounds at lr 0.1 are all warm-up: GOSS must not touch a row yet.
+    const plain = config.Config.from(.{ .n_rounds = 10, .learning_rate = 0.1, .verbose_eval = 0 }).gbdt;
+    var warm_cfg = plain;
+    warm_cfg.sampling = .goss;
+    var cold_cfg = warm_cfg;
+    cold_cfg.goss_warmup = false;
+    var a = try booster.train(gpa, pool, &ds, null, plain, null);
+    defer a.model.deinit();
+    var b = try booster.train(gpa, pool, &ds, null, warm_cfg, null);
+    defer b.model.deinit();
+    var c = try booster.train(gpa, pool, &ds, null, cold_cfg, null);
+    defer c.model.deinit();
+    var same_cold = true;
+    for (a.model.trees.items, b.model.trees.items, c.model.trees.items) |x, y, z| {
+        try testing.expectEqual(x.nodes.len, y.nodes.len);
+        for (x.nodes, y.nodes) |n, m| try testing.expect(std.meta.eql(n, m));
+        if (x.nodes.len != z.nodes.len) {
+            same_cold = false;
+        } else for (x.nodes, z.nodes) |n, m| if (!std.meta.eql(n, m)) {
+            same_cold = false;
+        };
+    }
+    // Sampling from round 1 grows different trees, or the test proves nothing.
+    try testing.expect(!same_cold);
+}

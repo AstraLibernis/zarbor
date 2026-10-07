@@ -86,7 +86,7 @@ because they make LightGBM less exact.
 | `subsample` | exactly `round(n x rate)` rows | XGBoost: a coin flip per row |
 | missing direction when a node saw no missing rows | the larger child | XGBoost right, LightGBM left |
 | unseen value between training values | the nearer side (midpoint edges) | XGBoost the lower; others midpoint |
-| GOSS ranking | `\|g\|` (the paper's); `--goss_rank=gradient_hessian` for LightGBM's `\|g*h\|` | LightGBM `\|g*h\|`, and no GOSS for the first `1/lr` rounds |
+| GOSS ranking | `\|g\|` (the paper's); `--goss_rank=gradient_hessian` for LightGBM's `\|g*h\|` | LightGBM `\|g*h\|` |
 | base score with `scale_pos_weight` | logit of the label mean | LightGBM the same; XGBoost one Newton step |
 | sigmoid in gradients | polynomial, max error 8.1e-7 | `exp` |
 | score accumulation | f32 | XGBoost f32, LightGBM and CatBoost f64 |
@@ -105,7 +105,7 @@ comes from the sampling.
 | XGBoost `colsample_bytree/bylevel/bynode` 0.54 | | | 1.88 / 0.45 / 1.11 |
 | LightGBM bagging 0.7 | 0.951431 | 0.951300 | −1.35 |
 | LightGBM `feature_fraction` 0.54 | 0.951477 | 0.951425 | −0.67 |
-| LightGBM GOSS 0.2/0.1 | 0.951488 | 0.951477 | −0.12 |
+| LightGBM GOSS 0.2/0.1, LightGBM's key and warm-up | 0.951488 | 0.951356 | −1.51 |
 | CatBoost MVS 0.8 | 0.950964 | 0.950962 | −0.05 |
 | CatBoost Bayesian, temperature 1 | 0.950751 | 0.950758 | 0.15 |
 | CatBoost split noise, strength 1 | 0.951015 | 0.950967 | −0.88 |

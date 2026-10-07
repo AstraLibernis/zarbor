@@ -191,8 +191,9 @@ Combinations that have not been verified against CatBoost are refused, not ignor
 - **GOSS** (`--sampling=goss`, `--top_rate` 0.2, `--other_rate` 0.1): keeps the rows with the
   largest gradients plus a reweighted random sample of the rest. zarbor ranks by `|g|`, as the
   paper and LightGBM's docs say. LightGBM's code ranks by `|g*h|`; use
-  `--goss_rank=gradient_hessian` to match it. LightGBM also skips GOSS for the first
-  `1/learning_rate` rounds; zarbor samples from the first.
+  `--goss_rank=gradient_hessian` to match it. Like LightGBM, the first `(int)(1/learning_rate)`
+  rounds (10 at 0.1) train on every row before sampling starts; `--goss_warmup=false` samples
+  from the first round, as the paper does.
 - **Linear leaves** (`--linear_leaves=1`, `--lin_leaf_lambda` 1, `--lin_leaf_max_terms` 8):
   each leaf fits an affine function of the numeric features on its root-to-leaf path. This
   helped squared-error regression (California, −0.006 RMSE) and hurt logistic classification
@@ -298,8 +299,8 @@ Defaults in brackets. `random_forest` and `linear` override some of them (sectio
 **Categoricals:** `--cat_split` [ordinal], `--cat_smooth` [10], `--max_cat_threshold` [32],
 `--max_cat_to_onehot` [4], `--min_data_per_group` [100].
 
-**LightGBM:** `--sampling` [uniform], `--goss_rank` [gradient], `--top_rate` [0.2],
-`--other_rate` [0.1], `--linear_leaves` [false], `--lin_leaf_lambda` [1],
+**LightGBM:** `--sampling` [uniform], `--goss_rank` [gradient], `--goss_warmup` [true],
+`--top_rate` [0.2], `--other_rate` [0.1], `--linear_leaves` [false], `--lin_leaf_lambda` [1],
 `--lin_leaf_max_terms` [8].
 
 **CatBoost:** `--score_function` [auto = cosine under symmetric],

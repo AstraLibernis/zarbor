@@ -60,6 +60,10 @@ pub const Params = struct {
     top_rate: f32 = 0.2,
     /// GOSS: fraction of the *remaining* rows sampled uniformly.
     other_rate: f32 = 0.1,
+    /// GOSS: train the first `(int)(1 / learning_rate)` rounds on every row, as LightGBM does
+    /// (goss.hpp), so the sampling starts from trees fitted on all the data. False samples
+    /// from the first round, as the GOSS paper does.
+    goss_warmup: bool = true,
     /// Stop after this many rounds without validation improvement; 0 disables.
     early_stopping_rounds: u32 = 0,
     /// Print per-round metrics every N rounds. 0 silences training.
@@ -360,6 +364,13 @@ fn evaluate(
     };
 }
 
+/// LightGBM's `iter < static_cast<int>(1.0f / learning_rate)`, in f32 as there: 10 rounds at
+/// 0.1, 3 at 0.3.
+pub fn gossWarmupRounds(learning_rate: f32) u32 {
+    const r: f32 = 1.0 / learning_rate;
+    return if (r >= 4.0e9) std.math.maxInt(u32) else @intFromFloat(@trunc(r));
+}
+
 pub fn train(
     gpa: std.mem.Allocator,
     pool: *Pool,
@@ -475,7 +486,7 @@ pub fn train(
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
         prof.stop(.grad, t_g);
 
-        const subset: ?[]const u32 = if (cfg.sampling == .goss) blk: {
+        const subset: ?[]const u32 = if (cfg.sampling == .goss and !(cfg.goss_warmup and round < gossWarmupRounds(cfg.tree.learning_rate))) blk: {
             const t_gs = prof.start();
             defer prof.stop(.goss_select, t_gs);
             break :blk gossSelect(pool, grads, goss_counts, goss_chunks, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());

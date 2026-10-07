@@ -220,3 +220,11 @@ test "parallel gossSelect equals the serial selection at every thread count" {
         }
     }
 }
+
+test "GOSS warm-up rounds follow LightGBM's truncated f32 rule" {
+    try testing.expectEqual(@as(u32, 10), booster.gossWarmupRounds(0.1));
+    try testing.expectEqual(@as(u32, 3), booster.gossWarmupRounds(0.3));
+    try testing.expectEqual(@as(u32, 1), booster.gossWarmupRounds(1.0));
+    try testing.expectEqual(@as(u32, 33), booster.gossWarmupRounds(0.03));
+    try testing.expectEqual(@as(u32, 6), booster.gossWarmupRounds(0.15));
+}
