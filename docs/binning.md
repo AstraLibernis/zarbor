@@ -180,6 +180,34 @@ With the best floor for each dataset, `greedy` with an unbounded `max_bin` beats
 default (`quantile` at 256) on all six. The AUC gains are about 0.0003 to 0.0008, close to
 the noise of a single CV run. The regression gains are clearer: Ames −1.7%, housing −0.8%.
 
+### Does the wider `tune` space find better models? (housing, 2026-10-07)
+
+**[MEASURED]** at 0e17a2b. Housing affordability, 13.7k rows, folds grouped by `Zip`,
+5 folds, 40 random trials, seed 1. Two runs: the old default space (`max_bin` 64/128/256)
+against the new one (`max_bin` 8..16384 and `min_data_in_bin` 1..300). Each run's top 3
+were then re-scored on two fold seeds the search never saw. RMSE, lower is better.
+
+| | best, searched | best, mean of unseen seeds | wall time |
+|---|---:|---:|---:|
+| old space | 13.955 | 13.983 | 45 s |
+| new space | 13.816 | 13.845 | 160 s |
+
+All three of the new run's top 3 beat the old run's best. **The bins did not cause it.**
+Each winner was re-run with only its bins swapped, scored on fold seeds 1-3 (mean):
+
+| winner | its own bins | swapped |
+|---|---:|---:|
+| old (`lambda` 18, 500 rounds) | 13.974 at 128 | 14.034 at 15004 / floor 2 |
+| new (`lambda` 0.16, 800 rounds) | 13.835 at 15004 / floor 2 | 13.832 at 256, 13.807 at 128 |
+
+The new winner is as good or better at 128 bins, and wide bins make the old one worse. The
+gain came from the other settings: low `lambda`, more rounds, `subsample` 0.69. All of
+those were inside the old space too. Changing the space changed the random draws, and that
+run happened to land there. Under these tuned settings, bins past 256 bought nothing here
+and cost 3.5x the search time. This is one dataset and one search seed. The untuned
+single-split gains on EEG (-47%) and House Prices (-5%) in docs/stress.md remain untested
+this way.
+
 ## Not offered
 
 - CatBoost's exact optimisers (`MaxLogSum`, `MinEntropy`): the same objective as `logsum`
