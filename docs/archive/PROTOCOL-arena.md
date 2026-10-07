@@ -1,11 +1,11 @@
 # Protocol: zarbor against the reference implementations
 
-Pre-registered 2026-09-23, before any number in `docs/arena.md` was produced.
+Pre-registered 2026-09-23, before any number in `docs/archive/arena.md` was produced.
 
 One question, asked of every model zarbor ships: **against the implementation
 that defines its family, how close is the score and how long does it take.**
 
-`docs/vs-lightgbm.md` already answered a narrower version of this — is the
+`docs/archive/vs-lightgbm.md` already answered a narrower version of this — is the
 GBDT *correct* — on five small datasets. This is the wider one: all four
 models, one large dataset, accuracy *and* wall time.
 
@@ -106,7 +106,7 @@ envelope is the reference's own spread over `max_bin` in {63, 127, 255} — how
 far the score moves when a defensible binning choice changes, which is the
 largest *known* legitimate difference between two histogram implementations.
 A gap inside the envelope is implementation variation. This is the yardstick
-`docs/vs-lightgbm.md` arrived at after the first attempt (spread over
+`docs/archive/vs-lightgbm.md` arrived at after the first attempt (spread over
 `random_state`) turned out to measure nothing, because both libraries are
 deterministic without sampling.
 

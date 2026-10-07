@@ -9,9 +9,9 @@
 
 Both of zarbor's solvers (`lbfgs`, `adam`) are run for each, because they
 minimise the same convex objective and so must agree wherever both arrive --
-see docs/linear-solvers.md.
+see docs/archive/linear-solvers.md.
 
-Accounting follows docs/PROTOCOL-arena.md: prepare + fit + predict on both
+Accounting follows docs/archive/PROTOCOL-arena.md: prepare + fit + predict on both
 sides (binning is paid by whoever does it), parsing measured separately and
 charged to neither.
 

@@ -5,7 +5,7 @@
 //! Names follow XGBoost where an equivalent exists, so published tunings transfer
 //! without a translation table; LightGBM-only knobs keep LightGBM's names. Where the
 //! same name still means something slightly different (`max_bin` counts the missing
-//! bin, `subsample` draws exactly k rows, `colsample_*` rounds), docs/parity.md says so.
+//! bin, `subsample` draws exactly k rows, `colsample_*` rounds), docs/archive/parity.md says so.
 
 const std = @import("std");
 const data = @import("data.zig");

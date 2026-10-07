@@ -696,7 +696,7 @@ test "alpha under lbfgs lands on a genuine L1 optimum" {
 test "goss_rank: the two keys select different rows, and coincide when h is 1" {
     // LightGBM's goss.hpp ranks by |g * h| where the paper -- and LightGBM's
     // own `top_rate` docs -- say |g|. That difference was the whole of the one
-    // parity gap in docs/arena.md (see docs/measurements.md and docs/goss.md).
+    // parity gap in docs/archive/arena.md (see docs/measurements.md and docs/archive/goss.md).
     //
     // Asserted on the selector directly rather than through a fitted model:
     // whether an end-to-end fit happens to diverge depends on how far the

@@ -16,7 +16,7 @@ reassembled from flags.
 ## Against the standard implementations
 
 `bench/arena/linear_models.py`, n=5, 16 threads. Times in ms, accounted as in
-`docs/PROTOCOL-arena.md`: prepare + fit + predict on both sides, parsing
+`docs/archive/PROTOCOL-arena.md`: prepare + fit + predict on both sides, parsing
 separate. Logistic is compared at `lambda=1` / `C=1`; regression is compared
 unregularised so no penalty-scaling convention has to be assumed to carry
 between two libraries.
@@ -193,7 +193,7 @@ without reaching the optimum, so a partially-converged run and a healthy one
 look alike by this measure.
 
 Tuning the 1e-3 constant until this grid comes out clean would be fitting the
-diagnostic to one dataset, which is the trap `docs/vs-lightgbm.md` exists to
+diagnostic to one dataset, which is the trap `docs/archive/vs-lightgbm.md` exists to
 warn about. Named as a limit, not patched over.
 
 **What would actually close it** is a criterion adam does not currently have:

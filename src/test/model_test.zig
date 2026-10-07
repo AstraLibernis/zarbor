@@ -482,7 +482,7 @@ test "cat_l2 penalises the children and not the parent" {
     // The asymmetry is the whole point and it is easy to get wrong: adding
     // cat_l2 to the parent score as well reads as the self-consistent choice,
     // and cost much of the gain the categorical columns carry until LightGBM's
-    // source settled it. See docs/vs-lightgbm.md and docs/measurements.md.
+    // source settled it. See docs/archive/vs-lightgbm.md and docs/measurements.md.
     //
     // Pinned by consequence rather than by a magic number. With the penalty on
     // the children alone, a huge cat_l2 drives every categorical child score

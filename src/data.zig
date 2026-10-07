@@ -11,7 +11,7 @@ const Pool = @import("pool.zig").Pool;
 
 /// `u16` so categoricals can exceed 255 levels (ZIP3, city, metro). Measured at
 /// parity with `u8` in the accumulation kernel (bound by the scattered histogram
-/// update), so it costs memory only. See docs/wide-categoricals.md.
+/// update), so it costs memory only. See docs/archive/wide-categoricals.md.
 pub const BinIdx = u16;
 
 /// Hard ceiling from the index type; `n_bins` (`u16`) must hold it.
@@ -91,7 +91,7 @@ pub const Dataset = struct {
     /// one feature over scattered rows. Too-wide columns go to `wide_cols`.
     /// A partition slowdown once blamed on `u16` bins was `goesLeft` taking
     /// the whole `Split` by value (it now takes a `split.SplitTest`); the bin
-    /// width "was never the cost" (docs/wide-categoricals.md, "Three wrong guesses").
+    /// width "was never the cost" (docs/archive/wide-categoricals.md, "Three wrong guesses").
     bins: []u8,
     /// Column-major bins for features with more than 256 bins; empty otherwise.
     wide_cols: [][]BinIdx,

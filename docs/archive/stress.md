@@ -86,4 +86,4 @@ bins, rebuilt instead of subtracted. A per-value floor of 300 gives the same AUC
   binning-policy decision, not a known defect.
 - The forest's 1024-leaf default reaches the histogram ceiling at 20 continuous columns and
   4096 bins. It now trains, but slowly. Its `tune` space now stops `max_bin` at 1024
-  (docs/binning.md).
+  (docs/archive/binning.md).

@@ -33,10 +33,10 @@ pub const CatSplit = enum {
     /// Cut the dictionary id like a numeric bin. Ids follow first appearance, so the reachable
     /// partitions are prefixes of an arbitrary order.
     ordinal,
-    /// Sort levels by smoothed gradient ratio and cut that. See docs/categorical-splits.md.
+    /// Sort levels by smoothed gradient ratio and cut that. See docs/archive/categorical-splits.md.
     optimal,
     /// CatBoost's: one-hot up to `one_hot_max_size` levels, ordered target statistics above.
-    /// `symmetric` trees and logistic loss only (docs/catboost.md).
+    /// `symmetric` trees and logistic loss only (docs/archive/catboost.md).
     ctr,
 };
 

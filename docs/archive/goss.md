@@ -1,6 +1,6 @@
 # GOSS: the one parity gap, and what was behind it
 
-`docs/arena.md` recorded one row outside its noise floor. GOSS cost zarbor
+`docs/archive/arena.md` recorded one row outside its noise floor. GOSS cost zarbor
 0.000050 AUC and cost LightGBM 0.001180 at the same rates — a 24x difference
 in damage from the same named feature. Characterised there, not diagnosed.
 This is the diagnosis.

@@ -1,6 +1,6 @@
 # zarbor against the reference implementation of each model it ships
 
-Protocol pre-registered in `docs/PROTOCOL-arena.md`. Harness:
+Protocol pre-registered in `docs/archive/PROTOCOL-arena.md`. Harness:
 `bench/arena/arena.py`. Raw output: `bench/arena/results.json`.
 
 Dataset: Kaggle Playground S6E9 (EV purchases), 668,665 x 13, binary, ROC-AUC.
@@ -138,7 +138,7 @@ At 60% the gap is 0.000052 — indistinguishable from the no-sampling gap of
 0.000056. The two agree on the boosting and disagree only on **how much
 accuracy is lost per row discarded**, in proportion to how many are discarded.
 
-**Diagnosed — see `docs/goss.md`.** LightGBM's `goss.hpp` ranks rows by
+**Diagnosed — see `docs/archive/goss.md`.** LightGBM's `goss.hpp` ranks rows by
 `|g * h|`, not `|g|`; the paper and LightGBM's own `top_rate` documentation
 say gradient. For logistic loss `h = p(1-p)`, so the hessian factor inverts
 the ordering between a confidently-wrong row and an uncertain one. Matching
@@ -184,7 +184,7 @@ nothing and saves it the 224 ms sklearn spends on one-hot and scaling.
 
 ## F2: linear leaves against LightGBM's `linear_tree`
 
-`docs/RESULTS.md` measured linear leaves against zarbor's own constant-leaf
+`docs/archive/RESULTS.md` measured linear leaves against zarbor's own constant-leaf
 baseline. This is the check that was missing: against the other
 implementation of the same idea. `bench/arena/linear_leaves.py`, california,
 leafwise, 200 rounds.
@@ -220,11 +220,11 @@ That spike is reproducible, not noise: identical to six decimals across
 or features here.
 
 A regularisation constant should not behave like that, and this repo has
-argued the same thing in the opposite direction before -- `docs/vs-lightgbm.md`
+argued the same thing in the opposite direction before -- `docs/archive/vs-lightgbm.md`
 treated a non-monotonic response to `cat_min_group` as evidence that zarbor's
 *mechanism* was wrong rather than its constant, and that reading turned out to
 be right. The same reasoning points at conditioning in LightGBM's leaf solve
-here. `docs/linear-leaves.md` records that zarbor centres each feature on its
+here. `docs/archive/linear-leaves.md` records that zarbor centres each feature on its
 within-leaf mean before the Cholesky precisely because the raw system "has a
 condition number in the billions and the Cholesky is meaningless in f32", and
 `db7dde7` made the ridge scale-invariant and tested that it is.
@@ -246,7 +246,7 @@ overhead; zarbor is simply slower overall on a set this small.
 - Two parity rows inside their noise floor, one family row agreeing to 1.6e-5,
   one family row ahead of its reference, and the GOSS row **diagnosed**: the
   gap was LightGBM ranking by `|g*h|` where zarbor ranks by `|g|`. Matching
-  the key puts it at 0.20 envelopes. `docs/goss.md`.
+  the key puts it at 0.20 envelopes. `docs/archive/goss.md`.
 - On model work zarbor leads XGBoost by 1.08x, **trails LightGBM by 1.07x**,
   leads sklearn's forest by 1.21x and its logistic regression by 5.93x.
 - The parser is 1.31x faster than pandas and is the reason the LightGBM
@@ -257,4 +257,4 @@ overhead; zarbor is simply slower overall on a set this small.
 - Linear leaves reach a better optimum than LightGBM's `linear_tree` (0.4576
   against 0.4612) and, unlike it, respond smoothly to their ridge constant.
 
-¹ with the default `--goss_rank=gradient`. See `docs/goss.md`.
+¹ with the default `--goss_rank=gradient`. See `docs/archive/goss.md`.

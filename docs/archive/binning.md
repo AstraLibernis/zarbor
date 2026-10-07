@@ -208,7 +208,7 @@ gain came from the other settings: low `lambda`, more rounds, `subsample` 0.69. 
 those were inside the old space too. Changing the space changed the random draws, and that
 run happened to land there. Under these tuned settings, bins past 256 bought nothing here
 and cost 3.5x the search time. This is one dataset and one search seed. The untuned
-single-split gains on EEG (-47%) and House Prices (-5%) in docs/stress.md remain untested
+single-split gains on EEG (-47%) and House Prices (-5%) in docs/archive/stress.md remain untested
 this way.
 
 ## Not offered

@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&tests.step);
     check.dependOn(&golden.step);
 
-    // Cost prototype for widening the bin type; see docs/wide-categoricals.md.
+    // Cost prototype for widening the bin type; see docs/archive/wide-categoricals.md.
     const wc = b.addExecutable(.{ .name = "widecat", .root_module = b.createModule(.{
         .root_source_file = b.path("bench/widecat.zig"),
         .target = target,

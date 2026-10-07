@@ -9,7 +9,7 @@ rather than trusting this page; it is a snapshot, and snapshots rot.
 
 ## First, the premise is wrong: LightGBM does not continually win
 
-Source: `docs/arena.md`, harness `bench/arena/arena.py`, raw
+Source: `docs/archive/arena.md`, harness `bench/arena/arena.py`, raw
 `bench/arena/results.json`. Kaggle Playground S6E9, 668,665 x 13, binary,
 ROC-AUC, one shared stratified split, n=5 medians, 16 threads.
 
@@ -71,7 +71,7 @@ zarbor does something no LightGBM setting can do.
 
 ### 2. The random forest is better and faster than sklearn's
 
-Source: `docs/arena.md`, rows D.
+Source: `docs/archive/arena.md`, rows D.
 
 | | AUC | model time |
 |---|---:|---:|
@@ -86,7 +86,7 @@ is still the model you would rather run.
 
 ### 3. The linear models are ~6x faster at the same accuracy
 
-Source: `docs/arena.md`, row E; `docs/linear-solvers.md`.
+Source: `docs/archive/arena.md`, row E; `docs/archive/linear-solvers.md`.
 
 | | AUC | model time |
 |---|---:|---:|
@@ -102,11 +102,11 @@ a wide binned design.
 `--repeats=N` extends that across fold seeds. `zarbor tune` runs the search in
 the same process. No Python harness shelling out per fold, no environment to
 reproduce. The parser alone is 1.31x `pandas.read_csv` (135 ms against 177 ms
-on 40 MB, `docs/arena.md`).
+on 40 MB, `docs/archive/arena.md`).
 
 ### A fifth, harder to price: reimplementing is how you learn what the reference does
 
-`docs/goss.md`: LightGBM ranks GOSS candidate rows by `|g*h|`. The GOSS paper
+`docs/archive/goss.md`: LightGBM ranks GOSS candidate rows by `|g*h|`. The GOSS paper
 says `|g|`, and so does LightGBM's own documentation. The code
 (`src/boosting/goss.hpp`, line 127) says otherwise. That was found by building
 GOSS, disagreeing with LightGBM by 1.42 envelopes, and going to read why.

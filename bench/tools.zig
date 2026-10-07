@@ -7,8 +7,8 @@
 //!
 //!   zig build tools -- summarise <base.tsv> <new.tsv>    pair two grid runs (seeds)
 //!   zig build tools -- figure [scoreboard.json] [out.html]
-//!   zig build tools -- grid <zarbor> <tag> [flags...]     the PROTOCOL.md grid, TSV out
-//!   zig build tools -- controls                          PROTOCOL.md controls C3-C5
+//!   zig build tools -- grid <zarbor> <tag> [flags...]     the docs/archive/PROTOCOL.md grid, TSV out
+//!   zig build tools -- controls                          docs/archive/PROTOCOL.md controls C3-C5
 //!   zig build tools -- solver-stress                     do lbfgs and adam meet?
 //!
 //! Paths: `$ZARBOR_BENCH_DATA` overrides `<repo>/bench/data`; the repo root is injected
@@ -578,7 +578,7 @@ fn writePage(w: *std.Io.Writer, x: Page) !void {
         \\     <b>GBDT&nbsp;+&nbsp;GOSS is the one row where the gap exceeds its own noise floor</b> (1.42&times; the
         \\     reference's max_bin envelope) &mdash; zarbor scores higher, but that is an unexplained disagreement,
         \\     not a result. Random forest and linear regression compare deliberately different constructions,
-        \\     so their gaps are design differences rather than defects. See docs/arena.md.</p>
+        \\     so their gaps are design differences rather than defects. See docs/archive/arena.md.</p>
         \\  <details open><summary>Table view &mdash; every number in the figure</summary>
         \\  <table><thead><tr><th>Model</th><th>Reference</th><th>zarbor</th><th>reference</th>
         \\  <th>Metric</th><th>Rel. gap</th><th>Closer to truth</th>
@@ -630,7 +630,7 @@ const grid_sets = [_]Dataset{
     .{ .name = "housing", .label = "AffordabilityPercentageTrue", .objective = "squared_error", .extra = &.{ "--group-col=Zip", "--drop=City", "--drop=Metro", "--drop=Zip3" } },
 };
 
-/// The pre-registered grid of docs/PROTOCOL.md (was run.py): 5-fold cv per dataset and
+/// The pre-registered grid of docs/archive/PROTOCOL.md (was run.py): 5-fold cv per dataset and
 /// seed, one TSV line each: tag, dataset, seed, seconds, the run's output on one line.
 /// `$ONLY=a,b` limits datasets; `$SEEDS` defaults to 0,1,2.
 fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
@@ -674,7 +674,7 @@ fn grid(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []const
 
 // ---------------------------------------------------------------- controls
 
-/// Controls C3-C5 of docs/PROTOCOL.md (was controls.sh; C1 and C2 are not run here, and
+/// Controls C3-C5 of docs/archive/PROTOCOL.md (was controls.sh; C1 and C2 are not run here, and
 /// C3 here only checks that two predictions from the same saved file agree; the exact
 /// in-process vs reloaded comparison is in model_test.zig's round-trip tests). NEW is this checkout's
 /// zig-out/bin/zarbor; OLD is `$ZARBOR_OLD` (required); the data is `adult.csv` in the

@@ -2,156 +2,156 @@
   "A gbdt-depthwise": {
     "kind": "parity",
     "reference": "xgboost",
-    "zarbor_auc": 0.9413951087094808,
-    "zarbor_self_auc": 0.941395,
+    "zarbor_auc": 0.9414252437165935,
+    "zarbor_self_auc": 0.941425,
     "ref_auc": 0.9414411004084566,
-    "gap": 4.599169897578914e-05,
+    "gap": 1.5856691863103123e-05,
     "envelope": 0.0009177292187604325,
     "zarbor": {
-      "read": 148,
-      "prepare": 46,
-      "fit": 512,
-      "predict": 27,
-      "model_total": 585,
-      "total": 733
+      "read": 37,
+      "prepare": 64,
+      "fit": 379,
+      "predict": 34,
+      "model_total": 477,
+      "total": 514
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 0.0009300001693191007,
-      "fit": 612.1577079993585,
-      "predict": 37.66506699867023,
-      "model_total": 649.8237049981981,
-      "total": 827.1660119971784
+      "read": 177.83154000062495,
+      "prepare": 0.0009200011845678091,
+      "fit": 623.3160219999263,
+      "predict": 37.7012270000705,
+      "model_total": 661.0181690011814,
+      "total": 838.8497090018063
     }
   },
   "B gbdt-leafwise": {
     "kind": "parity",
     "reference": "lightgbm",
-    "zarbor_auc": 0.9413708011665753,
-    "zarbor_self_auc": 0.941371,
+    "zarbor_auc": 0.9414183326458324,
+    "zarbor_self_auc": 0.941418,
     "ref_auc": 0.9414266993219612,
-    "gap": 5.589815538586951e-05,
+    "gap": 8.366676128801487e-06,
     "envelope": 0.0011025856698022585,
     "zarbor": {
-      "read": 148,
-      "prepare": 45,
-      "fit": 486,
-      "predict": 22,
-      "model_total": 553,
-      "total": 701
+      "read": 38,
+      "prepare": 64,
+      "fit": 364,
+      "predict": 28,
+      "model_total": 456,
+      "total": 494
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 0.0011399988579796627,
-      "fit": 473.9878390009835,
-      "predict": 49.17292400023143,
-      "model_total": 523.1619030000729,
-      "total": 700.5042099990533
+      "read": 177.83154000062495,
+      "prepare": 0.0009999985195463523,
+      "fit": 478.713100999812,
+      "predict": 49.21772399939073,
+      "model_total": 527.9318249977223,
+      "total": 705.7633649983472
     }
   },
   "C gbdt-goss": {
     "kind": "parity",
     "reference": "lightgbm-goss",
-    "zarbor_auc": 0.9413207940914604,
-    "zarbor_self_auc": 0.941321,
+    "zarbor_auc": 0.9413132350290225,
+    "zarbor_self_auc": 0.941313,
     "ref_auc": 0.9402465819620223,
-    "gap": 0.0010742121294381457,
+    "gap": 0.0010666530670002672,
     "envelope": 0.0007572617702182871,
     "zarbor": {
-      "read": 148,
-      "prepare": 44,
-      "fit": 583,
-      "predict": 23,
-      "model_total": 650,
-      "total": 798
+      "read": 37,
+      "prepare": 64,
+      "fit": 498,
+      "predict": 29,
+      "model_total": 591,
+      "total": 628
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 0.0010900002962443978,
-      "fit": 627.5560539997969,
-      "predict": 51.74497999905725,
-      "model_total": 679.3021239991504,
-      "total": 856.6444309981307
+      "read": 177.83154000062495,
+      "prepare": 0.0010300009307684377,
+      "fit": 624.93251900014,
+      "predict": 53.01069999950414,
+      "model_total": 677.9442490005749,
+      "total": 855.7757890011999
     }
   },
   "D forest (1024-leaf cap)": {
     "kind": "family",
     "reference": "sklearn-rf-capped",
-    "zarbor_auc": 0.9390253981053334,
-    "zarbor_self_auc": 0.939025,
+    "zarbor_auc": 0.938148290652729,
+    "zarbor_self_auc": 0.938148,
     "ref_auc": 0.9348288507859043,
-    "gap": 0.004196547319429089,
+    "gap": 0.0033194398668247027,
     "envelope": null,
     "zarbor": {
-      "read": 149,
-      "prepare": 46,
-      "fit": 4985,
+      "read": 37,
+      "prepare": 64,
+      "fit": 3006,
       "predict": 114,
-      "model_total": 5145,
-      "total": 5294
+      "model_total": 3184,
+      "total": 3221
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 182.94787800004997,
-      "fit": 6193.5175109993,
-      "predict": 85.9630790000665,
-      "model_total": 6462.428467999416,
-      "total": 6639.7707749983965
+      "read": 177.83154000062495,
+      "prepare": 180.54756699893915,
+      "fit": 6212.869634000526,
+      "predict": 86.02201999929093,
+      "model_total": 6479.439220998756,
+      "total": 6657.270760999381
     }
   },
   "D forest (uncapped ref)": {
     "kind": "family",
     "reference": "sklearn-rf-default",
-    "zarbor_auc": 0.9390253981053334,
-    "zarbor_self_auc": 0.939025,
+    "zarbor_auc": 0.938148290652729,
+    "zarbor_self_auc": 0.938148,
     "ref_auc": 0.9335154860887239,
-    "gap": 0.005509912016609442,
+    "gap": 0.004632804564005055,
     "envelope": null,
     "zarbor": {
-      "read": 149,
-      "prepare": 46,
-      "fit": 4985,
+      "read": 37,
+      "prepare": 64,
+      "fit": 3006,
       "predict": 114,
-      "model_total": 5145,
-      "total": 5294
+      "model_total": 3184,
+      "total": 3221
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 183.73478099965723,
-      "fit": 9060.865985999044,
-      "predict": 408.964181000556,
-      "model_total": 9653.564947999257,
-      "total": 9830.907254998237
+      "read": 177.83154000062495,
+      "prepare": 179.37599899960333,
+      "fit": 8907.364950000556,
+      "predict": 410.2821429987671,
+      "model_total": 9497.023091998926,
+      "total": 9674.854631999551
     }
   },
   "E linear": {
     "kind": "family",
     "reference": "sklearn-logreg",
-    "zarbor_auc": 0.9377134676788648,
-    "zarbor_self_auc": 0.937713,
+    "zarbor_auc": 0.9377161647672381,
+    "zarbor_self_auc": 0.937716,
     "ref_auc": 0.9377290894955645,
-    "gap": 1.5621816699784574e-05,
+    "gap": 1.292472832647995e-05,
     "envelope": null,
     "zarbor": {
-      "read": 147,
-      "prepare": 45,
-      "fit": 156,
+      "read": 36,
+      "prepare": 64,
+      "fit": 203,
       "predict": 1,
-      "model_total": 202,
-      "total": 349
+      "model_total": 268,
+      "total": 304
     },
     "ref": {
-      "read": 177.34230699898035,
-      "prepare": 227.72279899982095,
-      "fit": 787.6648780002142,
-      "predict": 6.55849400027364,
-      "model_total": 1021.9461710003088,
-      "total": 1199.2884779992892
+      "read": 177.83154000062495,
+      "prepare": 216.23592600008124,
+      "fit": 639.7135129991511,
+      "predict": 5.540072999792756,
+      "model_total": 861.4895119990251,
+      "total": 1039.32105199965
     }
   },
   "_parser": {
-    "zarbor_ms": 146,
-    "pandas_ms": 177.34230699898035,
-    "ratio": 1.2146733356094543
+    "zarbor_ms": 38,
+    "pandas_ms": 177.83154000062495,
+    "ratio": 4.679777368437499
   }
 }

@@ -3,7 +3,7 @@
 
 //! Binning: the per-value floor, edge placement and each policy, at the
 //! extremes. Bin-level parity with XGBoost, LightGBM and CatBoost is measured
-//! outside the unit tests (docs/binning.md); these pin the rules themselves.
+//! outside the unit tests (docs/archive/binning.md); these pin the rules themselves.
 
 const std = @import("std");
 const bin_edges = @import("../bin_edges.zig");
@@ -214,7 +214,7 @@ test "quantile reproduces XGBoost's cuts on an exact summary" {
     // sentinels dropped). XGBoost's summary holds 8 * max_bin entries, so at
     // these budgets it is exact and the cut rule itself is compared; with more
     // distinct values than that the sketch approximates, and zarbor, which
-    // counts exactly, does not follow it there (docs/binning.md).
+    // counts exactly, does not follow it there (docs/archive/binning.md).
     var vals: [300]f32 = undefined;
     for (&vals, 0..) |*v, i| {
         const x: f64 = @floatFromInt((i * 37) % 101);

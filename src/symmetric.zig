@@ -3,7 +3,7 @@
 
 //! Symmetric (oblivious) trees, CatBoost's default: one split per depth, shared by every node at
 //! that depth, so a depth-D tree is D yes/no questions and 2^D leaves. Re-implemented from
-//! CatBoost 1.2.10's documented behaviour and source reading (docs/catboost.md); no CatBoost code.
+//! CatBoost 1.2.10's documented behaviour and source reading (docs/archive/catboost.md); no CatBoost code.
 //!
 //! The fitted tree is an ordinary `tree.Tree`: a complete binary tree whose nodes at depth d all
 //! test split d, so prediction, the model file and blending need nothing new. A row's leaf index is

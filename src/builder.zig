@@ -399,7 +399,7 @@ pub const Builder = struct {
     /// Partial Fisher-Yates: sample `k` of `src[0..n]` into `dst`. `k` is `floor(n * rate)`, at
     /// least 1, as XGBoost (whose `colsample_*` names these are) and scikit-learn's `max_features`
     /// count it, so a fraction is a ceiling on the columns a tree sees. LightGBM rounds instead; on
-    /// 13 columns at 0.5 that is 7 against 6 (docs/parity.md).
+    /// 13 columns at 0.5 that is 7 against 6 (docs/archive/parity.md).
     fn sample(b: *Builder, src: []u32, n: usize, dst: []u32, rate: f32) usize {
         if (rate >= 1.0) {
             @memcpy(dst[0..n], src[0..n]);

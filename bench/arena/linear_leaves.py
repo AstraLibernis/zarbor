@@ -5,7 +5,7 @@
 """zarbor's linear leaves against LightGBM's `linear_tree`.
 
 Both fit an affine function of the root-to-leaf path's numeric features in
-each leaf instead of emitting a constant. docs/RESULTS.md measured zarbor's
+each leaf instead of emitting a constant. docs/archive/RESULTS.md measured zarbor's
 against its own constant-leaf baseline; this measures it against the other
 implementation of the same idea, which is the check that was missing.
 

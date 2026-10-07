@@ -167,7 +167,7 @@ noinline fn bestCatSplitWide(best: *Split, fid: u32, h: []const Bin, nb: u16, to
 }
 
 /// Best split for one categorical feature. Follows LightGBM `FindBestThresholdCategoricalInner`
-/// (v4.7.0, src/treelearner/feature_histogram.cpp) step for step; docs/vs-lightgbm.md records the
+/// (v4.7.0, src/treelearner/feature_histogram.cpp) step for step; docs/archive/vs-lightgbm.md records the
 /// cost of six earlier differences (zarbor fell well short of LightGBM's gain on the same columns;
 /// see docs/measurements.md). Subtle:
 /// - `cat_smooth` is also the participation threshold in rows, not just sort-key padding; a level

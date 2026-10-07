@@ -5,7 +5,8 @@
 """zarbor against the reference implementation of each model it ships,
 measured phase by phase so a difference can be attributed to a phase.
 
-Protocol: docs/PROTOCOL-arena.md.  Results: docs/arena.md.
+Protocol: docs/archive/PROTOCOL-arena.md.  Results: docs/correctness.md section 3
+(first run: docs/archive/arena.md).
 
 The accounting that makes this fair
 -----------------------------------

@@ -4,7 +4,7 @@
 //! CSV parsing: bytes on disk to a column-major `Frame`. Every model pays
 //! this before any bin, so it has its own module, tests and timings;
 //! `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. Faster than
-//! `pandas.read_csv`; see docs/measurements.md and docs/arena.md.
+//! `pandas.read_csv`; see docs/measurements.md and docs/archive/arena.md.
 
 const std = @import("std");
 const Pool = @import("pool.zig").Pool;

@@ -169,7 +169,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
 
     // Broken out because scoring an implementation against another one means
     // knowing which phase a difference is in. Reading the CSV is not the
-    // model's work and should not be charged to it; see docs/arena.md.
+    // model's work and should not be charged to it; see docs/archive/arena.md.
     try out.print("rows    {d}\nmodels  {d}\nread    {d} ms\nbin     {d} ms\npredict {d} ms\n", .{
         ds.n_rows,
         bundles.items.len,

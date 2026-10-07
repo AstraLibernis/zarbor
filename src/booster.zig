@@ -29,7 +29,7 @@ pub const Sampling = enum {
 };
 
 /// Magnitude GOSS ranks rows by to keep in full. The one place the GOSS paper and
-/// LightGBM's code differ; the choice moves accuracy measurably (docs/goss.md).
+/// LightGBM's code differ; the choice moves accuracy measurably (docs/archive/goss.md).
 pub const GossRank = enum {
     /// `|g|`: Ke et al. (NeurIPS 2017) and LightGBM's `top_rate` docs. Keeps the
     /// largest residuals.

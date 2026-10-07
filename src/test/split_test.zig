@@ -3,7 +3,7 @@
 
 //! Split-search semantics pinned against XGBoost and LightGBM.
 //!
-//! Both were found by the 2026-10-07 reference audit (docs/parity.md): a
+//! Both were found by the 2026-10-07 reference audit (docs/archive/parity.md): a
 //! partition the scans could not reach, and a gain scale that made
 //! `min_split_gain` mean twice XGBoost's `gamma`. Each test is built so the old
 //! behaviour fails it.

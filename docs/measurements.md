@@ -66,7 +66,7 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 ## src/booster.zig
 
 ### GossRank
-- Original comment: "Magnitude GOSS ranks rows by to keep in full. The one place the GOSS paper and LightGBM's code differ; worth 0.0012 AUC on a binary problem (docs/goss.md)."
+- Original comment: "Magnitude GOSS ranks rows by to keep in full. The one place the GOSS paper and LightGBM's code differ; worth 0.0012 AUC on a binary problem (docs/archive/goss.md)."
 - Introduced: 59ce1af (2026-09-23) — from `git log -S`; current wording from c43a41f (2026-09-29)
 
 ### sigmoid8
@@ -76,7 +76,7 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
   sigmoid, over x in [-30, 30] at step 1e-4 (ReleaseSafe, the function copied verbatim from
   a9ee25b): max absolute error 8.11e-7, max relative error 4.92e-6, max 58.3 f32 ulp, the worst at
   x = -25.99 where the value is tiny. Harmless in practice: with it, zarbor's predictions match
-  XGBoost's row for row through 500 trees (docs/parity.md). Comment corrected.
+  XGBoost's row for row through 500 trees (docs/archive/parity.md). Comment corrected.
 
 ### valid_min_chunk (duplicate in src/forest.zig, now a pointer to booster's)
 - Original comment: "Validation rows per pool chunk, at least. 4096 cut 133k rows into 33 chunks for 16 workers, so the barrier waited on a worker with three while the average had two; 1024 gives 131. Rows are independent, so the chunking changes nothing but the wait."
@@ -137,7 +137,7 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 ## src/csv.zig
 
 ### module doc (CSV load speed vs pandas)
-- Original comment: "CSV parsing: bytes on disk to a column-major `Frame`. Every model pays this before any bin, so it has its own module, tests and timings; `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. 117 ms vs `pandas.read_csv` 179 ms on a 32 MB / 534,932-row file. See docs/arena.md."
+- Original comment: "CSV parsing: bytes on disk to a column-major `Frame`. Every model pays this before any bin, so it has its own module, tests and timings; `data.zig` re-exports `Frame`, `ColumnKind`, `readCsv`. 117 ms vs `pandas.read_csv` 179 ms on a 32 MB / 534,932-row file. See docs/archive/arena.md."
 - Introduced: 99848ab (2026-09-23) — numbers first appear in `git log -S'117 ms'`; current wording c43a41f (2026-09-29)
 
 ### `bytes_per_worker`
@@ -161,11 +161,11 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 - Introduced: 21b5189 (2026-09-21) — `git log -S'35 MB'`; current wording c43a41f (2026-09-29)
 
 ### `BinIdx` (u16 vs u8 kernel cost)
-- Original comment: "`u16` so categoricals can exceed 255 levels (ZIP3, city, metro). 0.98-1.01x of `u8` in the accumulation kernel (bound by the scattered histogram update), so it costs memory only. See docs/wide-categoricals.md."
+- Original comment: "`u16` so categoricals can exceed 255 levels (ZIP3, city, metro). 0.98-1.01x of `u8` in the accumulation kernel (bound by the scattered histogram update), so it costs memory only. See docs/archive/wide-categoricals.md."
 - Introduced: fafa53b (2026-09-22) — `git log -S'0.98-1.01x'`
 
 ### `Dataset.bins` (partition slowdown attribution)
-- Original comment: "The 51 -> 110 ms partition slowdown once blamed on `u16` bins was `goesLeft` taking a 160-byte `Split` by value; the bin width \"was never the cost\" (docs/wide-categoricals.md, \"Three wrong guesses\")."
+- Original comment: "The 51 -> 110 ms partition slowdown once blamed on `u16` bins was `goesLeft` taking a 160-byte `Split` by value; the bin width \"was never the cost\" (docs/archive/wide-categoricals.md, \"Three wrong guesses\")."
 - Introduced: ee0b3bd (2026-09-22) — `git log -S'110 ms'`; current wording 5b90a97 (2026-10-05, `git blame`)
 
 ### `Dataset.bins_rm` (row-major mirror gain and cost)
@@ -287,7 +287,7 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 - Introduced: ee0b3bd (2026-09-22) — `git log -S"2.2x"`; current wording from c43a41f (2026-09-29) per `git blame`
 
 ### `bestCatSplit` (LightGBM parity)
-- Original comment: "docs/vs-lightgbm.md records the cost of six earlier differences (zarbor got 64% of LightGBM's gain on the same columns)."
+- Original comment: "docs/archive/vs-lightgbm.md records the cost of six earlier differences (zarbor got 64% of LightGBM's gain on the same columns)."
 - Introduced: ae0abf2 (2026-09-22) — `git log -S"64%"`; current wording from c43a41f (2026-09-29) per `git blame`
 
 ### `cat_scratch_small` / `bestCatSplitWide`
@@ -329,5 +329,5 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 ## src/test/sweep_test.zig
 
 ### GOSS ranking-key test
-- Original comment: "LightGBM's goss.hpp ranks by |g * h| where the paper -- and LightGBM's own `top_rate` docs -- say |g|. Worth 0.0012 AUC on the EV set, which is the whole of the one parity gap in docs/arena.md. See docs/goss.md."
+- Original comment: "LightGBM's goss.hpp ranks by |g * h| where the paper -- and LightGBM's own `top_rate` docs -- say |g|. Worth 0.0012 AUC on the EV set, which is the whole of the one parity gap in docs/archive/arena.md. See docs/archive/goss.md."
 - Introduced: 59ce1af (2026-09-23) — `git blame`

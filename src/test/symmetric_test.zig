@@ -2,7 +2,7 @@
 // Copyright (C) 2026 AstraLibernis
 
 //! Symmetric (CatBoost-style) trees. Row-for-row parity with catboost 1.2.10 is measured outside
-//! the unit tests (docs/catboost.md); these pin the pieces a wrong change would break silently:
+//! the unit tests (docs/archive/catboost.md); these pin the pieces a wrong change would break silently:
 //! the shared split per depth, the leaf-index mapping, Newton leaves, the score functions and the
 //! redundant-split stop.
 
@@ -183,7 +183,7 @@ test "more Newton steps solve each leaf; squared error needs one" {
     defer ds.deinit();
 
     // Logistic, one tree, full step. Each step is -G / (H + lambda) at the moved score, with no
-    // lambda * v term in G (CatBoost's walk, matched to 6e-7 in docs/catboost.md), so lambda only
+    // lambda * v term in G (CatBoost's walk, matched to 6e-7 in docs/archive/catboost.md), so lambda only
     // damps the steps and they converge to the unregularised leaf optimum, sum (sigmoid(v) - y) = 0
     // over the leaf's rows. One step does not get there.
     var resid: [2]f64 = undefined;

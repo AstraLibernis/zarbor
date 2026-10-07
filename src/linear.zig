@@ -29,7 +29,7 @@ const fitLbfgs = lin_solve.fitLbfgs;
 const fitAdam = lin_solve.fitAdam;
 
 /// How coefficients are fitted. Both minimise the *same* convex objective, so where
-/// both arrive they must agree; measured, with the exceptions, in docs/linear-solvers.md.
+/// both arrive they must agree; measured, with the exceptions, in docs/archive/linear-solvers.md.
 pub const LinSolver = enum {
     /// **L-BFGS** (limited-memory Broyden-Fletcher-Goldfarb-Shanno), **OWL-QN**
     /// (orthant-wise limited-memory quasi-Newton) when `alpha` > 0. Tens of passes where
