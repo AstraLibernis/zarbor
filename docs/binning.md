@@ -75,6 +75,63 @@ the old `quantile` diverged at round 5.
 
 28 of 55 golden outputs changed (Titanic's `age` and `fare` now bin differently); re-baselined.
 
+## Choosing `max_bin` (measured 2026-10-07)
+
+**[MEASURED]** at ce61145, ReleaseFast, 16 threads, Ryzen 7 9800X3D. Defaults otherwise
+(`quantile`, depthwise, zarbor's default rounds and hold-out split). Time is the hyperfine mean
+of 3 runs after 1 warm-up and covers the whole command (CSV load, binning, training, saving).
+Peak RSS is from getrusage. "Bins used" is the total over numeric columns from `zarbor info`.
+"Wide" counts the columns stored as u16. The hold-out metric is one run on one split, so treat
+differences under about 0.001 AUC or 0.003 RMSE as noise (California moves non-monotonically
+by that much). The harness is `~/workspace/research/wide-bins/timing.py`, outside the repo.
+
+| data | max_bin | bins used | wide | train s | peak MB | hold-out |
+|---|---:|---:|---:|---:|---:|---|
+| California 20k | 64 | 501 | 0 | 0.14 | 16 | rmse 0.4548 |
+| | 256 | 1845 | 0 | 0.25 | 18 | rmse 0.4467 |
+| | 1024 | 6672 | 7 | 0.61 | 30 | rmse 0.4488 |
+| | 4096 | 20715 | 7 | 1.74 | 65 | rmse 0.4505 |
+| | 16384 | 48047 | 7 | 3.49 | 134 | rmse 0.4482 |
+| Adult 49k | 64 | 337 | 0 | 0.22 | 23 | auc 0.91913 |
+| | 256 | 631 | 0 | 0.20 | 23 | auc 0.92591 |
+| | 1024 | 1399 | 1 | 0.27 | 23 | auc 0.92604 |
+| | 4096 | 4471 | 1 | 0.50 | 30 | auc 0.92627 |
+| | 16384 | 16759 | 1 | 1.50 | 58 | auc 0.92633 |
+| Airline 100k | 64 | 346 | 0 | 0.34 | 46 | auc 0.95808 |
+| | 256 | 564 | 0 | 0.36 | 48 | auc 0.95820 |
+| | 1024 | 1332 | 1 | 0.42 | 50 | auc 0.95833 |
+| | 4096 | 2890 | 1 | 0.59 | 49 | auc 0.95912 |
+| | 16384 | 2890 | 1 | 0.57 | 48 | auc 0.95912 |
+| Airline 700k | 64 | 346 | 0 | 1.58 | 180 | auc 0.95765 |
+| | 256 | 676 | 0 | 1.52 | 180 | auc 0.95800 |
+| | 1024 | 1444 | 1 | 1.60 | 183 | auc 0.95859 |
+| | 4096 | 3670 | 1 | 1.88 | 183 | auc 0.95869 |
+| | 16384 | 3670 | 1 | 1.96 | 184 | auc 0.95869 |
+| Synthetic 1M x 20 continuous | 64 | 1280 | 0 | 2.69 | 327 | auc 0.84106 |
+| | 256 | 5120 | 0 | 3.28 | 336 | auc 0.84155 |
+| | 1024 | 20480 | 20 | 6.27 | 317 | auc 0.84163 |
+| | 4096 | 81920 | 20 | 15.00 | 354 | auc 0.84157 |
+| | 16384 | 327680 | 20 | 72.32 | 965 | auc 0.84140 |
+
+What it shows:
+
+- Cost follows **bins used**, not `max_bin`. Once every distinct value has its own bin
+  (Airline at 4096), raising `max_bin` changes nothing and costs nothing.
+- Wide (u16) storage has no visible penalty of its own: Airline 100k goes from 256 to 1024
+  bins, one column wide, for +17% time. The cost comes from histogram size. Wall time is
+  roughly flat up to about 5k bins in total and then grows faster than linearly: on the
+  synthetic set, 82k to 328k bins is 4x the bins and 4.8x the time, with memory going from
+  354 to 965 MB.
+- The accuracy gain depends on the data. It is real but small where columns have a few
+  thousand distinct values and there are many rows (Airline: +0.0009 AUC at 100k, +0.0007 at
+  700k, both peaking at one bin per value). There is none on small data (California) or on
+  continuous data, where the synthetic set peaks at 1024 and declines after it.
+
+Guidance: keep 256 as the default. Try 1024 to 4096 when there are more than about 100k rows
+and the columns have more than 256 distinct values but not millions. Beyond about 1024 per
+continuous column you pay a lot of time for nothing. Tune it like any other setting, with CV
+rather than a single split.
+
 ## Not offered
 
 - CatBoost's exact optimisers (`MaxLogSum`, `MinEntropy`): the same objective as `logsum`
