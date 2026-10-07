@@ -35,7 +35,7 @@ pub const magic = "ZMDL";
 /// a sorted list of the level ids on the left. Versions 2 and 3 still load;
 /// their thresholds are read a byte at a time and their masks expanded into
 /// the list form, so a model saved before this change scores identically.
-pub const format_version: u32 = 4;
+pub const format_version: u32 = 5;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -157,6 +157,9 @@ fn putU16(gpa: std.mem.Allocator, b: *Buf, v: u16) !void {
 fn putU32(gpa: std.mem.Allocator, b: *Buf, v: u32) !void {
     try b.appendSlice(gpa, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
 }
+fn putU64(gpa: std.mem.Allocator, b: *Buf, v: u64) !void {
+    try b.appendSlice(gpa, &std.mem.toBytes(std.mem.nativeToLittle(u64, v)));
+}
 fn putF32(gpa: std.mem.Allocator, b: *Buf, v: f32) !void {
     try putU32(gpa, b, @bitCast(v));
 }
@@ -184,6 +187,9 @@ const Reader = struct {
     }
     fn u32v(r: *Reader) !u32 {
         return std.mem.littleToNative(u32, std.mem.bytesToValue(u32, try r.take(4)));
+    }
+    fn u64v(r: *Reader) !u64 {
+        return std.mem.littleToNative(u64, std.mem.bytesToValue(u64, try r.take(8)));
     }
     fn f32v(r: *Reader) !f32 {
         return @bitCast(try r.u32v());
@@ -276,6 +282,7 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU32(gpa, b, n.cat_ofs);
             try putU8(gpa, b, n.n_lin);
             try putU32(gpa, b, n.lin_ofs);
+            try putU8(gpa, b, @intFromEnum(n.kind));
         }
         // After the nodes, the tree's two side tables that nodes index into:
         // the categorical level ids (`cat_ofs`/`n_cat`), then the linear-leaf
@@ -288,6 +295,22 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU32(gpa, b, term.feature);
             try putF32(gpa, b, term.coef);
             try putF32(gpa, b, term.center);
+        }
+        // Version 5: the combination statistics `combo` nodes index.
+        try putU32(gpa, b, @intCast(t.combos.len));
+        for (t.combos) |c| {
+            try putU32(gpa, b, @intCast(c.parts.len));
+            for (c.parts) |part| {
+                try putU8(gpa, b, @intFromEnum(part.kind));
+                try putU32(gpa, b, part.feature);
+                try putU16(gpa, b, part.value);
+            }
+            try putU32(gpa, b, @intCast(c.keys.len));
+            for (c.keys, c.buckets) |k, bk| {
+                try putU64(gpa, b, k);
+                try putU8(gpa, b, bk);
+            }
+            try putU8(gpa, b, c.unseen);
         }
     }
 }
@@ -336,7 +359,8 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
     // Per node: feature, left, right, weight, two flags, the threshold (u16 from
     // version 4, u8 before), then what each version added.
     const node_bytes: usize = 16 + 2 + @as(usize, if (ver >= 4) 2 else 1) +
-        @as(usize, if (ver >= 3) 10 else 0) + @as(usize, if (ver >= 4) 1 else 0);
+        @as(usize, if (ver >= 3) 10 else 0) + @as(usize, if (ver >= 4) 1 else 0) +
+        @as(usize, if (ver >= 5) 1 else 0);
     const nt = try r.count(if (ver >= 3) 12 else 4); // node count, then cat-id (v3: mask-word) and term counts
     const trees = try gpa.alloc(tree.Tree, nt);
     var made: usize = 0;
@@ -370,6 +394,7 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
             const cat_ofs = if (ver >= 3) try r.u32v() else 0;
             const n_lin = if (ver >= 3) try r.u8v() else 0;
             const lin_ofs = if (ver >= 3) try r.u32v() else 0;
+            const kind = if (ver >= 5) std.enums.fromInt(tree.NodeKind, try r.u8v()) orelse return error.BadModelFile else .split;
             n.* = .{
                 .feature = feature,
                 .left = left,
@@ -383,13 +408,15 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
                 .n_cat = n_cat,
                 .n_lin = n_lin,
                 .lin_ofs = lin_ofs,
+                .kind = kind,
             };
             // A corrupt child or feature index would walk off the node array or the
             // row during prediction, and a child at or above its parent could loop
             // forever. The builder appends children after their parent, so every
             // real child index is past its parent's.
+            // A combo node's `feature` indexes the combo table, checked once it is read.
             if (!n.is_leaf and (n.left <= i or n.right <= i or n.left >= nn or n.right >= nn or
-                n.feature >= n_features)) return error.BadModelFile;
+                (n.kind == .split and n.feature >= n_features))) return error.BadModelFile;
         }
         if (ver >= 3) {
             const nm = try r.count(if (ver >= 4) 2 else 8); // u16 ids, or u64 mask words
@@ -426,8 +453,53 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
                 if (n.n_lin != 0 and n.lin_ofs + n.n_lin > nl) return error.BadModelFile;
             }
         }
+        if (ver >= 5) try readCombos(gpa, r, n_features, &trees[made - 1]);
+        for (nodes) |n| {
+            if (!n.is_leaf and n.kind == .combo and n.feature >= trees[made - 1].combos.len) return error.BadModelFile;
+        }
     }
     return trees;
+}
+
+/// A tree's combination statistics (version 5). Parts must name real columns and keys must be
+/// strictly ascending, or a lookup could misread; both are checked here, not at prediction.
+fn readCombos(gpa: std.mem.Allocator, r: *Reader, n_features: usize, t: *tree.Tree) !void {
+    const nc = try r.count(9); // parts count, keys count, unseen
+    if (nc == 0) return;
+    const combos = try gpa.alloc(tree.Combo, nc);
+    var made: usize = 0;
+    // Owned by the tree from here, so the caller's errdefer frees whatever was made.
+    t.combos = combos[0..0];
+    errdefer {
+        for (combos[0..made]) |*c| c.deinit(gpa);
+        gpa.free(combos);
+        t.combos = &.{};
+    }
+    while (made < nc) : (made += 1) {
+        const np = try r.count(7);
+        const parts = try gpa.alloc(tree.Part, np);
+        errdefer gpa.free(parts);
+        for (parts) |*part| {
+            const kind = std.enums.fromInt(tree.PartKind, try r.u8v()) orelse return error.BadModelFile;
+            const feature = try r.u32v();
+            const value = try r.u16v();
+            if (feature >= n_features) return error.BadModelFile;
+            part.* = .{ .kind = kind, .feature = feature, .value = value };
+        }
+        const nk = try r.count(9);
+        const keys = try gpa.alloc(u64, nk);
+        errdefer gpa.free(keys);
+        const buckets = try gpa.alloc(u8, nk);
+        errdefer gpa.free(buckets);
+        for (keys, buckets, 0..) |*k, *bk, i| {
+            k.* = try r.u64v();
+            bk.* = try r.u8v();
+            if (i != 0 and keys[i - 1] >= k.*) return error.BadModelFile;
+        }
+        const unseen = try r.u8v();
+        combos[made] = .{ .parts = parts, .keys = keys, .buckets = buckets, .unseen = unseen };
+    }
+    t.combos = combos;
 }
 
 /// Serialise to a byte buffer the caller owns.
@@ -651,6 +723,19 @@ fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
             out[made - 1].cat_ids = try gpa.dupe(data.BinIdx, src[made - 1].cat_ids);
         if (src[made - 1].lin.len != 0)
             out[made - 1].lin = try gpa.dupe(tree.LinTerm, src[made - 1].lin);
+        if (src[made - 1].combos.len != 0) {
+            var list: std.ArrayList(tree.Combo) = .empty;
+            errdefer {
+                for (list.items) |*c| c.deinit(gpa);
+                list.deinit(gpa);
+            }
+            for (src[made - 1].combos) |*c| {
+                var copy = try c.dupe(gpa);
+                errdefer copy.deinit(gpa);
+                try list.append(gpa, copy);
+            }
+            out[made - 1].combos = try list.toOwnedSlice(gpa);
+        }
     }
     return out;
 }

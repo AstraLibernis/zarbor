@@ -1,6 +1,6 @@
 # CatBoost-style training
 
-**Status: stages 1–4 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
+**Status: stages 1–5 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
 
 CatBoost is the same family as XGBoost and LightGBM: gradients and hessians, histogram split
 search, Newton leaf values, shrinkage. What is genuinely different is how a tree is grown and how
@@ -173,11 +173,44 @@ from CatBoost **earlier**, at tree 103 (same three splits in a different order).
 CatBoost longer than the reference does; the cause of the late divergence, in either, is not found.
 CatBoost's ordered cost is about 4x its plain cost; zarbor's has not been timed.
 
+## Stage 5: categorical combinations (done)
+
+Under `--cat_split=ctr`, from the second level of each tree on, CatBoost's *tree CTRs*: the bases
+are all numeric and one-hot splits above, taken together as one projection, and each CTR
+projection already chosen in this tree. Each base gains each wide categorical not already in it,
+while the projection's length stays within `--max_ctr_complexity` (4); duplicates are skipped, and
+each new projection gives the same four CTR types. A row's key mixes its levels of the projection's
+categoricals with its bits of the projection's splits, so statistics like "class x (age > 30)"
+exist.
+
+- **Length**, CatBoost's `GetFullProjectionLength`: the projection's categoricals, plus **one** if
+  it has any split bits, however many. (The implementation spec said categoricals plus bits plus
+  one-hots; that gave different trees from the first one with combinations, and CatBoost's
+  projection.h settles it.)
+- A chosen combination is a new node kind: the node holds a table index and a bucket threshold, the
+  tree holds the table (projection, sorted keys, buckets from counts over all training rows, and
+  the bucket an unseen key gets). Single-column CTRs keep the categorical set split.
+- **Model format 5** adds the node kind and the per-tree combination tables; format 4 files still
+  load. Saving goes through a tree copy that at first dropped the tables; the save/load round trip
+  is now tested.
+- Unlike CatBoost, `max_ctr_complexity` is not silently forced to 1 below 200 iterations.
+
+Measured against catboost 1.2.10 (`has_time=True`, explicit `max_ctr_complexity`) on the stage-3
+data, row for row on training and held-out rows (harness `parity/cat_combo.py`):
+
+| case | max abs difference |
+|---|---|
+| complexity 2, 1 tree | 5.4e-7 |
+| complexity 2, 3 and 4, 50 trees | 5.9e-7 |
+| complexity 4, 200 trees (CatBoost used 28 combinations) | 6.6e-7 |
+
+CatBoost visits its bases in hash order, zarbor in split order, so candidates with exactly equal
+scores could break the other way; none did here.
+
 ## Still to build
 
 | stage | what | how it can be checked |
 |---|---|---|
-| 5 | categorical feature combinations | row for row with `has_time=True` |
 | 6 | CatBoost's default permutations | statistically only |
 
 CatBoost's CPU default is **plain** boosting at every data size; ordered boosting runs only when

@@ -561,3 +561,55 @@ test "the ordered root split is the argmax of body estimates scored against tail
         try testing.expectEqual(best[1], @as(u32, root.threshold));
     }
 }
+
+const model_mod = @import("../model.zig");
+
+test "a model with combination splits survives save and load exactly" {
+    // Two categoricals whose interaction carries the signal and a numeric column, so the trees use
+    // combinations; the bundle path (fromBooster, serialise, deserialise) is the one the CLI takes,
+    // and the one that once dropped the combination tables.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    const n = 3000;
+    var a: [n]u8 = undefined;
+    var c: [n]u8 = undefined;
+    var x: [n]u8 = undefined;
+    var y: [n]f32 = undefined;
+    var prng: std.Random.DefaultPrng = .init(41);
+    const r = prng.random();
+    for (0..n) |i| {
+        a[i] = r.intRangeAtMost(u8, 1, 6);
+        c[i] = r.intRangeAtMost(u8, 1, 5);
+        x[i] = r.intRangeAtMost(u8, 1, 8);
+        const s: f32 = (if ((a[i] + c[i]) % 3 == 0) @as(f32, 1.2) else -0.6) + @as(f32, @floatFromInt(x[i])) * 0.1 + r.floatNorm(f32) * 0.5;
+        y[i] = if (s > 0) 1 else 0;
+    }
+    var ds = try fromBins(gpa, &.{ &a, &c, &x }, &.{ 7, 6, 9 }, &y);
+    defer ds.deinit();
+    ds.kinds[0] = .categorical;
+    ds.kinds[1] = .categorical;
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 30, .max_depth = 4, .cat_split = .ctr, .max_ctr_complexity = 3 });
+    defer m.deinit();
+
+    var combos: usize = 0;
+    for (m.trees.items) |t| combos += t.combos.len;
+    try testing.expect(combos > 0);
+
+    var schema = try data.Schema.fromDataset(gpa, &ds);
+    var bundle = model_mod.fromBooster(gpa, &m, schema) catch |e| {
+        schema.deinit();
+        return e;
+    };
+    defer bundle.deinit();
+    const bytes = try model_mod.serialise(gpa, &bundle);
+    defer gpa.free(bytes);
+    var back = try model_mod.deserialise(gpa, bytes);
+    defer back.deinit();
+
+    var want: [n]f32 = undefined;
+    var got: [n]f32 = undefined;
+    m.predict(pool, &ds, &want);
+    back.predict(pool, &ds, &got);
+    try testing.expectEqualSlices(f32, &want, &got);
+}

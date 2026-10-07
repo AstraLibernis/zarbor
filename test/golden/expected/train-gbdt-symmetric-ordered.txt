@@ -13,13 +13,13 @@ encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
 [   0] valid=0.873222  best=0.873222 @0
-[  10] valid=0.876924  best=0.876924 @10
-[  20] valid=0.883809  best=0.883809 @20
-[  30] valid=0.884133  best=0.884133 @30
-[  39] valid=0.883809  best=0.884133 @30
+[  10] valid=0.879100  best=0.879100 @10
+[  20] valid=0.885757  best=0.885757 @20
+[  30] valid=0.883873  best=0.885757 @20
+[  39] valid=0.883289  best=0.885757 @20
 
 rounds  40
 train # ms  ( # ms/tree)
-valid   auc=0.883809  logloss=0.412437
+valid   auc=0.883289  logloss=0.408048
 --- stderr
 --- files

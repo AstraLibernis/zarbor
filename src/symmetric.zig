@@ -91,6 +91,8 @@ pub const Settings = struct {
     /// CatBoost's ordered boosting: splits are scored by leaf estimates from a prefix of the rows
     /// against the rows just after it, so no row's gradient is judged by a model that saw it.
     ordered: bool = false,
+    /// Most columns a CTR may combine (CatBoost's `max_ctr_complexity`); 1 is single columns only.
+    max_ctr_complexity: u32 = 4,
 };
 
 /// One prefix of the ordered rows: a model trained on rows `0..body` scores rows `body..tail`.
@@ -144,10 +146,40 @@ pub const Cand = struct {
     uniq: u32 = 0,
     /// One-hot: which levels occur in training (only those are split on).
     present: []bool = &.{},
-    /// CTR: chosen at some level already, so `model_size_reg` no longer applies. CatBoost keys
-    /// this on (Borders or Counter, column), so choosing one prior frees the other two.
-    used: bool = false,
+    /// Combination CTR: its projection (canonical order), and its table from counts over every
+    /// training row (sorted keys and their buckets; `unseen` for any other key). Empty for a
+    /// single-column CTR, whose projection is its `feature` and whose table is `final`.
+    parts: []tree.Part = &.{},
+    keys: []u64 = &.{},
+    kbuckets: []u8 = &.{},
+    unseen: u8 = 0,
+    /// The four CTRs of a combination share `parts`; the first owns it.
+    owns_parts: bool = false,
+
+    fn isCounter(c: Cand) bool {
+        return c.ctr_type == ctr_priors.len;
+    }
+
+    /// A CTR's projection: its parts, or for a single column a one-part view in `buf`.
+    fn projection(c: *const Cand, buf: *[1]tree.Part) []const tree.Part {
+        if (c.parts.len != 0) return c.parts;
+        buf[0] = .{ .kind = .cat, .feature = c.feature };
+        return buf;
+    }
+
+    fn freeOwned(c: Cand, gpa: std.mem.Allocator) void {
+        if (c.col.len != 0) gpa.free(c.col);
+        if (c.final.len != 0) gpa.free(c.final);
+        if (c.present.len != 0) gpa.free(c.present);
+        if (c.owns_parts) gpa.free(c.parts);
+        if (c.keys.len != 0) gpa.free(c.keys);
+        if (c.kbuckets.len != 0) gpa.free(c.kbuckets);
+    }
 };
+
+/// A (Borders or Counter, projection) pair some split has chosen: `model_size_reg` stops applying
+/// to every CTR of that type over that projection (CatBoost's `UsedCtrSplits`).
+const Used = struct { counter: bool, parts: []tree.Part };
 
 pub const Builder = struct {
     gpa: std.mem.Allocator,
@@ -156,9 +188,17 @@ pub const Builder = struct {
     s: Settings,
     /// Each row's leaf index in the tree being grown.
     leaf: []u16,
-    /// Split candidates, CatBoost's order: numeric columns, then one-hot, then CTRs. Ties go to
-    /// the earlier one.
+    /// Split candidates of the level being searched, CatBoost's order: numeric columns, then
+    /// one-hot, then single-column CTRs, then this level's combinations. Ties go to the earlier
+    /// one. A view of `all`, whose first `n_static` are fixed and whose rest each level rebuilds.
     cands: []Cand,
+    all: []Cand,
+    n_static: usize,
+    /// Categoricals with target statistics, ascending: what a combination may add.
+    wide: []u32,
+    used: std.ArrayList(Used) = .empty,
+    /// The current tree's chosen combinations, already in stored form.
+    tree_combos: std.ArrayList(tree.Combo) = .empty,
     /// Histograms for every candidate over the deepest scored level: candidate c's leaf l bin b is
     /// `cells[off[c] + l * nb_c + b]`.
     cells: []Cell,
@@ -168,8 +208,9 @@ pub const Builder = struct {
     has_missing: []bool,
     /// Per-candidate best split of the level being searched.
     best: []Best,
-    /// Largest `uniq` among CTR candidates.
+    /// Largest `uniq` among this level's CTR candidates, and among the static ones.
     max_uniq: u32 = 0,
+    static_max_uniq: u32 = 0,
     /// Leaf values of the last grown tree, already scaled by the learning rate.
     values: []f64,
     /// Bootstrap weight per row for the tree being grown; empty without bootstrap.
@@ -199,24 +240,44 @@ pub const Builder = struct {
 
     pub fn init(gpa: std.mem.Allocator, pool: *Pool, ds: *const Dataset, s: Settings) !Builder {
         if (s.depth == 0 or s.depth > max_depth) return error.BadSymmetricDepth;
-        const cands = try candidates(gpa, ds, s);
-        errdefer freeCands(gpa, cands);
+        const static = try candidates(gpa, ds, s);
+        var static_owned = true;
+        defer if (static_owned) freeCands(gpa, static) else gpa.free(static);
+        var n_wide: usize = 0;
+        for (static) |c| n_wide += @intFromBool(c.kind == .ctr and c.ctr_type == 0);
+        const wide = try gpa.alloc(u32, n_wide);
+        errdefer gpa.free(wide);
+        n_wide = 0;
+        for (static) |c| if (c.kind == .ctr and c.ctr_type == 0) {
+            wide[n_wide] = c.feature;
+            n_wide += 1;
+        };
+        // Combinations per level, at most: one base per split above it plus the split-bits base,
+        // times each categorical, times the four CTR types.
+        const max_combos: usize = if (s.ctr and s.max_ctr_complexity > 1) s.depth * wide.len * n_ctr_types else 0;
+        const all = try gpa.alloc(Cand, static.len + max_combos);
+        errdefer gpa.free(all);
+        @memcpy(all[0..static.len], static);
+        static_owned = false; // `all` owns the static candidates' arrays now
+        errdefer freeCands(gpa, all[0..static.len]);
+        const cands = all[0..static.len];
         var max_uniq: u32 = 0;
         for (cands) |c| if (c.kind == .ctr) {
             max_uniq = @max(max_uniq, c.uniq);
         };
         const leaf = try gpa.alloc(u16, ds.n_rows);
         errdefer gpa.free(leaf);
-        const off = try gpa.alloc(usize, cands.len + 1);
+        const off = try gpa.alloc(usize, all.len + 1);
         errdefer gpa.free(off);
         const scored_leaves: usize = @as(usize, 1) << @intCast(s.depth - 1);
         off[0] = 0;
         for (cands, 0..) |c, i| off[i + 1] = off[i] + scored_leaves * c.nb;
-        const cells = try gpa.alloc(Cell, off[cands.len]);
+        const cells = try gpa.alloc(Cell, off[cands.len] + max_combos * scored_leaves * ctr_buckets);
         errdefer gpa.free(cells);
-        const has_missing = try gpa.alloc(bool, cands.len);
+        const has_missing = try gpa.alloc(bool, all.len);
         errdefer gpa.free(has_missing);
-        for (has_missing, cands) |*m, c| {
+        @memset(has_missing, false);
+        for (has_missing[0..cands.len], cands) |*m, c| {
             m.* = false;
             if (c.kind != .numeric) continue;
             for (0..ds.n_rows) |r| if (binAt(ds, c.feature, r) == 0) {
@@ -224,7 +285,7 @@ pub const Builder = struct {
                 break;
             };
         }
-        const best = try gpa.alloc(Best, cands.len);
+        const best = try gpa.alloc(Best, all.len);
         errdefer gpa.free(best);
         const values = try gpa.alloc(f64, @as(usize, 1) << @intCast(s.depth));
         errdefer gpa.free(values);
@@ -233,7 +294,7 @@ pub const Builder = struct {
         const mvs_scratch = try gpa.alloc(f64, if (s.bootstrap == .mvs) ds.n_rows else 0);
         errdefer gpa.free(mvs_scratch);
         var ord: Ordered = .{};
-        if (s.ordered) ord = try Ordered.init(gpa, ds, cands, cells.len);
+        if (s.ordered) ord = try Ordered.init(gpa, ds, cands, all.len, cells.len, max_combos * ctr_buckets);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -241,7 +302,11 @@ pub const Builder = struct {
             .s = s,
             .leaf = leaf,
             .cands = cands,
+            .all = all,
+            .n_static = static.len,
+            .wide = wide,
             .max_uniq = max_uniq,
+            .static_max_uniq = max_uniq,
             .cells = cells,
             .off = off,
             .has_missing = has_missing,
@@ -262,7 +327,13 @@ pub const Builder = struct {
     }
 
     pub fn deinit(b: *Builder) void {
-        freeCands(b.gpa, b.cands);
+        for (b.cands) |c| c.freeOwned(b.gpa);
+        b.gpa.free(b.all);
+        b.gpa.free(b.wide);
+        for (b.used.items) |u| b.gpa.free(u.parts);
+        b.used.deinit(b.gpa);
+        for (b.tree_combos.items) |*c| c.deinit(b.gpa);
+        b.tree_combos.deinit(b.gpa);
         b.gpa.free(b.leaf);
         b.gpa.free(b.cells);
         b.gpa.free(b.off);
@@ -306,8 +377,10 @@ pub const Builder = struct {
         if (b.s.bootstrap != .none) b.sampleWeights(sample_grads);
         b.sigma = if (b.s.random_strength > 0) b.noiseScale(sample_grads) else 0;
 
+        defer b.dropCombos();
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
+            try b.levelCombos(splits[0..depth]);
             if (b.s.ordered) {
                 @memset(b.acc_num, 0);
                 @memset(b.acc_den, 0);
@@ -329,10 +402,10 @@ pub const Builder = struct {
             var sel = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, depth, std.math.maxInt(u32)));
             var win: ?usize = null;
             var win_score: f64 = -std.math.inf(f64);
-            for (b.best, b.cands, 0..) |c, cand, f| {
+            for (b.best[0..b.cands.len], b.cands, 0..) |c, cand, f| {
                 if (!std.math.isFinite(c.score)) continue;
                 var s = if (b.sigma > 0) c.score + b.sigma * sel.random().floatNorm(f64) else c.score;
-                if (cand.kind == .ctr and !cand.used and b.s.model_size_reg > 0) {
+                if (cand.kind == .ctr and b.s.model_size_reg > 0 and !b.isUsed(&cand)) {
                     const ratio = @as(f64, @floatFromInt(cand.uniq)) / @as(f64, @floatFromInt(b.max_uniq));
                     s *= std.math.pow(f64, 1 + ratio, -b.s.model_size_reg);
                 }
@@ -342,14 +415,14 @@ pub const Builder = struct {
                 }
             }
             const f = win orelse break;
-            const sp: Split = .{ .cand = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
+            var sp: Split = .{ .cand = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
             // Marked on choice, as CatBoost does: later levels of this tree see it as used, even
             // if the redundancy rule removes the split.
-            if (b.cands[f].kind == .ctr) {
-                const counter = b.cands[f].ctr_type == ctr_priors.len;
-                for (b.cands) |*c| {
-                    if (c.kind == .ctr and c.feature == b.cands[f].feature and (c.ctr_type == ctr_priors.len) == counter) c.used = true;
-                }
+            if (b.cands[f].kind == .ctr) try b.markUsed(&b.cands[f]);
+            // A chosen combination is stored now: next level rebuilds the candidates it lives in.
+            if (b.cands[f].parts.len != 0) {
+                sp.combo = @intCast(b.tree_combos.items.len);
+                try b.tree_combos.append(b.gpa, try b.storedCombo(&b.cands[f]));
             }
             splits[depth] = sp;
 
@@ -444,6 +517,133 @@ pub const Builder = struct {
         b.pool.parallelFor(n_blocks, &ctx, WeightCtx.run, 1);
     }
 
+    fn isUsed(b: *const Builder, c: *const Cand) bool {
+        var buf: [1]tree.Part = undefined;
+        const proj = c.projection(&buf);
+        for (b.used.items) |u| {
+            if (u.counter == c.isCounter() and partsEql(u.parts, proj)) return true;
+        }
+        return false;
+    }
+
+    fn markUsed(b: *Builder, c: *const Cand) !void {
+        if (b.isUsed(c)) return;
+        var buf: [1]tree.Part = undefined;
+        const parts = try b.gpa.dupe(tree.Part, c.projection(&buf));
+        errdefer b.gpa.free(parts);
+        try b.used.append(b.gpa, .{ .counter = c.isCounter(), .parts = parts });
+    }
+
+    /// A copy of a combination candidate's projection and table, owned by the caller.
+    fn storedCombo(b: *Builder, c: *const Cand) !tree.Combo {
+        const parts = try b.gpa.dupe(tree.Part, c.parts);
+        errdefer b.gpa.free(parts);
+        const keys = try b.gpa.dupe(u64, c.keys);
+        errdefer b.gpa.free(keys);
+        const buckets = try b.gpa.dupe(u8, c.kbuckets);
+        return .{ .parts = parts, .keys = keys, .buckets = buckets, .unseen = c.unseen };
+    }
+
+    /// Frees this level's combination candidates and shrinks the view back to the static ones.
+    fn dropCombos(b: *Builder) void {
+        for (b.cands[b.n_static..]) |c| c.freeOwned(b.gpa);
+        b.cands = b.all[0..b.n_static];
+    }
+
+    /// CatBoost's tree CTRs (greedy_tensor_search.cpp, `AddTreeCtrs`): from the splits above this
+    /// level, the bases are every numeric and one-hot split taken together as one projection, and
+    /// each CTR projection chosen in this tree. Each base gains each categorical not already in
+    /// it, while the projection's length stays within `max_ctr_complexity`; duplicates are
+    /// skipped. Length is CatBoost's `GetFullProjectionLength`: its categoricals, plus one if it
+    /// has any split bits at all, however many.
+    /// Every new projection becomes four CTR candidates after the static ones.
+    fn levelCombos(b: *Builder, above: []const Split) !void {
+        b.dropCombos();
+        b.max_uniq = b.static_max_uniq;
+        if (!b.s.ctr or b.s.max_ctr_complexity <= 1 or above.len == 0 or b.wide.len == 0) return;
+        const gpa = b.gpa;
+        var bases: std.ArrayList([]tree.Part) = .empty;
+        defer {
+            for (bases.items) |x| gpa.free(x);
+            bases.deinit(gpa);
+        }
+        var bits: std.ArrayList(tree.Part) = .empty;
+        defer bits.deinit(gpa);
+        // A combination split's candidate slot is reused by later levels: its projection lives in
+        // `tree_combos`, and it is never a split bit.
+        for (above) |sp| {
+            if (sp.combo != no_combo) continue;
+            const c = b.all[sp.cand];
+            switch (c.kind) {
+                .numeric => try bits.append(gpa, .{ .kind = .bin, .feature = c.feature, .value = @intCast(sp.threshold) }),
+                .onehot => try bits.append(gpa, .{ .kind = .onehot, .feature = c.feature, .value = @intCast(sp.threshold) }),
+                .ctr => {},
+            }
+        }
+        if (bits.items.len != 0) {
+            std.sort.pdq(tree.Part, bits.items, {}, tree.Part.lessThan);
+            try bases.append(gpa, try gpa.dupe(tree.Part, bits.items));
+        }
+        for (above) |sp| {
+            var buf: [1]tree.Part = undefined;
+            const proj: []const tree.Part = if (sp.combo != no_combo)
+                b.tree_combos.items[sp.combo].parts
+            else if (b.all[sp.cand].kind == .ctr)
+                b.all[sp.cand].projection(&buf)
+            else
+                continue;
+            var seen = false;
+            for (bases.items) |x| seen = seen or partsEql(x, proj);
+            if (!seen) try bases.append(gpa, try gpa.dupe(tree.Part, proj));
+        }
+
+        var n = b.n_static;
+        var max_uniq: u32 = 0;
+        for (b.all[0..b.n_static]) |c| if (c.kind == .ctr) {
+            max_uniq = @max(max_uniq, c.uniq);
+        };
+        for (bases.items) |base| {
+            var n_cats: usize = 0;
+            var bits_part: usize = 0;
+            for (base) |part| {
+                if (part.kind == .cat) n_cats += 1 else bits_part = 1;
+            }
+            if (n_cats + 1 + bits_part > b.s.max_ctr_complexity) continue;
+            for (b.wide) |w| {
+                var has = false;
+                for (base) |part| has = has or (part.kind == .cat and part.feature == w);
+                if (has) continue;
+                const proj = try gpa.alloc(tree.Part, base.len + 1);
+                var proj_owned = true;
+                defer if (proj_owned) gpa.free(proj);
+                @memcpy(proj[0..base.len], base);
+                proj[base.len] = .{ .kind = .cat, .feature = w };
+                std.sort.pdq(tree.Part, proj, {}, tree.Part.lessThan);
+                var dup = false;
+                var i = b.n_static;
+                while (i < n) : (i += n_ctr_types) dup = dup or partsEql(b.all[i].parts, proj);
+                if (dup) continue;
+                std.debug.assert(n + n_ctr_types <= b.all.len);
+                try comboCands(gpa, b.ds, proj, b.all[n..][0..n_ctr_types]);
+                proj_owned = false; // the first candidate owns it; the rest borrow
+                max_uniq = @max(max_uniq, b.all[n].uniq);
+                n += n_ctr_types;
+                b.cands = b.all[0..n];
+            }
+        }
+        b.max_uniq = max_uniq;
+        b.cands = b.all[0..n];
+        // Histogram layout for the combinations, after the static candidates'.
+        const scored_leaves: usize = @as(usize, 1) << @intCast(b.s.depth - 1);
+        for (b.n_static..n) |i| {
+            b.off[i + 1] = b.off[i] + scored_leaves * ctr_buckets;
+            b.has_missing[i] = false;
+        }
+        if (b.s.ordered) for (b.n_static..n) |i| {
+            b.acc_off[i + 1] = b.acc_off[i] + ctr_buckets;
+        };
+    }
+
     /// The first split bit `j` whose every leaf pair differing only in `j` has an empty side.
     fn redundant(b: *Builder, depth: u32) !?u32 {
         const n_leaves = @as(usize, 1) << @intCast(depth);
@@ -532,8 +732,21 @@ pub const Builder = struct {
 
         var proto: [max_depth]tree.Node = undefined;
         var inverted = [_]bool{false} ** max_depth;
+        var combos: std.ArrayList(tree.Combo) = .empty;
+        errdefer {
+            for (combos.items) |*x| x.deinit(b.gpa);
+            combos.deinit(b.gpa);
+        }
         for (sp, 0..) |s, level| {
-            const c = b.cands[s.cand];
+            if (s.combo != no_combo) {
+                // Moved out of the builder's list; the slot left behind is emptied below.
+                const idx: u32 = @intCast(combos.items.len);
+                try combos.append(b.gpa, b.tree_combos.items[s.combo]);
+                b.tree_combos.items[s.combo] = .{ .parts = &.{}, .keys = &.{}, .buckets = &.{}, .unseen = 0 };
+                proto[level] = .{ .feature = idx, .threshold = @intCast(s.threshold), .kind = .combo, .is_leaf = false };
+                continue;
+            }
+            const c = b.all[s.cand];
             switch (c.kind) {
                 .numeric => proto[level] = .{ .feature = c.feature, .threshold = @intCast(s.threshold), .missing_left = true, .is_leaf = false },
                 .onehot => {
@@ -588,12 +801,96 @@ pub const Builder = struct {
                 nd.* = .{ .weight = @floatCast(b.values[idx]), .is_leaf = true };
             }
         }
-        return .{ .nodes = nodes, .cat_ids = try ids.toOwnedSlice(b.gpa) };
+        // Combinations chosen but removed by the redundancy rule were never moved out.
+        for (b.tree_combos.items) |*x| if (x.parts.len != 0) x.deinit(b.gpa);
+        b.tree_combos.clearRetainingCapacity();
+        const cat_ids = try ids.toOwnedSlice(b.gpa);
+        errdefer b.gpa.free(cat_ids);
+        return .{ .nodes = nodes, .cat_ids = cat_ids, .combos = try combos.toOwnedSlice(b.gpa) };
     }
 };
 
-/// Candidate index and its threshold (for one-hot, the level).
-const Split = struct { cand: u32, threshold: u32 };
+/// Candidate index and its threshold (for one-hot, the level); a chosen combination also records
+/// its slot in the builder's `tree_combos`.
+const Split = struct { cand: u32, threshold: u32, combo: u32 = no_combo };
+const no_combo = std.math.maxInt(u32);
+
+fn partsEql(a: []const tree.Part, c: []const tree.Part) bool {
+    if (a.len != c.len) return false;
+    for (a, c) |x, y| if (x.kind != y.kind or x.feature != y.feature or x.value != y.value) return false;
+    return true;
+}
+
+const RowCtx = struct { ds: *const Dataset, r: usize };
+fn rowCtxBin(ctx: RowCtx, f: u32) data.BinIdx {
+    return binAt(ctx.ds, f, ctx.r);
+}
+
+/// The four CTR candidates of a combination `proj` (owned by the first afterwards): each row's key,
+/// then online buckets (Borders: earlier rows only; Counter: all rows) and the stored table from
+/// counts over every row.
+fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, out: []Cand) !void {
+    const n = ds.n_rows;
+    const keys = try gpa.alloc(u64, n);
+    defer gpa.free(keys);
+    for (keys, 0..) |*k, r| k.* = tree.comboKey(proj, RowCtx{ .ds = ds, .r = r }, rowCtxBin);
+
+    const Counts = struct { good: u32 = 0, total: u32 = 0 };
+    var running: std.AutoHashMapUnmanaged(u64, Counts) = .empty;
+    defer running.deinit(gpa);
+    var made: usize = 0;
+    errdefer for (out[0..made]) |c| {
+        if (c.col.len != 0) gpa.free(c.col);
+        if (c.keys.len != 0) gpa.free(c.keys);
+        if (c.kbuckets.len != 0) gpa.free(c.kbuckets);
+    };
+    for (out, 0..) |*c, t| {
+        c.* = .{ .kind = .ctr, .feature = std.math.maxInt(u32), .ctr_type = @intCast(t), .nb = ctr_buckets, .parts = if (t == 0) proj else &.{} };
+        c.col = try gpa.alloc(u8, n);
+        made += 1;
+    }
+    // Borders, online.
+    for (keys, 0..) |k, r| {
+        const gop = try running.getOrPut(gpa, k);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const cnt = gop.value_ptr.*;
+        for (ctr_priors, 0..) |prior, t| {
+            out[t].col[r] = bucketOf((@as(f32, @floatFromInt(cnt.good)) + prior) / (@as(f32, @floatFromInt(cnt.total)) + 1));
+        }
+        gop.value_ptr.total += 1;
+        gop.value_ptr.good += @intFromBool(ds.labels[r] > 0.5);
+    }
+    // `running` now holds the full counts: Counter and the stored tables.
+    var largest: u32 = 0;
+    var it = running.valueIterator();
+    while (it.next()) |v| largest = @max(largest, v.total);
+    const den: f32 = @floatFromInt(largest + 1);
+    for (keys, 0..) |k, r| out[ctr_priors.len].col[r] = bucketOf(@as(f32, @floatFromInt(running.get(k).?.total)) / den);
+
+    const uniq: u32 = running.count();
+    const sorted = try gpa.alloc(u64, uniq);
+    defer gpa.free(sorted);
+    var ki = running.keyIterator();
+    var i: usize = 0;
+    while (ki.next()) |k| : (i += 1) sorted[i] = k.*;
+    std.sort.pdq(u64, sorted, {}, std.sort.asc(u64));
+    for (out, 0..) |*c, t| {
+        c.uniq = uniq;
+        c.keys = try gpa.dupe(u64, sorted);
+        c.kbuckets = try gpa.alloc(u8, uniq);
+        for (sorted, c.kbuckets) |k, *bk| {
+            const cnt = running.get(k).?;
+            bk.* = if (t < ctr_priors.len)
+                bucketOf((@as(f32, @floatFromInt(cnt.good)) + ctr_priors[t]) / (@as(f32, @floatFromInt(cnt.total)) + 1))
+            else
+                bucketOf(@as(f32, @floatFromInt(cnt.total)) / den);
+        }
+        c.unseen = if (t < ctr_priors.len) bucketOf(ctr_priors[t]) else 0;
+    }
+    // Every candidate of the projection reads it; only the first frees it.
+    out[0].owns_parts = true;
+    for (out[1..]) |*c| c.parts = out[0].parts;
+}
 
 pub fn freeCands(gpa: std.mem.Allocator, cands: []Cand) void {
     for (cands) |c| {
@@ -1030,7 +1327,7 @@ const Ordered = struct {
     acc_off: []usize = &.{},
     tail_grads: []hist.GradPair = &.{},
 
-    fn init(gpa: std.mem.Allocator, ds: *const Dataset, cands: []const Cand, n_cells: usize) !Ordered {
+    fn init(gpa: std.mem.Allocator, ds: *const Dataset, cands: []const Cand, capacity: usize, n_cells: usize, extra_acc: usize) !Ordered {
         var o: Ordered = .{};
         errdefer o.deinit(gpa);
         o.bts = try bodyTails(gpa, ds.n_rows);
@@ -1041,11 +1338,11 @@ const Ordered = struct {
         @memset(o.approx, 0);
         o.deriv = try gpa.alloc(f64, o.ap_off[o.bts.len]);
         o.cells_tail = try gpa.alloc(Cell, n_cells);
-        o.acc_off = try gpa.alloc(usize, cands.len + 1);
+        o.acc_off = try gpa.alloc(usize, capacity + 1);
         o.acc_off[0] = 0;
         for (cands, 0..) |c, i| o.acc_off[i + 1] = o.acc_off[i] + c.nb;
-        o.acc_num = try gpa.alloc(f64, o.acc_off[cands.len]);
-        o.acc_den = try gpa.alloc(f64, o.acc_off[cands.len]);
+        o.acc_num = try gpa.alloc(f64, o.acc_off[cands.len] + extra_acc);
+        o.acc_den = try gpa.alloc(f64, o.acc_off[cands.len] + extra_acc);
         o.tail_grads = try gpa.alloc(hist.GradPair, ds.n_rows);
         return o;
     }

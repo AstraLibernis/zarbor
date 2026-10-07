@@ -111,6 +111,9 @@ pub const Params = struct {
     /// Under `cat_split = ctr`: shrinks a target statistic no tree has used yet, the more distinct
     /// levels it has (CatBoost's default 0.5).
     model_size_reg: f32 = 0.5,
+    /// Under `cat_split = ctr`: most columns one target statistic may combine (CatBoost's
+    /// `max_ctr_complexity`, default 4 there); 1 keeps every statistic to a single column.
+    max_ctr_complexity: u32 = 4,
     /// `ordered`: CatBoost's ordered boosting under `symmetric` (about 4x the work of `plain`).
     boosting_type: BoostingType = .plain,
     seed: u64 = 0,
@@ -183,10 +186,99 @@ pub const Node = extern struct {
     n_cat: u8 = 0,
     /// Slope terms in this leaf. 0 is a constant leaf, which every leaf is unless `linear_leaves`.
     n_lin: u8 = 0,
-    _pad: u8 = 0,
+    /// `split` (threshold or level set, by `is_cat`), or `combo`: `feature` indexes `Tree.combos`
+    /// and `threshold` is a bucket, rows with `bucket <= threshold` going left.
+    kind: NodeKind = .split,
     /// Where this leaf's terms start in `Tree.lin`.
     lin_ofs: u32 = 0,
 };
+
+pub const NodeKind = enum(u8) { split = 0, combo = 1 };
+
+/// One piece of a combination's key.
+pub const PartKind = enum(u8) {
+    /// The column's level (its bin).
+    cat = 0,
+    /// Whether the column's bin is above `value`.
+    bin = 1,
+    /// Whether the column's bin equals `value`.
+    onehot = 2,
+};
+
+pub const Part = struct {
+    kind: PartKind,
+    feature: u32,
+    value: data.BinIdx = 0,
+
+    /// Canonical order: by kind, then column, then value.
+    pub fn lessThan(_: void, a: Part, b: Part) bool {
+        if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+        if (a.feature != b.feature) return a.feature < b.feature;
+        return a.value < b.value;
+    }
+};
+
+/// A target statistic over several columns at once (CatBoost's feature combinations): a row's key
+/// mixes the levels of its `cat` parts with the bits of its `bin` and `onehot` parts, and its
+/// bucket is looked up from counts over every training row. A key never seen in training gets
+/// `unseen`, the bucket of the prior alone.
+pub const Combo = struct {
+    parts: []Part,
+    /// Sorted ascending, with `buckets[i]` the bucket of `keys[i]`.
+    keys: []u64,
+    buckets: []u8,
+    unseen: u8,
+
+    pub fn deinit(c: *Combo, gpa: std.mem.Allocator) void {
+        gpa.free(c.parts);
+        gpa.free(c.keys);
+        gpa.free(c.buckets);
+        c.* = undefined;
+    }
+
+    /// A deep copy the caller owns.
+    pub fn dupe(c: *const Combo, gpa: std.mem.Allocator) !Combo {
+        const parts = try gpa.dupe(Part, c.parts);
+        errdefer gpa.free(parts);
+        const keys = try gpa.dupe(u64, c.keys);
+        errdefer gpa.free(keys);
+        return .{ .parts = parts, .keys = keys, .buckets = try gpa.dupe(u8, c.buckets), .unseen = c.unseen };
+    }
+
+    pub fn bucket(c: *const Combo, key: u64) u8 {
+        var lo: usize = 0;
+        var hi: usize = c.keys.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (c.keys[mid] < key) lo = mid + 1 else hi = mid;
+        }
+        return if (lo < c.keys.len and c.keys[lo] == key) c.buckets[lo] else c.unseen;
+    }
+};
+
+/// The key of a row given its bins per column (`bin_of(f)`), for `parts` in canonical order.
+/// Training and prediction share this, so the two cannot disagree on a key.
+pub fn comboKey(parts: []const Part, ctx: anytype, comptime bin_of: fn (@TypeOf(ctx), u32) data.BinIdx) u64 {
+    var x: u64 = 0x243F6A8885A308D3;
+    for (parts) |p| {
+        const b = bin_of(ctx, p.feature);
+        const v: u64 = switch (p.kind) {
+            .cat => b,
+            .bin => @intFromBool(b > p.value),
+            .onehot => @intFromBool(b == p.value),
+        };
+        x +%= 0x9E3779B97F4A7C15 +% v;
+        var z = x;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        x = z ^ (z >> 31);
+    }
+    return x;
+}
+
+fn rowBin(rb: []const data.BinIdx, f: u32) data.BinIdx {
+    return rb[f];
+}
 
 /// One linear-leaf slope term. `center` is the feature's within-leaf mean at fit time; subtracting
 /// it here, not in the intercept, avoids f32 cancellation of a large intercept vs `coef * x`.
@@ -203,11 +295,15 @@ pub const Tree = struct {
     cat_ids: []data.BinIdx = &.{},
     /// Flat store of this tree's leaf slope terms. Empty unless `linear_leaves`.
     lin: []LinTerm = &.{},
+    /// Combination statistics the tree's `combo` nodes index. Empty except under `cat_split = ctr`.
+    combos: []Combo = &.{},
 
     pub fn deinit(t: *Tree, gpa: std.mem.Allocator) void {
         gpa.free(t.nodes);
         if (t.cat_ids.len != 0) gpa.free(t.cat_ids);
         if (t.lin.len != 0) gpa.free(t.lin);
+        for (t.combos) |*c| c.deinit(gpa);
+        if (t.combos.len != 0) gpa.free(t.combos);
         t.* = undefined;
     }
 
@@ -219,6 +315,11 @@ pub const Tree = struct {
         var i: u32 = 0;
         while (!t.nodes[i].is_leaf) {
             const n = t.nodes[i];
+            if (n.kind == .combo) {
+                const c = &t.combos[n.feature];
+                i = if (c.bucket(comboKey(c.parts, rb, rowBin)) <= n.threshold) n.left else n.right;
+                continue;
+            }
             const b = rb[n.feature];
             const go_left = if (b == 0)
                 n.missing_left
