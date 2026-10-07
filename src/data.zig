@@ -43,9 +43,10 @@ pub const BinParams = struct {
     bin_policy: BinPolicy = .quantile,
     /// Rows a bin must hold under `greedy` before a cut. LightGBM's `min_data_in_bin`.
     min_data_in_bin: u32 = 3,
-    /// Bins per feature. Capped at 256 so every numeric feature's bin indices
-    /// fit the one-byte column-major `Dataset.bins`; only categoricals wider
-    /// than that go to `wide_cols`.
+    /// Bins per numeric feature, the missing bin included; at most 65,535 (`BinIdx`). A column
+    /// that ends up with more than 256 bins is stored at two bytes per row in `wide_cols`, as wide
+    /// categoricals are, and the rest stay at one byte; histogram work grows with the bin count
+    /// (docs/measurements.md, wide bins).
     max_bin: u16 = 256,
     /// Categorical cardinality refused outright, so a free-text column cannot
     /// become an unaffordable histogram. Default 255 (the old `u8` limit) so
@@ -53,7 +54,7 @@ pub const BinParams = struct {
     max_cat_levels: u32 = 255,
 
     pub fn validate(p: BinParams) !void {
-        if (p.max_bin < 2 or p.max_bin > 256) return error.BadMaxBin;
+        if (p.max_bin < 2) return error.BadMaxBin;
     }
 };
 

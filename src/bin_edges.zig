@@ -272,22 +272,34 @@ fn logsum(gpa: std.mem.Allocator, r: Runs, budget: usize, out: *std.ArrayList(u3
         }
     }.f;
 
-    var bins: std.ArrayList(Bin) = .empty;
-    defer bins.deinit(gpa);
-    try bins.append(gpa, best(r, 0, r.len()));
-    while (bins.items.len < budget) {
-        var top: ?usize = null;
-        for (bins.items, 0..) |b, i| {
-            if (b.cut == b.lo) continue;
-            if (top == null or b.score > bins.items[top.?].score) top = i;
+    // Best score first, ties to the leftmost bin; a bin that cannot split scores -inf, so once one
+    // is on top none can. A heap, not a scan: at a budget of thousands of bins a scan per split is
+    // quadratic.
+    const Queue = std.PriorityQueue(Bin, void, struct {
+        fn order(_: void, a: Bin, c: Bin) std.math.Order {
+            if (a.score > c.score) return .lt;
+            if (a.score < c.score) return .gt;
+            return std.math.order(a.lo, c.lo);
         }
-        const t = top orelse break;
-        const b = bins.items[t];
-        bins.items[t] = best(r, b.lo, b.cut);
-        try bins.insert(gpa, t + 1, best(r, b.cut, b.hi));
+    }.order);
+    var queue = Queue.initContext({});
+    defer queue.deinit(gpa);
+    try queue.push(gpa, best(r, 0, r.len()));
+    var n_bins: usize = 1;
+    while (n_bins < budget) {
+        const b = queue.pop() orelse break;
+        if (b.cut == b.lo) {
+            try queue.push(gpa, b);
+            break;
+        }
+        try queue.push(gpa, best(r, b.lo, b.cut));
+        try queue.push(gpa, best(r, b.cut, b.hi));
+        n_bins += 1;
     }
-    // `bins` stays in run order, so its inner edges come out ascending.
-    for (bins.items[1..]) |b| try out.append(gpa, @intCast(b.lo - 1));
+    // Every bin but the first starts after a boundary.
+    const first = out.items.len;
+    while (queue.pop()) |b| if (b.lo != 0) try out.append(gpa, @intCast(b.lo - 1));
+    std.sort.pdq(u32, out.items[first..], {}, std.sort.asc(u32));
 }
 
 /// Boundary `j` becomes the midpoint of `values[j]` and `values[j + 1]`, as an

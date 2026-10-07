@@ -1335,3 +1335,123 @@ test "a schema whose bin count cannot hold its edges or levels is refused" {
         try testing.expectError(error.BadModelFile, model_mod.deserialise(gpa, bad));
     }
 }
+
+/// A numeric column of 300 values (0..299, ten rows each) binned at `max_bin` 4096, labels
+/// attached after binning. Caller owns it.
+fn wideNumeric(gpa: std.mem.Allocator, pool: *Pool, labels: []const f32) !data.Dataset {
+    const n = labels.len;
+    const vals = try gpa.alloc(f32, n);
+    defer gpa.free(vals);
+    for (vals, 0..) |*v, i| v.* = @floatFromInt(i % 300);
+    var f = try numericFrame(gpa, vals, labels);
+    defer f.deinit();
+    var ds = try data.quantise(gpa, pool, &f, .{ .max_bin = 4096 }, null, &.{"y"});
+    errdefer ds.deinit();
+    ds.labels = try gpa.dupe(f32, labels);
+    return ds;
+}
+
+test "a numeric column past 256 bins is stored wide and binned like a narrow one" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var lab: [3000]f32 = undefined;
+    @memset(&lab, 0);
+    var ds = try wideNumeric(gpa, pool, &lab);
+    defer ds.deinit();
+    try testing.expect(ds.isWide(0));
+    try testing.expectEqual(@as(u16, 301), ds.n_bins[0]); // missing + one per value
+    for (ds.columnWide(0), 0..) |b, i| try testing.expectEqual(@as(data.BinIdx, @intCast(i % 300 + 1)), b);
+    // The row-major copy the histograms read agrees.
+    for (0..ds.n_rows) |r| try testing.expectEqual(ds.columnWide(0)[r], ds.bins_rm[r * ds.n_features]);
+}
+
+test "the linear model reads wide columns, numeric and categorical" {
+    // It used to read every column from the one-byte store, where a wide column is zeros: a
+    // 300-level categorical, and now a 300-bin numeric, fitted as if always missing.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    const n = 3000;
+    var y: [n]f32 = undefined;
+    for (&y, 0..) |*v, i| v.* = 0.5 * @as(f32, @floatFromInt(i % 300));
+    var ds = try wideNumeric(gpa, pool, &y);
+    defer ds.deinit();
+    const cfg = config.Config.from(.{ .algo = .linear, .objective = .squared_error, .lambda = 1e-6, .verbose_eval = 0 }).linear;
+    var fit = try linear.train(gpa, pool, &ds, null, cfg, null);
+    defer fit.model.deinit();
+    var pred: [n]f32 = undefined;
+    fit.model.predict(pool, &ds, &pred);
+    for (pred, y) |p, t| try testing.expectApproxEqAbs(t, p, 0.05);
+
+    // A 300-level categorical, each level its own target.
+    var names: [n][]const u8 = undefined;
+    var bufs: [300][8]u8 = undefined;
+    for (&bufs, 0..) |*b, l| _ = try std.fmt.bufPrint(b, "L{d:0>4}", .{l});
+    var nums: [n]f32 = undefined;
+    for (&names, &nums, 0..) |*nm, *x, i| {
+        nm.* = bufs[i % 300][0..5];
+        x.* = 0;
+    }
+    var f = try frameWith(gpa, &names, &nums);
+    defer f.deinit();
+    var dc = try data.quantise(gpa, pool, &f, .{ .max_cat_levels = 4096 }, null, &.{"num"});
+    defer dc.deinit();
+    try testing.expect(dc.isWide(0));
+    dc.labels = try gpa.dupe(f32, &y);
+    var fit2 = try linear.train(gpa, pool, &dc, null, cfg, null);
+    defer fit2.model.deinit();
+    fit2.model.predict(pool, &dc, &pred);
+    for (pred, y) |p, t| try testing.expectApproxEqAbs(t, p, 0.05);
+}
+
+test "every model trains on a wide numeric column and survives save and load" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    const n = 3000;
+    var y: [n]f32 = undefined;
+    for (&y, 0..) |*v, i| v.* = if (i % 300 > 150) 1 else 0;
+    var ds = try wideNumeric(gpa, pool, &y);
+    defer ds.deinit();
+
+    const configs = [_]config.Config{
+        config.Config.from(.{ .n_rounds = 20, .max_depth = 4, .verbose_eval = 0 }),
+        config.Config.from(.{ .n_rounds = 20, .grow_policy = .lossguide, .max_leaves = 16, .max_depth = 0, .verbose_eval = 0 }),
+        config.Config.from(.{ .n_rounds = 20, .grow_policy = .symmetric, .max_depth = 4, .verbose_eval = 0 }),
+        config.Config.from(.{ .algo = .random_forest, .n_rounds = 10, .verbose_eval = 0 }),
+        config.Config.from(.{ .algo = .linear, .verbose_eval = 0 }),
+    };
+    for (configs) |c| {
+        const schema = try data.Schema.fromDataset(gpa, &ds);
+        var bundle: model_mod.Bundle = switch (c.algo) {
+            .gbdt => blk: {
+                var res = try booster.train(gpa, pool, &ds, null, c.gbdt, null);
+                defer res.model.deinit();
+                break :blk try model_mod.fromBooster(gpa, &res.model, schema);
+            },
+            .random_forest => blk: {
+                var res = try forest.train(gpa, pool, &ds, null, c.random_forest, null);
+                defer res.model.deinit();
+                break :blk try model_mod.fromForest(gpa, &res.model, schema);
+            },
+            .linear => blk: {
+                const res = try linear.train(gpa, pool, &ds, null, c.linear, null);
+                break :blk .{ .gpa = gpa, .kind = .linear, .schema = schema, .objective = res.model.objective, .lin = res.model };
+            },
+        };
+        defer bundle.deinit();
+        const bytes = try model_mod.serialise(gpa, &bundle);
+        defer gpa.free(bytes);
+        var back = try model_mod.deserialise(gpa, bytes);
+        defer back.deinit();
+        var a: [n]f32 = undefined;
+        var b: [n]f32 = undefined;
+        bundle.predict(pool, &ds, &a);
+        back.predict(pool, &ds, &b);
+        try testing.expectEqualSlices(f32, &a, &b);
+        // The split it needs, x > 150, lies in the wide range: a tree that cannot reach it scores
+        // near chance.
+        try testing.expect(try aucOf(gpa, &a, &y) > 0.95);
+    }
+}

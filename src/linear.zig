@@ -103,7 +103,8 @@ pub const Design = struct {
     }
 
     pub inline fn raw(d: *const Design, c: Col, ds: *const Dataset, row: usize) f32 {
-        const b = ds.bins[@as(usize, c.feature) * ds.n_rows + row];
+        // A column with more than 256 bins lives in `wide_cols`; its narrow slot is zeros.
+        const b: data.BinIdx = if (ds.isWide(c.feature)) ds.columnWide(c.feature)[row] else ds.columnNarrow(c.feature)[row];
         if (c.bin == numeric_col) return d.repr[c.feature][b];
         return if (b == c.bin) 1.0 else 0.0;
     }
