@@ -79,6 +79,7 @@ const EvalCtx = struct {
 /// One dot product per design column. Column-major bins make this sequential.
 const GradCtx = struct {
     design: *const Design,
+    tables: []const []const f32,
     ds: *const Dataset,
     resid: []const f32,
     grad: []f64,
@@ -88,9 +89,15 @@ const GradCtx = struct {
         const self: *GradCtx = @ptrCast(@alignCast(ctx));
         var c = begin;
         while (c < end) : (c += 1) {
-            const col = self.design.cols[c];
+            const f = self.design.cols[c].feature;
+            const tab = self.tables[c];
             var acc: f64 = 0;
-            for (self.resid, 0..) |r, row| acc += @as(f64, r) * self.design.value(col, self.ds, row);
+            // Narrow or wide is decided once per column, not per row.
+            if (self.ds.isWide(f)) {
+                for (self.resid, self.ds.columnWide(f)) |r, b| acc += @as(f64, r) * tab[b];
+            } else {
+                for (self.resid, self.ds.columnNarrow(f)) |r, b| acc += @as(f64, r) * tab[b];
+            }
             self.grad[c] = acc;
         }
     }
@@ -98,21 +105,27 @@ const GradCtx = struct {
 
 const ScoreAllCtx = struct {
     design: *const Design,
+    tables: []const []const f32,
     ds: *const Dataset,
     w: []const f32,
     intercept: f32,
     z: []f32,
 
+    /// Column by column over this range of rows: each row still adds its columns in column
+    /// order, so every score is the same f32 sum as a row-at-a-time loop, but the narrow or
+    /// wide read is chosen once per column.
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ScoreAllCtx = @ptrCast(@alignCast(ctx));
-        var r = begin;
-        while (r < end) : (r += 1) {
-            var acc: f32 = self.intercept;
-            for (self.design.cols, self.w) |c, coef| {
-                if (coef != 0) acc += coef * self.design.value(c, self.ds, r);
+        const z = self.z[begin..end];
+        @memset(z, self.intercept);
+        for (self.design.cols, self.w, self.tables) |c, coef, tab| {
+            if (coef == 0) continue;
+            if (self.ds.isWide(c.feature)) {
+                for (z, self.ds.columnWide(c.feature)[begin..end]) |*acc, b| acc.* += coef * tab[b];
+            } else {
+                for (z, self.ds.columnNarrow(c.feature)[begin..end]) |*acc, b| acc.* += coef * tab[b];
             }
-            self.z[r] = acc;
         }
     }
 };
@@ -126,6 +139,8 @@ const ScoreAllCtx = struct {
 pub const Problem = struct {
     pool: *Pool,
     design: *const Design,
+    /// `Design.valueTables`, owned by the caller.
+    tables: []const []const f32,
     ds: *const Dataset,
     objective: Objective,
     scale_pos_weight: f32,
@@ -154,6 +169,7 @@ pub const Problem = struct {
 
         var sctx = ScoreAllCtx{
             .design = pr.design,
+            .tables = pr.tables,
             .ds = pr.ds,
             .w = pr.wf,
             .intercept = @floatCast(th[np]),
@@ -188,7 +204,7 @@ pub const Problem = struct {
     /// left behind, so the two must be called in that order on the same point.
     fn grad(pr: *Problem, th: []const f64, out: []f64) void {
         const np = pr.p();
-        var gctx = GradCtx{ .design = pr.design, .ds = pr.ds, .resid = pr.resid, .grad = out[0..np] };
+        var gctx = GradCtx{ .design = pr.design, .tables = pr.tables, .ds = pr.ds, .resid = pr.resid, .grad = out[0..np] };
         pr.pool.parallelFor(np, &gctx, GradCtx.run, 1);
 
         const n: f64 = @floatFromInt(pr.ds.n_rows);

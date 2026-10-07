@@ -112,6 +112,32 @@ pub const Design = struct {
     pub inline fn value(d: *const Design, c: Col, ds: *const Dataset, row: usize) f32 {
         return (d.raw(c, ds, row) - c.center) * c.scale;
     }
+
+    /// Per column, `value` for every bin of its feature, computed by the same f32 expression.
+    /// The solver's loops index these instead of recomputing per row and re-checking each
+    /// read for a wide column. Caller frees with `freeTables`.
+    pub fn valueTables(d: *const Design, gpa: std.mem.Allocator, ds: *const Dataset) ![][]f32 {
+        const t = try gpa.alloc([]f32, d.cols.len);
+        var made: usize = 0;
+        errdefer {
+            for (t[0..made]) |x| gpa.free(x);
+            gpa.free(t);
+        }
+        for (d.cols, t) |c, *tab| {
+            tab.* = try gpa.alloc(f32, ds.n_bins[c.feature]);
+            made += 1;
+            for (tab.*, 0..) |*v, b| {
+                const rv: f32 = if (c.bin == numeric_col) d.repr[c.feature][b] else if (b == c.bin) 1.0 else 0.0;
+                v.* = (rv - c.center) * c.scale;
+            }
+        }
+        return t;
+    }
+
+    pub fn freeTables(gpa: std.mem.Allocator, t: [][]f32) void {
+        for (t) |x| gpa.free(x);
+        gpa.free(t);
+    }
 };
 
 fn buildDesign(
@@ -308,9 +334,12 @@ pub fn train(
 
     const n_f: f64 = @floatFromInt(ds.n_rows);
     const chunks: usize = if (ds.n_rows >= reduce_parallel_min) reduce_chunks else 1;
+    const tables = try design.valueTables(gpa, ds);
+    defer Design.freeTables(gpa, tables);
     var pr = Problem{
         .pool = pool,
         .design = &design,
+        .tables = tables,
         .ds = ds,
         .objective = cfg.objective,
         .scale_pos_weight = cfg.scale_pos_weight,

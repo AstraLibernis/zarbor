@@ -4,7 +4,7 @@
 
 """Merge every model-vs-counterpart comparison into one scoreboard.
 
-Rows 1-5 come from bench/arena/results.json (written by arena.py). Row 6 --
+Rows A-H come from bench/arena/results.json (written by arena.py). The last --
 linear regression -- is measured here, because arena.py's dataset is binary.
 
 Every row is the SAME dataset (EV purchases, 534,932 x 13) on the same
@@ -91,10 +91,26 @@ NAMES = {
     "C gbdt-goss": ("GBDT + GOSS", "LightGBM GOSS", "auc"),
     "D forest (1024-leaf cap)": ("Random forest", "scikit-learn RF", "auc"),
     "E linear": ("Logistic regression", "scikit-learn LogReg", "auc"),
+    "F catboost-plain": ("GBDT, symmetric", "CatBoost", "auc"),
+    "H catboost-ordered": ("Ordered boosting", "CatBoost ordered", "auc"),
+    "G catboost-defaults": ("CatBoost defaults", "CatBoost defaults", "auc"),
 }
 
 
+def check_release():
+    """Refuse to time a Debug binary, as arena.py does: this script once reported linear
+    regression 20x slower than it is because zig-out held a leftover Debug build."""
+    o = subprocess.run([str(ZARBOR), str(ARENA / "ev_reg_train.csv"), "--label=Annual_Income_USD",
+                        "--algo=linear", "--objective=squared_error", "--lin_epochs=1", "--verbose_eval=0"],
+                       capture_output=True, text=True).stdout
+    m = re.search(r"^build\s+(\S+)", o, re.M)
+    if m is None or m.group(1) not in ("ReleaseFast", "ReleaseSafe"):
+        raise SystemExit(f"zarbor is not a release build ({m.group(1) if m else 'unknown'}); "
+                         "run zig build -Doptimize=ReleaseFast")
+
+
 def main():
+    check_release()
     src = json.loads((ARENA / "results.json").read_text())
     rows = []
     for k, (name, ref, metric) in NAMES.items():

@@ -20,6 +20,7 @@ test "pseudoGrad picks the least-magnitude subgradient at a zero coefficient" {
     var pr = Problem{
         .pool = undefined,
         .design = undefined,
+        .tables = &.{},
         .ds = undefined,
         .objective = .logistic,
         .scale_pos_weight = 1,
