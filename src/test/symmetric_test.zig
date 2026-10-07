@@ -259,3 +259,101 @@ test "an exact tie goes to the lower feature index" {
     defer m.deinit();
     try testing.expectEqual(@as(u32, 0), m.trees.items[0].nodes[0].feature);
 }
+
+const symmetric = @import("../symmetric.zig");
+
+test "the MVS threshold solves sum min(1, c / mu) = sample" {
+    var prng: std.Random.DefaultPrng = .init(21);
+    const r = prng.random();
+    var buf: [8192]f64 = undefined;
+    for ([_]usize{ 1, 7, 100, 8192 }) |n| {
+        for ([_]f64{ 0.05, 0.5, 0.8, 0.999 }) |rate| {
+            const c = buf[0..n];
+            // Heavy-tailed candidates, so some rows sit above the threshold.
+            for (c) |*x| x.* = 0.01 + r.float(f64) * r.float(f64) * r.float(f64) * 50;
+            const sample = rate * @as(f64, @floatFromInt(n));
+            const mu = symmetric.mvsThreshold(c, sample);
+            var s: f64 = 0;
+            for (c) |x| s += if (mu == 0 or x > mu) 1 else x / mu;
+            try testing.expectApproxEqRel(sample, s, 1e-9);
+        }
+    }
+    // Equal candidates: every row gets the same probability.
+    var eq = [_]f64{2} ** 10;
+    const mu = symmetric.mvsThreshold(&eq, 4);
+    try testing.expectApproxEqRel(@as(f64, 5), mu, 1e-12);
+}
+
+fn predictWith(gpa: std.mem.Allocator, threads: u32, ds: *const data.Dataset, opts: anytype) ![n_rows]f32 {
+    const pool = try Pool.init(gpa, threads);
+    defer pool.deinit();
+    var m = try train(gpa, pool, ds, opts);
+    defer m.deinit();
+    var raw: [n_rows]f32 = undefined;
+    m.predictRaw(pool, ds, &raw);
+    return raw;
+}
+
+test "bootstrap and noise give the same model at 1, 3 and 16 threads" {
+    const gpa = testing.allocator;
+    var ds = try fixture(gpa, 6);
+    defer ds.deinit();
+    inline for (.{ .mvs, .bernoulli, .bayesian }) |bt| {
+        const opts = .{ .n_rounds = 8, .max_depth = 4, .bootstrap_type = bt, .subsample = @as(f32, if (bt == .bayesian) 1.0 else 0.6), .random_strength = @as(f32, 1.0), .seed = @as(u64, 7) };
+        const one = try predictWith(gpa, 1, &ds, opts);
+        for ([_]u32{ 3, 16 }) |t| {
+            const other = try predictWith(gpa, t, &ds, opts);
+            try testing.expectEqualSlices(f32, &one, &other);
+        }
+    }
+}
+
+test "bootstrap weights reach split scoring only, never the leaves" {
+    // Same check as the first test, under Bayesian weights: whatever splits were chosen, every
+    // leaf is the full-data, unweighted Newton step over its rows.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 8);
+    defer ds.deinit();
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 3, .learning_rate = @as(f32, 1.0), .lambda = @as(f32, 2.0), .bootstrap_type = .bayesian, .bagging_temperature = @as(f32, 3.0), .seed = @as(u64, 5) });
+    defer m.deinit();
+    var sp: [16][2]u32 = undefined;
+    const depth = try levelSplits(m.trees.items[0], &sp);
+    var g = [_]f64{0} ** 8;
+    var h = [_]f64{0} ** 8;
+    var idx: [n_rows]usize = undefined;
+    for (0..n_rows) |r| {
+        var i: usize = 0;
+        for (0..depth) |d| if (binOf(&ds, sp[d][0], r) > sp[d][1]) {
+            i |= @as(usize, 1) << @intCast(d);
+        };
+        idx[r] = i;
+        g[i] += 0.5 - ds.labels[r];
+        h[i] += 0.25;
+    }
+    var raw: [n_rows]f32 = undefined;
+    m.predictRaw(pool, &ds, &raw);
+    for (raw, idx) |got, i| try testing.expectApproxEqAbs(-g[i] / (h[i] + 2.0), got, 1e-5);
+}
+
+test "weights that are all one change nothing; noise changes the model only when on" {
+    const gpa = testing.allocator;
+    var ds = try fixture(gpa, 9);
+    defer ds.deinit();
+    const base = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4 });
+    // Temperature 0 makes every Bayesian weight 1; MVS at subsample 1 keeps every row at weight 1.
+    const bay0 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .bootstrap_type = .bayesian, .bagging_temperature = @as(f32, 0.0) });
+    const mvs1 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .bootstrap_type = .mvs });
+    try testing.expectEqualSlices(f32, &base, &bay0);
+    try testing.expectEqualSlices(f32, &base, &mvs1);
+    // And weights that are not all one do reach the splits.
+    const bay3 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .bootstrap_type = .bayesian, .bagging_temperature = @as(f32, 3.0) });
+    try testing.expect(!std.mem.eql(f32, &base, &bay3));
+    // Without noise the seed is irrelevant; with it, two seeds grow different models.
+    const s1 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .seed = @as(u64, 1) });
+    try testing.expectEqualSlices(f32, &base, &s1);
+    const n1 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .random_strength = @as(f32, 5.0), .seed = @as(u64, 1) });
+    const n2 = try predictWith(gpa, 2, &ds, .{ .n_rounds = 6, .max_depth = 4, .random_strength = @as(f32, 5.0), .seed = @as(u64, 2) });
+    try testing.expect(!std.mem.eql(f32, &n1, &n2));
+}

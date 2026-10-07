@@ -34,6 +34,22 @@ pub const ScoreFunction = enum {
     l2,
 };
 
+/// Row weights drawn once per tree for split scoring only; leaf values always use every row
+/// unweighted, as CatBoost's do.
+pub const BootstrapType = enum {
+    none,
+    /// Keep each row with probability `subsample`, weight 1.
+    bernoulli,
+    /// Weight `(-ln u)^bagging_temperature`, u uniform: every row kept, weights vary.
+    bayesian,
+    /// Minimal variance sampling (CatBoost's CPU default): keep rows with large gradients more
+    /// often, reweighted by 1/probability so the sums stay unbiased.
+    mvs,
+};
+
+/// Rows per MVS block, each with its own threshold and random stream (CatBoost's `BlockSize`).
+const mvs_block: usize = 8192;
+
 /// One histogram cell: gradient sum, row count, hessian sum.
 const Cell = struct {
     g: f64 = 0,
@@ -55,6 +71,17 @@ pub const Settings = struct {
     score: ScoreFunction,
     /// Newton steps per leaf; >1 re-evaluates the derivatives at the moved score (no backtracking).
     leaf_iterations: u32,
+    bootstrap: BootstrapType = .none,
+    /// Expected kept fraction for `bernoulli` and `mvs`.
+    subsample: f64 = 1,
+    bagging_temperature: f64 = 1,
+    /// MVS's lambda; null takes CatBoost's: the previous tree's mean |leaf value| squared, or on
+    /// the first tree the mean |gradient| squared.
+    mvs_reg: ?f64 = null,
+    /// Scale of the normal noise added to split scores (CatBoost's `random_strength`), shrinking as
+    /// the model grows; 0 disables.
+    random_strength: f64 = 0,
+    seed: u64 = 0,
 };
 
 pub const Builder = struct {
@@ -75,6 +102,16 @@ pub const Builder = struct {
     best: []Best,
     /// Leaf values of the last grown tree, already scaled by the learning rate.
     values: []f64,
+    /// Bootstrap weight per row for the tree being grown; empty without bootstrap.
+    weights: []f32,
+    /// MVS scratch: one candidate per row, each block sorting its own slice.
+    mvs_scratch: []f64,
+    /// Trees grown so far: the noise decay and every random stream key on it.
+    iteration: u32 = 0,
+    /// Mean |leaf value| of the previous tree, for MVS's lambda.
+    prev_mean_leaf: ?f64 = null,
+    /// Split-score noise scale for the tree being grown.
+    sigma: f64 = 0,
 
     const Best = struct { score: f64, threshold: u32 };
 
@@ -101,6 +138,10 @@ pub const Builder = struct {
         const best = try gpa.alloc(Best, ds.n_features);
         errdefer gpa.free(best);
         const values = try gpa.alloc(f64, @as(usize, 1) << @intCast(s.depth));
+        errdefer gpa.free(values);
+        const weights = try gpa.alloc(f32, if (s.bootstrap == .none) 0 else ds.n_rows);
+        errdefer gpa.free(weights);
+        const mvs_scratch = try gpa.alloc(f64, if (s.bootstrap == .mvs) ds.n_rows else 0);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -112,6 +153,8 @@ pub const Builder = struct {
             .has_missing = has_missing,
             .best = best,
             .values = values,
+            .weights = weights,
+            .mvs_scratch = mvs_scratch,
         };
     }
 
@@ -122,6 +165,8 @@ pub const Builder = struct {
         b.gpa.free(b.has_missing);
         b.gpa.free(b.best);
         b.gpa.free(b.values);
+        b.gpa.free(b.weights);
+        b.gpa.free(b.mvs_scratch);
         b.* = undefined;
     }
 
@@ -140,20 +185,29 @@ pub const Builder = struct {
         @memset(b.leaf, 0);
         var splits: [max_depth]Split = undefined;
         var depth: u32 = 0;
+        if (b.s.bootstrap != .none) b.sampleWeights(grads);
+        b.sigma = if (b.s.random_strength > 0) b.noiseScale(grads) else 0;
 
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
             var hctx = HistCtx{ .b = b, .grads = grads, .n_leaves = n_leaves };
             b.pool.parallelFor(ds.n_features, &hctx, HistCtx.run, 1);
-            var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves };
+            var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves, .level = depth };
             b.pool.parallelFor(ds.n_features, &sctx, ScoreCtx.run, 1);
 
             // Strict `>` in feature order: ties go to the lower feature index, then (within a
-            // feature, in `ScoreCtx`) to the lower threshold, as CatBoost's scan does.
+            // feature, in `ScoreCtx`) to the lower threshold, as CatBoost's scan does. With noise,
+            // each feature's best (noise-free) score gets a fresh draw here, in feature order.
+            var sel = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, depth, std.math.maxInt(u32)));
             var win: ?usize = null;
+            var win_score: f64 = -std.math.inf(f64);
             for (b.best, 0..) |c, f| {
                 if (!std.math.isFinite(c.score)) continue;
-                if (win == null or c.score > b.best[win.?].score) win = f;
+                const s = if (b.sigma > 0) c.score + b.sigma * sel.random().floatNorm(f64) else c.score;
+                if (win == null or s > win_score) {
+                    win = f;
+                    win_score = s;
+                }
             }
             const f = win orelse break;
             const sp: Split = .{ .feature = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
@@ -176,7 +230,40 @@ pub const Builder = struct {
         }
 
         try b.leafValues(depth, grads, raw, labels, objective, scale_pos_weight);
+        const n_leaves = @as(usize, 1) << @intCast(depth);
+        var sum_abs: f64 = 0;
+        for (b.values[0..n_leaves]) |v| sum_abs += @abs(v);
+        b.prev_mean_leaf = sum_abs / @as(f64, @floatFromInt(n_leaves));
+        b.iteration += 1;
         return b.toTree(splits[0..depth]);
+    }
+
+    /// CatBoost's noise scale: `random_strength * sqrt(mean g^2) * decay`, the decay a logistic in
+    /// `ln n - iteration * learning_rate`, so the noise fades once the model has grown.
+    fn noiseScale(b: *Builder, grads: []const hist.GradPair) f64 {
+        var s2: f64 = 0;
+        for (grads) |gp| s2 += @as(f64, gp.g) * gp.g;
+        const n: f64 = @floatFromInt(grads.len);
+        const model_length = @as(f64, @floatFromInt(b.iteration)) * b.s.learning_rate;
+        const e = @exp(@log(n) - model_length);
+        return b.s.random_strength * @sqrt(s2 / n) * (e / (1 + e));
+    }
+
+    /// This tree's bootstrap weights. Each block of rows has its own random stream keyed on the
+    /// tree and the block, so the weights do not depend on the thread count.
+    fn sampleWeights(b: *Builder, grads: []const hist.GradPair) void {
+        var lambda: f64 = 0;
+        if (b.s.bootstrap == .mvs) lambda = b.s.mvs_reg orelse blk: {
+            const m = b.prev_mean_leaf orelse first: {
+                var s: f64 = 0;
+                for (grads) |gp| s += @abs(@as(f64, gp.g));
+                break :first s / @as(f64, @floatFromInt(grads.len));
+            };
+            break :blk m * m;
+        };
+        var ctx = WeightCtx{ .b = b, .grads = grads, .lambda = lambda };
+        const n_blocks = (b.ds.n_rows + mvs_block - 1) / mvs_block;
+        b.pool.parallelFor(n_blocks, &ctx, WeightCtx.run, 1);
     }
 
     /// The first split bit `j` whose every leaf pair differing only in `j` has an empty side.
@@ -287,6 +374,82 @@ pub const Builder = struct {
 
 const Split = struct { feature: u32, threshold: u32 };
 
+/// A random stream key from four integers (splitmix64 rounds), so every stream is fixed by what it
+/// is for, not by which worker draws it.
+fn mix(seed: u64, a: u64, c: u64, d: u64) u64 {
+    var x = seed;
+    for ([3]u64{ a, c, d }) |v| {
+        x +%= 0x9E3779B97F4A7C15 +% v;
+        var z = x;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        x = z ^ (z >> 31);
+    }
+    return x;
+}
+
+const WeightCtx = struct {
+    b: *Builder,
+    grads: []const hist.GradPair,
+    lambda: f64,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *WeightCtx = @ptrCast(@alignCast(ctx));
+        for (begin..end) |blk| self.block(blk);
+    }
+
+    fn block(self: *WeightCtx, blk: usize) void {
+        const b = self.b;
+        const lo = blk * mvs_block;
+        const hi = @min(lo + mvs_block, b.ds.n_rows);
+        var prng = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, blk, 0xB007));
+        const r = prng.random();
+        const w = b.weights[lo..hi];
+        switch (b.s.bootstrap) {
+            .none => @memset(w, 1),
+            .bernoulli => for (w) |*x| {
+                x.* = if (r.float(f64) < b.s.subsample) 1 else 0;
+            },
+            .bayesian => for (w) |*x| {
+                // u in (0, 1]: -ln u is finite and >= 0.
+                const u = 1.0 - r.float(f64);
+                x.* = @floatCast(std.math.pow(f64, -@log(u), b.s.bagging_temperature));
+            },
+            .mvs => {
+                if (b.s.subsample >= 1) return @memset(w, 1);
+                const cand = b.mvs_scratch[lo..hi];
+                for (cand, self.grads[lo..hi]) |*c, gp| c.* = @sqrt(@as(f64, gp.g) * gp.g + self.lambda);
+                const mu = mvsThreshold(cand, b.s.subsample * @as(f64, @floatFromInt(hi - lo)));
+                for (w, self.grads[lo..hi]) |*x, gp| {
+                    const c = @sqrt(@as(f64, gp.g) * gp.g + self.lambda);
+                    const p = if (c > mu) 1.0 else c / mu;
+                    x.* = if (p > std.math.floatEps(f64) and r.float(f64) < p) @floatCast(1 / p) else 0;
+                }
+            },
+        }
+    }
+};
+
+/// The threshold mu with `sum min(1, c / mu) = sample`: rows above mu are kept for sure, the rest
+/// with probability c / mu. Sorts `cand` in place.
+pub fn mvsThreshold(cand: []f64, sample: f64) f64 {
+    std.sort.pdq(f64, cand, {}, std.sort.asc(f64));
+    var small: f64 = 0;
+    for (cand) |c| small += c;
+    // k rows taken for sure, from the top; the rest share what is left of the sample.
+    var k: usize = 0;
+    while (k < cand.len) : (k += 1) {
+        const left = sample - @as(f64, @floatFromInt(k));
+        if (left <= 0) break;
+        const mu = small / left;
+        if (cand[cand.len - 1 - k] <= mu) return mu;
+        small -= cand[cand.len - 1 - k];
+    }
+    // Every row is above any threshold that fits: keep them all.
+    return 0;
+}
+
 inline fn binAt(ds: *const Dataset, f: usize, r: usize) data.BinIdx {
     return if (ds.isWide(f)) ds.columnWide(f)[r] else ds.columnNarrow(f)[r];
 }
@@ -306,11 +469,14 @@ const HistCtx = struct {
             const nb: usize = b.ds.n_bins[f];
             const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
             @memset(slice, .{});
+            const w = b.weights;
             for (b.leaf, self.grads, 0..) |l, gp, r| {
+                const s: f64 = if (w.len != 0) w[r] else 1;
+                if (s == 0) continue;
                 const c = &slice[@as(usize, l) * nb + binAt(b.ds, f, r)];
-                c.g += gp.g;
-                c.n += 1;
-                c.h += gp.h;
+                c.g += s * gp.g;
+                c.n += s;
+                c.h += s * gp.h;
             }
         }
     }
@@ -320,6 +486,7 @@ const HistCtx = struct {
 const ScoreCtx = struct {
     b: *Builder,
     n_leaves: usize,
+    level: u32,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -341,6 +508,10 @@ const ScoreCtx = struct {
         }
         const lambda = b.s.lambda;
         const first: usize = if (b.has_missing[f]) 0 else 1;
+        // With noise, thresholds compete on noisy scores and the winner keeps its noise-free one;
+        // the comparison across features draws fresh noise (CatBoost's `SetBestScore`).
+        var prng = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, self.level, f));
+        var best_noisy = -std.math.inf(f64);
         // Thresholds k = first .. nb-2: left holds bins <= k.
         var k = first;
         while (k + 1 < nb) : (k += 1) {
@@ -363,7 +534,11 @@ const ScoreCtx = struct {
                 .cosine, .auto => num / @sqrt(den + 1e-100),
                 .l2, .gain => num,
             };
-            if (s > best.score) best = .{ .score = s, .threshold = @intCast(k) };
+            const noisy = if (b.sigma > 0) s + b.sigma * prng.random().floatNorm(f64) else s;
+            if (noisy > best_noisy) {
+                best_noisy = noisy;
+                best = .{ .score = s, .threshold = @intCast(k) };
+            }
         }
         return best;
     }

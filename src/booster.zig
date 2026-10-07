@@ -435,6 +435,12 @@ pub fn train(
         .learning_rate = cfg.tree.learning_rate,
         .score = cfg.tree.score_function,
         .leaf_iterations = cfg.tree.leaf_estimation_iterations,
+        .bootstrap = cfg.tree.bootstrap_type,
+        .subsample = cfg.tree.subsample,
+        .bagging_temperature = cfg.tree.bagging_temperature,
+        .mvs_reg = if (cfg.tree.mvs_reg) |m| m else null,
+        .random_strength = cfg.tree.random_strength,
+        .seed = cfg.tree.seed,
     }) else null;
     defer if (sym) |*s| s.deinit();
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;

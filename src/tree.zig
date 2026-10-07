@@ -25,6 +25,7 @@ pub const GrowPolicy = enum {
 };
 
 pub const ScoreFunction = @import("symmetric.zig").ScoreFunction;
+pub const BootstrapType = @import("symmetric.zig").BootstrapType;
 
 /// How a categorical feature's levels are partitioned at a split.
 pub const CatSplit = enum {
@@ -90,6 +91,16 @@ pub const Params = struct {
     /// Newton steps per leaf under `symmetric` (CatBoost's `leaf_estimation_iterations`, without
     /// its backtracking): >1 re-takes the derivatives at the moved score.
     leaf_estimation_iterations: u32 = 1,
+    /// Per-tree row weights for split scoring under `symmetric` (CatBoost's `bootstrap_type`);
+    /// `bernoulli` and `mvs` keep `subsample` of the rows in expectation.
+    bootstrap_type: BootstrapType = .none,
+    /// `bayesian` weights are `(-ln u)^bagging_temperature`; 0 makes them all 1.
+    bagging_temperature: f32 = 1.0,
+    /// MVS lambda; unset follows CatBoost (previous tree's mean |leaf| squared).
+    mvs_reg: ?f32 = null,
+    /// Normal noise on `symmetric` split scores, scaled by the gradients and fading as the model
+    /// grows (CatBoost's `random_strength`, default 1 there). 0 is deterministic.
+    random_strength: f32 = 0.0,
     seed: u64 = 0,
 
     /// Upper bound on leaves for allocation sizing.
@@ -109,10 +120,16 @@ pub const Params = struct {
         if (p.colsample_bynode <= 0 or p.colsample_bynode > 1) return error.BadColsample;
         if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
         if (p.leaf_estimation_iterations == 0) return error.BadLeafIterations;
+        if (p.random_strength < 0 or p.bagging_temperature < 0) return error.NegativeRandomness;
+        if (p.grow_policy != .symmetric and (p.bootstrap_type != .none or p.random_strength != 0))
+            return error.OnlyForSymmetric;
         if (p.grow_policy == .symmetric) {
             if (p.max_depth == 0 or p.max_depth > @import("symmetric.zig").max_depth) return error.BadSymmetricDepth;
+            // Rows are subsampled only through the bootstrap types that define it.
+            if (p.subsample != 1 and p.bootstrap_type != .bernoulli and p.bootstrap_type != .mvs)
+                return error.SymmetricSubsampleNeedsBootstrapType;
             // Not built for symmetric trees yet; refused rather than silently ignored.
-            if (p.subsample != 1 or p.colsample_bytree != 1 or p.colsample_bylevel != 1 or
+            if (p.colsample_bytree != 1 or p.colsample_bylevel != 1 or
                 p.colsample_bynode != 1 or p.bootstrap or p.linear_leaves or
                 p.cat_split != .ordinal or p.alpha != 0 or p.max_delta_step != 0)
                 return error.SymmetricUnsupported;
