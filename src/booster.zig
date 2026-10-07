@@ -446,6 +446,7 @@ pub fn train(
         .ctr = cfg.tree.cat_split == .ctr,
         .one_hot_max_size = cfg.tree.one_hot_max_size,
         .model_size_reg = cfg.tree.model_size_reg,
+        .ordered = cfg.tree.boosting_type == .ordered,
     }) else null;
     defer if (sym) |*s| s.deinit();
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;

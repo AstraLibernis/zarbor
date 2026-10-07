@@ -421,3 +421,143 @@ test "categoricals: one-hot up to one_hot_max_size levels, four CTRs above, one 
         try testing.expectEqual(@as(u8, @intCast(t)), c.ctr_type);
     }
 }
+
+test "ordered boosting's prefixes: body min(100, n/50), each tail twice its body" {
+    const gpa = testing.allocator;
+    // CatBoost's own example (fold.cpp): n = 3000 gives (60,120), (120,240), ..., (1920,3000).
+    const bt = try symmetric.bodyTails(gpa, 3000);
+    defer gpa.free(bt);
+    const want = [_][2]usize{ .{ 60, 120 }, .{ 120, 240 }, .{ 240, 480 }, .{ 480, 960 }, .{ 960, 1920 }, .{ 1920, 3000 } };
+    try testing.expectEqual(want.len, bt.len);
+    for (bt, want) |got, w| {
+        try testing.expectEqual(w[0], got.body);
+        try testing.expectEqual(w[1], got.tail);
+    }
+    // Small data starts from one row; the last tail is clipped to n.
+    const small = try symmetric.bodyTails(gpa, 10);
+    defer gpa.free(small);
+    try testing.expectEqual(@as(usize, 1), small[0].body);
+    try testing.expectEqual(@as(usize, 10), small[small.len - 1].tail);
+    try testing.expectEqual(@as(usize, 8), small[small.len - 1].body);
+}
+
+test "under ordered boosting the model's leaves are still full-data Newton steps" {
+    // Ordering changes which split is chosen and the prefix models behind the scenes; the leaves
+    // a prediction uses come from every row at the model's own score, as in plain boosting.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 12);
+    defer ds.deinit();
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 3, .learning_rate = @as(f32, 1.0), .lambda = @as(f32, 2.0), .boosting_type = .ordered });
+    defer m.deinit();
+    var sp: [16][2]u32 = undefined;
+    const depth = try levelSplits(m.trees.items[0], &sp);
+    var g = [_]f64{0} ** 8;
+    var h = [_]f64{0} ** 8;
+    var idx: [n_rows]usize = undefined;
+    for (0..n_rows) |r| {
+        var i: usize = 0;
+        for (0..depth) |d| if (binOf(&ds, sp[d][0], r) > sp[d][1]) {
+            i |= @as(usize, 1) << @intCast(d);
+        };
+        idx[r] = i;
+        g[i] += 0.5 - ds.labels[r];
+        h[i] += 0.25;
+    }
+    var raw: [n_rows]f32 = undefined;
+    m.predictRaw(pool, &ds, &raw);
+    for (raw, idx) |got, i| try testing.expectApproxEqAbs(-g[i] / (h[i] + 2.0), got, 1e-5);
+}
+
+test "ordered boosting gives the same model at 1, 3 and 16 threads, and differs from plain" {
+    const gpa = testing.allocator;
+    var ds = try fixture(gpa, 13);
+    defer ds.deinit();
+    const opts = .{ .n_rounds = 12, .max_depth = 4, .boosting_type = .ordered, .bootstrap_type = .mvs, .subsample = @as(f32, 0.7), .random_strength = @as(f32, 1.0), .seed = @as(u64, 3) };
+    const one = try predictWith(gpa, 1, &ds, opts);
+    for ([_]u32{ 3, 16 }) |t| {
+        const other = try predictWith(gpa, t, &ds, opts);
+        try testing.expectEqualSlices(f32, &one, &other);
+    }
+    const plain = try predictWith(gpa, 2, &ds, .{ .n_rounds = 12, .max_depth = 4 });
+    const ordered = try predictWith(gpa, 2, &ds, .{ .n_rounds = 12, .max_depth = 4, .boosting_type = .ordered });
+    try testing.expect(!std.mem.eql(f32, &plain, &ordered));
+}
+
+test "ordered boosting refuses what is not verified" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 14);
+    defer ds.deinit();
+    const bad = [_]config.Config{
+        config.Config.from(.{ .grow_policy = .symmetric, .boosting_type = .ordered, .score_function = .gain }),
+        config.Config.from(.{ .grow_policy = .symmetric, .boosting_type = .ordered, .leaf_estimation_iterations = 3 }),
+        config.Config.from(.{ .boosting_type = .ordered }),
+    };
+    for (bad) |c| {
+        if (booster.train(gpa, pool, &ds, null, c.gbdt, null)) |res| {
+            var m = res.model;
+            m.deinit();
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+}
+
+test "the ordered root split is the argmax of body estimates scored against tails" {
+    // Brute force of CatBoost's ordered Cosine at the root, first tree (every prefix model still at
+    // the base score 0, so each row's derivative is 0.5 - y): for each prefix, leaf estimates from
+    // its body rows, scored against its tail rows, summed over prefixes.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    const lambda: f64 = 3;
+    for (0..3) |seed| {
+        var ds = try fixture(gpa, 30 + seed);
+        defer ds.deinit();
+        const bts = try symmetric.bodyTails(gpa, ds.n_rows);
+        defer gpa.free(bts);
+        var best: [2]u32 = .{ 0, 0 };
+        var best_s = -std.math.inf(f64);
+        for (0..ds.n_features) |f| {
+            var k: u32 = 1;
+            while (k + 1 < ds.n_bins[f]) : (k += 1) {
+                var num: f64 = 0;
+                var den: f64 = 1e-100;
+                for (bts) |bt| {
+                    var bs = [2]f64{ 0, 0 };
+                    var bc = [2]f64{ 0, 0 };
+                    var ts = [2]f64{ 0, 0 };
+                    var tc = [2]f64{ 0, 0 };
+                    for (0..bt.tail) |r| {
+                        const side: usize = @intFromBool(binOf(&ds, f, r) > k);
+                        const d = 0.5 - @as(f64, ds.labels[r]);
+                        if (r < bt.body) {
+                            bs[side] += d;
+                            bc[side] += 1;
+                        } else {
+                            ts[side] += d;
+                            tc[side] += 1;
+                        }
+                    }
+                    for (0..2) |s| {
+                        const v = if (bc[s] > 0) bs[s] / (bc[s] + lambda) else 0;
+                        num += v * ts[s];
+                        den += v * v * tc[s];
+                    }
+                }
+                const sc = num / @sqrt(den);
+                if (sc > best_s) {
+                    best_s = sc;
+                    best = .{ @intCast(f), k };
+                }
+            }
+        }
+        var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 1, .lambda = @as(f32, 3.0), .boosting_type = .ordered });
+        defer m.deinit();
+        const root = m.trees.items[0].nodes[0];
+        try testing.expectEqual(best[0], root.feature);
+        try testing.expectEqual(best[1], @as(u32, root.threshold));
+    }
+}

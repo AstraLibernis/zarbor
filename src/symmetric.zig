@@ -88,7 +88,28 @@ pub const Settings = struct {
     one_hot_max_size: u32 = 2,
     /// Penalty on CTRs not yet used in any tree, by their number of distinct keys.
     model_size_reg: f64 = 0.5,
+    /// CatBoost's ordered boosting: splits are scored by leaf estimates from a prefix of the rows
+    /// against the rows just after it, so no row's gradient is judged by a model that saw it.
+    ordered: bool = false,
 };
+
+/// One prefix of the ordered rows: a model trained on rows `0..body` scores rows `body..tail`.
+pub const BodyTail = struct { body: usize, tail: usize };
+
+/// CatBoost's dynamic folds (fold.cpp): the first body is `min(100, n / 50)` rows (1 when
+/// `n <= 500`), each tail twice its body, each next body the previous tail, until all rows.
+pub fn bodyTails(gpa: std.mem.Allocator, n: usize) ![]BodyTail {
+    var list: std.ArrayList(BodyTail) = .empty;
+    errdefer list.deinit(gpa);
+    var body: usize = if (n > 500) @min(100, n / 50) else 1;
+    while (true) {
+        const tail = @min(n, 2 * body);
+        try list.append(gpa, .{ .body = body, .tail = tail });
+        if (tail >= n) break;
+        body = tail;
+    }
+    return list.toOwnedSlice(gpa);
+}
 
 /// What a candidate split tests.
 pub const CandKind = enum {
@@ -121,6 +142,8 @@ pub const Cand = struct {
     final: []u8 = &.{},
     /// CTR: distinct levels in training, for `model_size_reg`.
     uniq: u32 = 0,
+    /// One-hot: which levels occur in training (only those are split on).
+    present: []bool = &.{},
     /// CTR: chosen at some level already, so `model_size_reg` no longer applies. CatBoost keys
     /// this on (Borders or Counter, column), so choosing one prior frees the other two.
     used: bool = false,
@@ -159,6 +182,18 @@ pub const Builder = struct {
     prev_mean_leaf: ?f64 = null,
     /// Split-score noise scale for the tree being grown.
     sigma: f64 = 0,
+    /// Ordered boosting: the prefixes, each prefix model's score on its rows (`approx[ap_off[k]..]`,
+    /// `tail` long), its derivatives there, a second histogram bank for the tails, per-candidate
+    /// score accumulators, and the derivative each row is weighted by (its own tail's).
+    bts: []BodyTail = &.{},
+    approx: []f64 = &.{},
+    deriv: []f64 = &.{},
+    ap_off: []usize = &.{},
+    cells_tail: []Cell = &.{},
+    acc_num: []f64 = &.{},
+    acc_den: []f64 = &.{},
+    acc_off: []usize = &.{},
+    tail_grads: []hist.GradPair = &.{},
 
     const Best = struct { score: f64, threshold: u32 };
 
@@ -196,6 +231,9 @@ pub const Builder = struct {
         const weights = try gpa.alloc(f32, if (s.bootstrap == .none) 0 else ds.n_rows);
         errdefer gpa.free(weights);
         const mvs_scratch = try gpa.alloc(f64, if (s.bootstrap == .mvs) ds.n_rows else 0);
+        errdefer gpa.free(mvs_scratch);
+        var ord: Ordered = .{};
+        if (s.ordered) ord = try Ordered.init(gpa, ds, cands, cells.len);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -211,6 +249,15 @@ pub const Builder = struct {
             .values = values,
             .weights = weights,
             .mvs_scratch = mvs_scratch,
+            .bts = ord.bts,
+            .approx = ord.approx,
+            .deriv = ord.deriv,
+            .ap_off = ord.ap_off,
+            .cells_tail = ord.cells_tail,
+            .acc_num = ord.acc_num,
+            .acc_den = ord.acc_den,
+            .acc_off = ord.acc_off,
+            .tail_grads = ord.tail_grads,
         };
     }
 
@@ -224,6 +271,10 @@ pub const Builder = struct {
         b.gpa.free(b.values);
         b.gpa.free(b.weights);
         b.gpa.free(b.mvs_scratch);
+        if (b.bts.len != 0) {
+            const ord: Ordered = .{ .bts = b.bts, .approx = b.approx, .deriv = b.deriv, .ap_off = b.ap_off, .cells_tail = b.cells_tail, .acc_num = b.acc_num, .acc_den = b.acc_den, .acc_off = b.acc_off, .tail_grads = b.tail_grads };
+            ord.deinit(b.gpa);
+        }
         b.* = undefined;
     }
 
@@ -242,13 +293,32 @@ pub const Builder = struct {
         @memset(b.leaf, 0);
         var splits: [max_depth]Split = undefined;
         var depth: u32 = 0;
-        if (b.s.bootstrap != .none) b.sampleWeights(grads);
-        b.sigma = if (b.s.random_strength > 0) b.noiseScale(grads) else 0;
+        // Under ordered boosting the derivatives a split is judged by are each prefix model's, and
+        // bootstrap weights and noise follow the tail rows' (CatBoost's mvs.cpp, greedy_tensor_search).
+        if (b.s.ordered) {
+            // Every prefix model starts where the booster does.
+            if (b.iteration == 0) for (b.bts, 0..) |bt, k| {
+                for (b.approx[b.ap_off[k]..][0..bt.tail], raw[0..bt.tail]) |*a, r0| a.* = r0;
+            };
+            b.prefixDerivatives(labels, objective, scale_pos_weight);
+        }
+        const sample_grads = if (b.s.ordered) b.tail_grads else grads;
+        if (b.s.bootstrap != .none) b.sampleWeights(sample_grads);
+        b.sigma = if (b.s.random_strength > 0) b.noiseScale(sample_grads) else 0;
 
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
-            var hctx = HistCtx{ .b = b, .grads = grads, .n_leaves = n_leaves };
-            b.pool.parallelFor(b.cands.len, &hctx, HistCtx.run, 1);
+            if (b.s.ordered) {
+                @memset(b.acc_num, 0);
+                @memset(b.acc_den, 0);
+                for (b.bts, 0..) |_, k| {
+                    var octx = OrderedCtx{ .b = b, .bt = k, .n_leaves = n_leaves };
+                    b.pool.parallelFor(b.cands.len, &octx, OrderedCtx.run, 1);
+                }
+            } else {
+                var hctx = HistCtx{ .b = b, .grads = grads, .n_leaves = n_leaves };
+                b.pool.parallelFor(b.cands.len, &hctx, HistCtx.run, 1);
+            }
             var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves, .level = depth };
             b.pool.parallelFor(b.cands.len, &sctx, ScoreCtx.run, 1);
 
@@ -300,6 +370,7 @@ pub const Builder = struct {
         }
 
         try b.leafValues(depth, grads, raw, labels, objective, scale_pos_weight);
+        if (b.s.ordered) try b.updatePrefixes(depth, labels, objective, scale_pos_weight);
         const n_leaves = @as(usize, 1) << @intCast(depth);
         var sum_abs: f64 = 0;
         for (b.values[0..n_leaves]) |v| sum_abs += @abs(v);
@@ -308,14 +379,51 @@ pub const Builder = struct {
         return b.toTree(splits[0..depth]);
     }
 
+    /// Each prefix model's derivatives on its rows, and per row its own tail's (rows of the first
+    /// body take the first prefix's): what ordered scoring, bootstrap and noise read.
+    fn prefixDerivatives(b: *Builder, labels: []const f32, objective: Objective, scale_pos_weight: f32) void {
+        for (b.bts, 0..) |bt, k| {
+            const a = b.approx[b.ap_off[k]..][0..bt.tail];
+            const d = b.deriv[b.ap_off[k]..][0..bt.tail];
+            for (a, d, labels[0..bt.tail]) |x, *o, y| o.* = derivatives(objective, x, y, scale_pos_weight).g;
+            const from = if (k == 0) 0 else bt.body;
+            for (d[from..], b.tail_grads[from..bt.tail]) |x, *o| o.* = .{ .g = @floatCast(x), .h = 0 };
+        }
+    }
+
+    /// After a tree: each prefix model takes Newton steps fitted on its body rows only and applies
+    /// them to every row it scores (CatBoost's approx_calcer, ordered branch).
+    fn updatePrefixes(b: *Builder, depth: u32, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
+        const n_leaves = @as(usize, 1) << @intCast(depth);
+        const g = try b.gpa.alloc(f64, n_leaves);
+        defer b.gpa.free(g);
+        const h = try b.gpa.alloc(f64, n_leaves);
+        defer b.gpa.free(h);
+        for (b.bts, 0..) |bt, k| {
+            const a = b.approx[b.ap_off[k]..][0..bt.tail];
+            @memset(g, 0);
+            @memset(h, 0);
+            for (a[0..bt.body], labels[0..bt.body], b.leaf[0..bt.body]) |x, y, l| {
+                const d = derivatives(objective, x, y, scale_pos_weight);
+                g[l] += d.g;
+                h[l] += d.h;
+            }
+            for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
+            for (a, b.leaf[0..bt.tail]) |*x, l| x.* += g[l];
+        }
+    }
+
     /// CatBoost's noise scale: `random_strength * sqrt(mean g^2) * decay`, the decay a logistic in
-    /// `ln n - iteration * learning_rate`, so the noise fades once the model has grown.
+    /// `ln n - iteration * learning_rate`, so the noise fades once the model has grown. Ordered
+    /// boosting takes the mean over tail rows only, the first body excluded.
     fn noiseScale(b: *Builder, grads: []const hist.GradPair) f64 {
+        const from = if (b.s.ordered) b.bts[0].body else 0;
         var s2: f64 = 0;
-        for (grads) |gp| s2 += @as(f64, gp.g) * gp.g;
-        const n: f64 = @floatFromInt(grads.len);
+        for (grads[from..]) |gp| s2 += @as(f64, gp.g) * gp.g;
+        const n_all: f64 = @floatFromInt(grads.len);
+        const n: f64 = @floatFromInt(grads.len - from);
         const model_length = @as(f64, @floatFromInt(b.iteration)) * b.s.learning_rate;
-        const e = @exp(@log(n) - model_length);
+        const e = @exp(@log(n_all) - model_length);
         return b.s.random_strength * @sqrt(s2 / n) * (e / (1 + e));
     }
 
@@ -491,6 +599,7 @@ pub fn freeCands(gpa: std.mem.Allocator, cands: []Cand) void {
     for (cands) |c| {
         if (c.col.len != 0) gpa.free(c.col);
         if (c.final.len != 0) gpa.free(c.final);
+        if (c.present.len != 0) gpa.free(c.present);
     }
     gpa.free(cands);
 }
@@ -504,6 +613,7 @@ pub fn candidates(gpa: std.mem.Allocator, ds: *const Dataset, s: Settings) ![]Ca
         for (list.items) |c| {
             if (c.col.len != 0) gpa.free(c.col);
             if (c.final.len != 0) gpa.free(c.final);
+            if (c.present.len != 0) gpa.free(c.present);
         }
         list.deinit(gpa);
     }
@@ -520,14 +630,16 @@ pub fn candidates(gpa: std.mem.Allocator, ds: *const Dataset, s: Settings) ![]Ca
     for (0..ds.n_features) |f| {
         if (ds.kinds[f] != .categorical) continue;
         const present = try gpa.alloc(bool, ds.n_bins[f]);
-        defer gpa.free(present);
+        var kept = false;
+        defer if (!kept) gpa.free(present);
         @memset(present, false);
         for (0..ds.n_rows) |r| present[binAt(ds, f, r)] = true;
         var levels: u32 = 0;
         for (present) |p| levels += @intFromBool(p);
         if (levels <= 1) continue;
         if (levels <= s.one_hot_max_size) {
-            try list.append(gpa, .{ .kind = .onehot, .feature = @intCast(f), .nb = ds.n_bins[f] });
+            try list.append(gpa, .{ .kind = .onehot, .feature = @intCast(f), .nb = ds.n_bins[f], .present = present });
+            kept = true;
         } else try wide.append(gpa, @intCast(f));
     }
     for (wide.items) |f| {
@@ -729,6 +841,7 @@ const ScoreCtx = struct {
         const nb: usize = b.cands[f].nb;
         var best: Builder.Best = .{ .score = -std.math.inf(f64), .threshold = 0 };
         if (nb < 2) return best;
+        if (b.s.ordered) return self.fromAccumulators(f);
         if (b.cands[f].kind == .onehot) return self.oneHot(f);
         const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
         // Each leaf's bins become running sums in place (rebuilt every level): `slice[l*nb + k]`
@@ -755,6 +868,31 @@ const ScoreCtx = struct {
                 side(b, slice[l * nb + nb - 1].sub(left), &num, &den);
             }
             const s = total(b, num, den);
+            const noisy = if (b.sigma > 0) s + b.sigma * prng.random().floatNorm(f64) else s;
+            if (noisy > best_noisy) {
+                best_noisy = noisy;
+                best = .{ .score = s, .threshold = @intCast(k) };
+            }
+        }
+        return best;
+    }
+
+    /// Ordered boosting: the per-threshold sums every prefix added (`OrderedCtx`). For one-hot
+    /// candidates index v is `bin == v`; levels no row has are skipped.
+    fn fromAccumulators(self: *ScoreCtx, f: usize) Builder.Best {
+        const b = self.b;
+        const c = b.cands[f];
+        const nb: usize = c.nb;
+        var best: Builder.Best = .{ .score = -std.math.inf(f64), .threshold = 0 };
+        var prng = std.Random.DefaultPrng.init(mix(b.s.seed, b.iteration, self.level, f));
+        var best_noisy = -std.math.inf(f64);
+        const num = b.acc_num[b.acc_off[f]..][0..nb];
+        const den = b.acc_den[b.acc_off[f]..][0..nb];
+        const lo: usize = if (c.kind == .onehot or b.has_missing[f] or c.kind == .ctr) 0 else 1;
+        const hi: usize = if (c.kind == .onehot) nb else nb - 1;
+        for (lo..hi) |k| {
+            if (c.kind == .onehot and !c.present[k]) continue;
+            const s = total(b, num[k], den[k]);
             const noisy = if (b.sigma > 0) s + b.sigma * prng.random().floatNorm(f64) else s;
             if (noisy > best_noisy) {
                 best_noisy = noisy;
@@ -793,6 +931,135 @@ const ScoreCtx = struct {
             }
         }
         return best;
+    }
+};
+
+/// One prefix's contribution to every candidate's ordered score: histograms of its body (prefix
+/// model's derivative sums and counts) and its tail (sums and bootstrap-weighted counts), then for
+/// each threshold and leaf the body's leaf estimates scored against the tail. One task per
+/// candidate; prefixes run one after another, so the sums keep a fixed order.
+const OrderedCtx = struct {
+    b: *Builder,
+    bt: usize,
+    n_leaves: usize,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *OrderedCtx = @ptrCast(@alignCast(ctx));
+        for (begin..end) |f| self.cand(f);
+    }
+
+    fn cand(self: *OrderedCtx, f: usize) void {
+        const b = self.b;
+        const c = b.cands[f];
+        const nb: usize = c.nb;
+        const bt = b.bts[self.bt];
+        const d = b.deriv[b.ap_off[self.bt]..][0..bt.tail];
+        const body = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
+        const tail = b.cells_tail[b.off[f]..][0 .. self.n_leaves * nb];
+        @memset(body, .{});
+        @memset(tail, .{});
+        for (0..bt.tail) |r| {
+            const bin: usize = if (c.kind == .ctr) c.col[r] else binAt(b.ds, c.feature, r);
+            const i = @as(usize, b.leaf[r]) * nb + bin;
+            if (r < bt.body) {
+                body[i].g += d[r];
+                body[i].n += 1;
+            } else {
+                const s: f64 = if (b.weights.len != 0) b.weights[r] else 1;
+                if (s == 0) continue;
+                tail[i].g += s * d[r];
+                tail[i].n += s;
+            }
+        }
+        const num = b.acc_num[b.acc_off[f]..][0..nb];
+        const den = b.acc_den[b.acc_off[f]..][0..nb];
+        const lambda = b.s.lambda;
+        const est = struct {
+            fn v(cell: Cell, lam: f64) f64 {
+                return if (cell.n > 0) cell.g / (cell.n + lam) else 0;
+            }
+        }.v;
+        if (c.kind == .onehot) {
+            for (0..nb) |v| {
+                if (!c.present[v]) continue;
+                for (0..self.n_leaves) |l| {
+                    var ball: Cell = .{};
+                    var tall: Cell = .{};
+                    for (body[l * nb ..][0..nb], tail[l * nb ..][0..nb]) |x, y| {
+                        ball = ball.add(x);
+                        tall = tall.add(y);
+                    }
+                    const be = body[l * nb + v];
+                    const te = tail[l * nb + v];
+                    const ae = est(be, lambda);
+                    const ar = est(ball.sub(be), lambda);
+                    num[v] += ae * te.g + ar * (tall.g - te.g);
+                    den[v] += ae * ae * te.n + ar * ar * (tall.n - te.n);
+                }
+            }
+            return;
+        }
+        for (0..self.n_leaves) |l| {
+            const bc = body[l * nb ..][0..nb];
+            const tc = tail[l * nb ..][0..nb];
+            for (1..nb) |i| {
+                bc[i] = bc[i - 1].add(bc[i]);
+                tc[i] = tc[i - 1].add(tc[i]);
+            }
+            for (0..nb - 1) |k| {
+                const al = est(bc[k], lambda);
+                const ar = est(bc[nb - 1].sub(bc[k]), lambda);
+                const tr = tc[nb - 1].sub(tc[k]);
+                num[k] += al * tc[k].g + ar * tr.g;
+                den[k] += al * al * tc[k].n + ar * ar * tr.n;
+            }
+        }
+    }
+};
+
+/// Ordered boosting's buffers; owned by the builder, gathered here so init and deinit agree.
+const Ordered = struct {
+    bts: []BodyTail = &.{},
+    approx: []f64 = &.{},
+    deriv: []f64 = &.{},
+    ap_off: []usize = &.{},
+    cells_tail: []Cell = &.{},
+    acc_num: []f64 = &.{},
+    acc_den: []f64 = &.{},
+    acc_off: []usize = &.{},
+    tail_grads: []hist.GradPair = &.{},
+
+    fn init(gpa: std.mem.Allocator, ds: *const Dataset, cands: []const Cand, n_cells: usize) !Ordered {
+        var o: Ordered = .{};
+        errdefer o.deinit(gpa);
+        o.bts = try bodyTails(gpa, ds.n_rows);
+        o.ap_off = try gpa.alloc(usize, o.bts.len + 1);
+        o.ap_off[0] = 0;
+        for (o.bts, 0..) |bt, k| o.ap_off[k + 1] = o.ap_off[k] + bt.tail;
+        o.approx = try gpa.alloc(f64, o.ap_off[o.bts.len]);
+        @memset(o.approx, 0);
+        o.deriv = try gpa.alloc(f64, o.ap_off[o.bts.len]);
+        o.cells_tail = try gpa.alloc(Cell, n_cells);
+        o.acc_off = try gpa.alloc(usize, cands.len + 1);
+        o.acc_off[0] = 0;
+        for (cands, 0..) |c, i| o.acc_off[i + 1] = o.acc_off[i] + c.nb;
+        o.acc_num = try gpa.alloc(f64, o.acc_off[cands.len]);
+        o.acc_den = try gpa.alloc(f64, o.acc_off[cands.len]);
+        o.tail_grads = try gpa.alloc(hist.GradPair, ds.n_rows);
+        return o;
+    }
+
+    fn deinit(o: Ordered, gpa: std.mem.Allocator) void {
+        if (o.bts.len != 0) gpa.free(o.bts);
+        if (o.approx.len != 0) gpa.free(o.approx);
+        if (o.deriv.len != 0) gpa.free(o.deriv);
+        if (o.ap_off.len != 0) gpa.free(o.ap_off);
+        if (o.cells_tail.len != 0) gpa.free(o.cells_tail);
+        if (o.acc_num.len != 0) gpa.free(o.acc_num);
+        if (o.acc_den.len != 0) gpa.free(o.acc_den);
+        if (o.acc_off.len != 0) gpa.free(o.acc_off);
+        if (o.tail_grads.len != 0) gpa.free(o.tail_grads);
     }
 };
 

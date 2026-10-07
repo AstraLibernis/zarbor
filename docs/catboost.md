@@ -1,6 +1,6 @@
 # CatBoost-style training
 
-**Status: stages 1–3 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
+**Status: stages 1–4 of 6, [MEASURED] 2026-10-07** against catboost 1.2.10.
 
 CatBoost is the same family as XGBoost and LightGBM: gradients and hessians, histogram split
 search, Newton leaf values, shrinkage. What is genuinely different is how a tree is grown and how
@@ -142,11 +142,41 @@ pick the validation rows. Row order is the time order a CTR reads, so CatBoost p
 outputs changed, all from seeded row sampling (forest bootstrap, `subsample`, GOSS) picking by
 position; runs without sampling are bit-identical. `cv` already kept file order.
 
+## Stage 4: ordered boosting (done)
+
+`--boosting_type=ordered` (symmetric trees). Rows are taken in file order and cut into prefixes,
+CatBoost's dynamic folds: the first body is `min(100, n/50)` rows (1 when `n <= 500`), each tail
+twice its body, each next body the previous tail. Each prefix keeps its own model, trained only
+on its body rows. A split is scored by leaf estimates from each prefix's **body**, scored against
+its **tail** (`num += v * tail_sum`, `den += v^2 * tail_weight`, summed over prefixes, then
+`num / sqrt(den)`), so no row's gradient is judged by a model that saw that row. After each tree
+every prefix model takes Newton steps fitted on its body and applied to all its rows. The model's
+own leaves are still full-data Newton steps. Bootstrap weights and noise follow the tail rows, as
+CatBoost's do. Each tree's histograms are built one prefix at a time, so memory stays at two
+histogram banks.
+
+Refused under ordered, not yet verified: `--score_function=gain` and more than one leaf step.
+
+Measured against catboost 1.2.10 (`boosting_type='Ordered', has_time=True`), row for row:
+
+| case | max abs difference |
+|---|---|
+| numeric parity data, 1 tree | 5.4e-7 |
+| numeric parity data, 50 trees | 6.7e-7 |
+| numeric parity data, 156 trees | identical (first difference at tree 157) |
+| with categoricals (CTRs + one-hot), 50 trees, train and held-out | 5.8e-7 |
+
+Late in training the two part ways: at tree 157 on the numeric data zarbor's root is a different
+split (its top two candidates 0.9059 and 0.9056). The independent f64 Python reference the spec was
+verified with (`catboost-parity/s4_ordered_boosting.py`, run on the same data for 160 trees) parts
+from CatBoost **earlier**, at tree 103 (same three splits in a different order). So zarbor tracks
+CatBoost longer than the reference does; the cause of the late divergence, in either, is not found.
+CatBoost's ordered cost is about 4x its plain cost; zarbor's has not been timed.
+
 ## Still to build
 
 | stage | what | how it can be checked |
 |---|---|---|
-| 4 | ordered boosting | row for row with `has_time=True`; about 4x CatBoost's plain cost |
 | 5 | categorical feature combinations | row for row with `has_time=True` |
 | 6 | CatBoost's default permutations | statistically only |
 

@@ -26,6 +26,7 @@ pub const GrowPolicy = enum {
 
 pub const ScoreFunction = @import("symmetric.zig").ScoreFunction;
 pub const BootstrapType = @import("symmetric.zig").BootstrapType;
+pub const BoostingType = enum { plain, ordered };
 
 /// How a categorical feature's levels are partitioned at a split.
 pub const CatSplit = enum {
@@ -110,6 +111,8 @@ pub const Params = struct {
     /// Under `cat_split = ctr`: shrinks a target statistic no tree has used yet, the more distinct
     /// levels it has (CatBoost's default 0.5).
     model_size_reg: f32 = 0.5,
+    /// `ordered`: CatBoost's ordered boosting under `symmetric` (about 4x the work of `plain`).
+    boosting_type: BoostingType = .plain,
     seed: u64 = 0,
 
     /// Upper bound on leaves for allocation sizing.
@@ -130,8 +133,11 @@ pub const Params = struct {
         if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
         if (p.leaf_estimation_iterations == 0) return error.BadLeafIterations;
         if (p.random_strength < 0 or p.bagging_temperature < 0) return error.NegativeRandomness;
-        if (p.grow_policy != .symmetric and (p.bootstrap_type != .none or p.random_strength != 0 or p.cat_split == .ctr))
+        if (p.grow_policy != .symmetric and (p.bootstrap_type != .none or p.random_strength != 0 or p.cat_split == .ctr or p.boosting_type == .ordered))
             return error.OnlyForSymmetric;
+        // Ordered scoring is defined for CatBoost's Cosine and L2; one leaf step is what is verified.
+        if (p.boosting_type == .ordered and (p.score_function == .gain or p.leaf_estimation_iterations != 1))
+            return error.OrderedUnsupported;
         if (p.model_size_reg < 0) return error.NegativeRegularisation;
         if (p.grow_policy == .symmetric) {
             if (p.max_depth == 0 or p.max_depth > @import("symmetric.zig").max_depth) return error.BadSymmetricDepth;
