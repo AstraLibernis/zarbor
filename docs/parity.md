@@ -105,3 +105,78 @@ the measurements contradicted: one called LightGBM's descendant pruning "effecti
 child is never less constrained)", which the depth-5/depth-11 trace above disproves; one put the
 sigmoid's error at 27 ulp, measured at 58. Every row in the tables above rests on an experiment,
 not on a reading.
+
+## Second round: linear models, regression, the remaining knobs, sampling
+
+**[MEASURED] 2026-10-07**, same references. Harness: `parity/lincompare.py`, the `xgb_regression`,
+`lgb_regression`, `xgb_max_delta_step` and `xgb_scale_pos_weight` cases of `parity.py`, and
+`parity/sampling.py`.
+
+### Linear models against scikit-learn 1.9.1
+
+zarbor minimises `sum(loss) + lambda/2 ||w||^2 + alpha ||w||_1` (intercept free) on standardised
+columns, so the scikit-learn equivalents are `C = 1/lambda` (logistic L2), `C = 1/alpha` (L1),
+`Ridge(alpha=lambda)`, `Lasso(alpha=alpha/n)` and the matching elastic nets. On 30,000 rows of
+0–5 columns plus a six-level categorical (one bin per value, so the inputs are identical):
+
+| model | max prediction difference | objective |
+|---|---|---|
+| logistic L2, lambda 1 / 300 | 5.0e-5 / 1.1e-5 | |
+| logistic L1, alpha 40 | 2.4e-4 | |
+| logistic elastic net | 2.8e-5 | |
+| least squares L2, lambda 1 / 3000 | 8.4e-5 / 9.6e-6 | equal to 1e-10 relative |
+| least squares L1, alpha 2000 | 2.2e-4 | equal to 4e-9 relative, same 4 of 19 non-zero |
+| least squares elastic net | 1.3e-5 | |
+
+Same optimum. The prediction differences are f32 rounding along nearly flat directions (the
+rating columns are correlated, and a full one-hot block plus the intercept is collinear); AUC and
+RMSE agree to six decimals. zarbor stops when f32 can make no more progress, which its fit line
+reports as converged.
+
+### Exact cases
+
+| case | result |
+|---|---|
+| regression vs XGBoost, 200 trees | identical (7.8e-7) |
+| regression vs LightGBM, 100 trees | first difference at tree 45: LightGBM splits a leaf whose best gain is 2.78 instead of one whose best gain is 4.12, the second skipped by its feature-pruning shortcut (above). zarbor follows the gains. |
+| `scale_pos_weight` 3 vs XGBoost, base score pinned, 100 trees | identical (7.1e-7) |
+| `max_delta_step` 0.7 vs XGBoost, 100 trees | identical after the fix below (7.6e-7) |
+| `max_delta_step` 0.05 | 99% of rows; heavy clipping makes many candidates score the same and XGBoost compares in f32 |
+
+**Fixed:** with `max_delta_step`, zarbor scored a node by its free leaf weight and clipped only the
+leaf; XGBoost and LightGBM score the clipped weight, `-(2 g w + (h + lambda) w^2 + 2 alpha |w|)`.
+The first audit's experiment could not trigger it; one that clips many leaves diverged by 0.4.
+
+### Sampling, statistically
+
+Hold-out AUC over 10 seeds each, 200 trees, the parity data with 30% held out. A "no sampling" row
+opens each block.
+
+| XGBoost | xgboost | zarbor | diff / s.e. |
+|---|---|---|---|
+| no sampling | 0.950988 | 0.950988 | identical |
+| `subsample` 0.7 (Bernoulli per row vs exactly 70%) | 0.951085 | 0.951102 | 0.20 |
+| `colsample_bytree` 0.5 | 0.951090 | 0.951381 | **4.26** |
+| `colsample_bytree` 0.54 | 0.951215 | 0.951381 | 1.88 |
+| `colsample_bylevel` 0.5 / 0.54 | | | 0.10 / 0.45 |
+| `colsample_bynode` 0.5 / 0.54 | | | 0.57 / 1.11 |
+
+`colsample_bytree` 0.5 on 13 columns: zarbor keeps `round(6.5) = 7`, XGBoost `floor = 6`. At 0.54
+both keep 7 and the gap falls within two standard errors (zarbor's result is identical at 0.5 and
+0.54, as it should be).
+
+| LightGBM | lightgbm | zarbor | diff / s.e. |
+|---|---|---|---|
+| no sampling | 0.951189 | 0.951419 | differ (its two shortcuts, at 31 leaves and min_data_in_leaf 20) |
+| bagging 0.7 every tree | 0.951431 | 0.951300 | -1.35 |
+| `feature_fraction` 0.54 | 0.951477 | 0.951425 | -0.67 |
+| `feature_fraction_bynode` 0.54 | 0.951697 | 0.951774 | 1.34 |
+| GOSS 0.2 / 0.1, zarbor ranking `\|g\|` | 0.951488 | 0.951477 | -0.12 |
+| GOSS, zarbor ranking `\|g h\|` | 0.951488 | 0.951643 | 1.81 |
+| linear trees, lambda 1 | 0.950231 | 0.950803 | differ (deterministic) |
+
+Every sampled row is within two standard errors once the column counts agree. Two differences of
+design remain: LightGBM does not start GOSS until `1 / learning_rate` rounds in (goss.hpp:34;
+zarbor samples from the first), and its linear leaves fit every numeric feature on the path where
+zarbor's take at most `lin_leaf_max_terms` (8); with the trees already differing through
+LightGBM's shortcuts, the linear-tree rows compare two algorithms, not an implementation.
