@@ -6,8 +6,8 @@ models  1
 read # ms
 bin # ms
 predict # ms
-score   auc=0.969241  logloss=0.222175
+score   auc=0.971032  logloss=0.215633
 wrote   p.csv
 --- stderr
 --- files
-p.csv  11792 bytes  sha256 28971d1e9caeb2a9f70e9bf6ba83d6513bff6e2a15e2c41b85079a8ce5f37432
+p.csv  11792 bytes  sha256 771805c1c9b762065f3d6c93336741698ff0c7268df1418603c9a4e0b487caca

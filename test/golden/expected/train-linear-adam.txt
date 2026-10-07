@@ -13,7 +13,7 @@ encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
 [   0] |dw|max=5.000e-2  |g|max=2.589e-1
-[  99] |dw|max=1.226e-3  |g|max=4.821e-4
+[  99] |dw|max=1.228e-3  |g|max=4.821e-4
 
 rounds  100
 train # ms  ( # ms/epoch)
@@ -23,6 +23,6 @@ STALLED the solver stopped moving while the gradient was still
         coefficients are not a fitted model.
         adam needs far more epochs than lbfgs. Try
         --lin_epochs=30000, or --lin_solver=lbfgs.
-valid   auc=0.830584  logloss=0.514195
+valid   auc=0.830519  logloss=0.514235
 --- stderr
 --- files

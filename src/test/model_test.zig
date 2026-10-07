@@ -542,11 +542,13 @@ test "catContains agrees with a linear scan, on every set it can hold" {
     }
 }
 
-test "greedy binning gives a dominant value its own bin; quantile does not" {
+test "every policy gives a dominant value one bin and spends the budget on the rest" {
     // The failure this guards is silent and expensive: on a column that is
-    // mostly one value a quantile rule spends its budget inside that mass and
-    // leaves the tail a handful of bins. On adult's capital-gain that cost real
-    // AUC against LightGBM (docs/measurements.md), and no test could see it.
+    // mostly one value, a rule that spends its budget inside that mass leaves
+    // the tail a handful of bins. On adult's capital-gain that cost real AUC
+    // against LightGBM (docs/measurements.md). Quantile used to do exactly
+    // that, dropping every cut that repeated the atom; it now moves the cut to
+    // the next value, as XGBoost does.
     const gpa = testing.allocator;
     const pool = try Pool.init(gpa, 1);
     defer pool.deinit();
@@ -563,25 +565,30 @@ test "greedy binning gives a dominant value its own bin; quantile does not" {
         l.* = if (v.* > 500) 1.0 else 0.0;
     }
 
-    var used: [2]usize = undefined;
-    for ([2]data.BinPolicy{ .quantile, .greedy }, 0..) |policy, i| {
+    for ([_]data.BinPolicy{ .quantile, .greedy, .logsum }) |policy| {
         var f = try numericFrame(gpa, vals, lab);
         defer f.deinit();
         var ds = try data.quantise(gpa, pool, &f, .{ .bin_policy = policy, .max_bin = 256 }, null, &.{});
         defer ds.deinit();
         var seen = [_]bool{false} ** 300;
-        var c: usize = 0;
+        var tail: usize = 0;
+        var zero_bin: ?data.BinIdx = null;
         for (ds.columnNarrow(0), vals) |b, v| {
-            if (v > 0 and !seen[b]) {
+            if (v == 0) {
+                // All zeros share one bin, and no tail value shares it.
+                if (zero_bin) |z| try testing.expectEqual(z, b) else zero_bin = b;
+                continue;
+            }
+            if (!seen[b]) {
                 seen[b] = true;
-                c += 1;
+                tail += 1;
             }
         }
-        used[i] = c;
+        try testing.expect(!seen[zero_bin.?]);
+        // About 400 tail rows and 254 bins left for them. Greedy also keeps
+        // `min_data_in_bin` (3) rows per bin, so it stops near 400 / 3.
+        try testing.expect(tail > 120);
     }
-    // Quantile collapses the tail onto a few bins; greedy spends the budget there.
-    try testing.expect(used[1] > used[0] * 4);
-    try testing.expect(used[1] > 100);
 }
 
 test "optimal categorical splits actually fire, and ordinal ones never do" {
@@ -1114,8 +1121,9 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     const pool = try Pool.init(gpa, 2);
     defer pool.deinit();
 
-    // Six zeros then a right tail. With two real bins the single cut lands on
-    // 0, so bin 1 is the zeros and bin 2 is {1, 2, 3, 400}.
+    // Six zeros then a right tail. With two real bins the single cut falls
+    // between 0 and 1 (at their midpoint), so bin 1 is the zeros and bin 2 is
+    // {1, 2, 3, 400}.
     const nums = [_]f32{ 0, 0, 0, 0, 0, 0, 1, 2, 3, 400 };
     const colours = [_][]const u8{"a"} ** nums.len;
     var f = try frameWith(gpa, &colours, &nums);
@@ -1125,7 +1133,7 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     defer ds.deinit();
 
     try testing.expectEqual(@as(u16, 3), ds.n_bins[1]);
-    try testing.expectEqualSlices(f32, &.{0}, ds.edges[1]);
+    try testing.expectEqualSlices(f32, &.{0.5}, ds.edges[1]);
     try testing.expectEqual(@as(usize, 3), ds.means[1].len);
 
     // Slot 0 is the missing bin, which holds no values of its own and takes
@@ -1136,7 +1144,7 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
 
     // What the midpoint rule would have said for that top bin, for contrast:
     // the cut itself, off by two orders of magnitude.
-    try testing.expectApproxEqAbs(@as(f32, 0.0), data.binMidpoint(ds.edges[1], 1), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), data.binMidpoint(ds.edges[1], 1), 1e-6);
 
     // A categorical bin *is* its level, so there is nothing to average.
     try testing.expectEqual(@as(usize, 0), ds.means[0].len);

@@ -44,8 +44,8 @@ per suspected difference). Porting it to synthetic data so it can live in `bench
 | depthwise vs XGBoost, depth 6, lr 0.1 | 500 | 7.7e-7 | 99.8% (rest within 7.7e-7) |
 | lossguide vs LightGBM, 31 leaves, lr 0.1, no row-count floor | 50 | 6.3e-7 | 99.96% |
 
-With `--bin_policy=greedy --min_data_in_bin=1`, zarbor's depthwise booster reproduces XGBoost
-through 500 rounds to the print precision. Gradients and hessians, histogram sums, split gain
+With `--min_data_in_bin=1` (and, before the binning fix below, `--bin_policy=greedy`), zarbor's
+depthwise booster reproduces XGBoost through 500 rounds to the print precision. Gradients and hessians, histogram sums, split gain
 with L1/L2, `min_child_weight`, leaf weights, shrinkage and growth order all agree; an error in
 any of them compounds and shows within a few rounds. The leaf-wise booster reproduces LightGBM
 the same way, except where LightGBM's own shortcuts apply (below).
@@ -54,7 +54,7 @@ the same way, except where LightGBM's own shortcuts apply (below).
 
 | defect | evidence | status |
 |---|---|---|
-| **The default `quantile` binning merges rare values**, even in a column with six distinct values: a value rarer than 1/255 of the rows never becomes a cut (`bin_edges.zig`, quantile branch). XGBoost and LightGBM give each distinct value its own bin when they fit. | First divergence in round 5 of the depthwise run traced to a split on `r11 < 1`, unreachable because 0 and 1 shared a bin. | **Open.** Binning policies are being redesigned as a set of choices rather than a new default. Until then, `--bin_policy=greedy` is the one that does not merge. |
+| **The default `quantile` binning merges rare values**, even in a column with six distinct values: a value rarer than 1/255 of the rows never becomes a cut (`bin_edges.zig`, quantile branch). XGBoost and LightGBM give each distinct value its own bin when they fit. | First divergence in round 5 of the depthwise run traced to a split on `r11 < 1`, unreachable because 0 and 1 shared a bin. | **Fixed** (same day): every policy now gives one bin per value when the values fit, and `quantile` follows XGBoost's cut rule. See `binning.md`. |
 | **No split could isolate missing from present.** Every scan kept at least one real bin beside the missing mass, and a feature with one real bin was skipped. XGBoost reaches this partition from its scan's end points. | A column that is a constant or NaN: XGBoost's root split gain 1157, zarbor a stump. | **Fixed.** `threshold = 0` with missing left is now a candidate for every feature with missing rows. Tests: `split_test.zig`. |
 | **`min_split_gain` was half of XGBoost's `gamma`.** zarbor's gain carried a 0.5 factor that XGBoost's `loss_chg` and LightGBM's gain do not, so the same threshold rejected splits XGBoost accepts. | gamma = 0.6 × root gain: XGBoost split, zarbor did not. | **Fixed.** Gain is now the unhalved score sum on all three paths (numeric, one-vs-rest, sorted categorical). Test: `split_test.zig`. |
 
@@ -90,7 +90,7 @@ Measured or read in source; none moves a tree under the parity conditions above.
 | `colsample_*` count | `round(n × rate)` | XGBoost `floor`, LightGBM `round` over non-trivial features | 13 features at 0.5: zarbor 7, XGBoost 6. |
 | `subsample` | exactly `round(n × rate)` rows | XGBoost: a Bernoulli draw per row | Same expectation, different variance. |
 | missing direction when a node saw no missing rows | the larger child | XGBoost right; LightGBM left | Predictions on new NaNs only. |
-| cut placement for unseen values | inclusive upper bound at a training value | XGBoost the left value; LightGBM, CatBoost, scikit-learn the midpoint | Predictions on values between training values only. Part of the binning redesign. |
+| cut placement for unseen values | midpoint between training values (since the binning rewrite) | XGBoost the left value; LightGBM, CatBoost, scikit-learn the midpoint | Predictions on values between training values only. |
 | gradient sigmoid | polynomial, max abs error 8.1e-7 | `expf` / `std::exp` | Tens of ulp in the tail; invisible at 500 trees (see the table above). |
 | hessian floor | 1e-6 | XGBoost 1e-16, LightGBM none | Only where \|margin\| > ~13.8. |
 | scores | f32 | XGBoost f32, LightGBM f64 | Invisible at 500 trees. |

@@ -7,6 +7,7 @@ const std = @import("std");
 
 test {
     // The tests.
+    _ = @import("test/bin_test.zig");
     _ = @import("test/booster_test.zig");
     _ = @import("test/csv_test.zig");
     _ = @import("test/cv_test.zig");

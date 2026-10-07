@@ -19,16 +19,23 @@ pub const max_bins = std.math.maxInt(BinIdx);
 
 pub const csv = @import("csv.zig");
 
-/// Strategy for choosing bin edges when quantising a numeric column.
+/// Strategy for choosing bin edges when quantising a numeric column with more
+/// distinct values than the bin budget. With no more than that, every policy
+/// gives one bin per value (bin_edges.zig `perValue`). Edges sit midway between
+/// neighbouring training values except under `uniform`.
 pub const BinPolicy = enum {
-    /// Equal-count bins from the empirical distribution. Robust to skew.
+    /// Equal-count bins, XGBoost's rule: a cut landing on an already-cut value
+    /// moves to the next one, so a heavy atom does not eat the budget.
     quantile,
-    /// Equal-width bins between min and max. Cheaper, worse on skewed data.
+    /// Equal-width bins between min and max. Cheapest; outliers waste bins.
     uniform,
-    /// LightGBM's `GreedyFindBin`: a value with a bin's worth of rows gets its
-    /// own bin, the rest share the budget, so a 92%-one-value column spends
-    /// its cuts on the other 8% rather than the mode.
+    /// LightGBM's binning: `GreedyFindBin` with zero in a bin of its own and the
+    /// budget split by sign. A value with a bin's worth of rows gets its own bin
+    /// and the rest share the budget.
     greedy,
+    /// CatBoost's default `GreedyLogSum`: repeatedly split the bin whose
+    /// middle cut most raises the sum of log bin sizes, i.e. most evens them.
+    logsum,
 };
 
 /// How `quantise` turns columns into bins. Shared by every model.

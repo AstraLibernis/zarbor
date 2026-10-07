@@ -21,10 +21,10 @@ prep # ms  (read + bin, paid once for the whole search)
 
 rung 0  6 configs at 2 folds
 rung 1  1 configs at 4 folds
-   1  0.865088  4f #ms  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128  <- best
+   1  0.864056  4f #ms  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128  <- best
 
-best     0.865088   1 trials   (6 re-bins)
+best     0.864056   1 trials   (6 re-bins)
   n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128
-verified 0.865088   (winner re-ran identically)
+verified 0.864056   (winner re-ran identically)
 --- stderr
 --- files
