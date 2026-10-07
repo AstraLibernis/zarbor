@@ -178,8 +178,9 @@ pub fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
 
 /// Default space per model, so a search needs no explicit params. Ranges
 /// include the shipped defaults; where a default sits at a range's edge
-/// (e.g. `subsample` 1.0), the search can only move one way. The binning
-/// ranges reach the extremes a CV sweep over six datasets found best (docs/binning.md).
+/// (e.g. `subsample` 1.0), the search can only move one way. `max_bin` stops at 1024: past
+/// it, a tuned model gained nothing and every trial got slower (docs/binning.md); an `edge`
+/// line says when a winner presses on it, and `--param` searches further.
 pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const specs: []const []const u8 = switch (algo) {
         .gbdt => &.{
@@ -190,7 +191,7 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
             "min_child_weight=0.1..100:log",
             "subsample=0.5..1.0",
             "colsample_bytree=0.5..1.0",
-            "max_bin=8..16384:int:log",
+            "max_bin=8..1024:int:log",
             "min_data_in_bin=1..300:int:log",
         },
         .random_forest => &.{
@@ -198,7 +199,7 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
             "max_leaves=128,256,512,1024,2048",
             "min_child_samples=1,5,20",
             "colsample_bynode=0.2..1.0",
-            "max_bin=8..16384:int:log",
+            "max_bin=8..1024:int:log",
             "min_data_in_bin=1..300:int:log",
         },
         .linear => &.{

@@ -17,18 +17,18 @@ prep # ms  (read + bin, paid once for the whole search)
   min_child_weight     log_uniform  0.1 .. 100
   subsample            uniform  0.5 .. 1
   colsample_bytree     uniform  0.5 .. 1
-  max_bin              int_log  8 .. 16384
+  max_bin              int_log  8 .. 1024
   min_data_in_bin      int_log  1 .. 300
 
 rung 0  6 configs at 2 folds
 rung 1  1 configs at 4 folds
-   1  0.864388  4f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=11871 min_data_in_bin=2  <- best
+   1  0.864388  4f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=834 min_data_in_bin=2  <- best
 
 best     0.864388   1 trials   (7 re-bins)
-  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=11871 min_data_in_bin=2
+  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=834 min_data_in_bin=2
 edge     n_rounds=800 is at the high end of its range; widen it and search again
 edge     max_depth=3 is at the low end of its range; widen it and search again
-edge     max_bin=11871 is at the high end of its range; widen it and search again
+edge     max_bin=834 is at the high end of its range; widen it and search again
 verified 0.864388   (winner re-ran identically)
 --- stderr
 --- files

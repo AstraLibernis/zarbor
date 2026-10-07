@@ -141,8 +141,11 @@ Guidance: keep 256 as the default. The single-split accuracy above is too noisy 
 and overfitting past 2048. Nor does one `min_data_in_bin` suit them all: with `max_bin`
 16384 and `greedy`, the best floor is 1 (adult, housing), 3 (bank), 10 (airline), 30 (Ames)
 or 100 (California). The bin count acts as regularisation, so it is a setting to tune.
-`tune`'s default space searches `max_bin` 8..16384 and `min_data_in_bin` 1..300 (both
-log), and `tune` prints an `edge` line when the winner lands in the outer 5% of any range.
+`tune`'s default space searches `max_bin` 8..1024 and `min_data_in_bin` 1..300 (both log).
+It searched up to 16384 until the housing A/B below showed that wider bins bought nothing
+once the other settings were tuned, at 3.5x the search time. `tune` prints an `edge` line
+when the winner lands in the outer 5% of any range; `--param=max_bin=8..16384:int:log`
+searches wider.
 
 ### CV sweep (5-fold), 2026-10-07
 

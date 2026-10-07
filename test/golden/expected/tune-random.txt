@@ -17,24 +17,24 @@ prep # ms  (read + bin, paid once for the whole search)
   min_child_weight     log_uniform  0.1 .. 100
   subsample            uniform  0.5 .. 1
   colsample_bytree     uniform  0.5 .. 1
-  max_bin              int_log  8 .. 16384
+  max_bin              int_log  8 .. 1024
   min_data_in_bin      int_log  1 .. 300
 
-   1  0.841004  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=11871 min_data_in_bin=2  <- best
-   2  0.828608  2f #ms  n_rounds=200 learning_rate=0.173923 max_depth=5 lambda=0.192068 min_child_weight=0.796712 subsample=0.549356 colsample_bytree=0.587321 max_bin=387 min_data_in_bin=4
-   3  0.842036  2f #ms  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=12155 min_data_in_bin=3  <- best
-   4  0.826346  2f #ms  n_rounds=800 learning_rate=0.108085 max_depth=7 lambda=4.027190 min_child_weight=13.668153 subsample=0.985031 colsample_bytree=0.960731 max_bin=4262 min_data_in_bin=6
-   5  0.835972  2f #ms  n_rounds=200 learning_rate=0.114095 max_depth=8 lambda=6.877927 min_child_weight=1.220972 subsample=0.711240 colsample_bytree=0.743069 max_bin=3451 min_data_in_bin=72
-   6  0.824600  2f #ms  n_rounds=500 learning_rate=0.132993 max_depth=4 lambda=0.182617 min_child_weight=0.153660 subsample=0.919900 colsample_bytree=0.878774 max_bin=324 min_data_in_bin=4
+   1  0.841004  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=834 min_data_in_bin=2  <- best
+   2  0.831560  2f #ms  n_rounds=200 learning_rate=0.173923 max_depth=5 lambda=0.192068 min_child_weight=0.796712 subsample=0.549356 colsample_bytree=0.587321 max_bin=94 min_data_in_bin=4
+   3  0.842036  2f #ms  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=847 min_data_in_bin=3  <- best
+   4  0.826346  2f #ms  n_rounds=800 learning_rate=0.108085 max_depth=7 lambda=4.027190 min_child_weight=13.668153 subsample=0.985031 colsample_bytree=0.960731 max_bin=435 min_data_in_bin=6
+   5  0.835972  2f #ms  n_rounds=200 learning_rate=0.114095 max_depth=8 lambda=6.877927 min_child_weight=1.220972 subsample=0.711240 colsample_bytree=0.743069 max_bin=380 min_data_in_bin=72
+   6  0.826476  2f #ms  n_rounds=500 learning_rate=0.132993 max_depth=4 lambda=0.182617 min_child_weight=0.153660 subsample=0.919900 colsample_bytree=0.878774 max_bin=84 min_data_in_bin=4
 
 best     0.842036   6 trials   (6 re-bins)
-  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=12155 min_data_in_bin=3
+  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=847 min_data_in_bin=3
 edge     n_rounds=800 is at the high end of its range; widen it and search again
 edge     lambda=47.160861 is at the high end of its range; widen it and search again
-edge     max_bin=12155 is at the high end of its range; widen it and search again
+edge     max_bin=847 is at the high end of its range; widen it and search again
 verified 0.842036   (winner re-ran identically)
 
 wrote    t.csv
 --- stderr
 --- files
-t.csv  1134 bytes  sha256 097bffe809c8b197f9fd643f764c5744eba177e27abb8c0c31eee2dbab625d7f
+t.csv  1126 bytes  sha256 8d813f55fbc4275f782a7e640e326df483912f0c6bef70e3a9725c4c42bb264f
