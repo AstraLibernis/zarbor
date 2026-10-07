@@ -187,10 +187,10 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
             "n_rounds=200,300,500,800",
             "learning_rate=0.02..0.2:log",
             "max_depth=3,4,5,6,7,8",
-            "lambda=0.1..50:log",
-            "min_child_weight=0.1..100:log",
+            "lambda=0.1..300:log",
+            "min_child_weight=0.01..300:log",
             "subsample=0.5..1.0",
-            "colsample_bytree=0.5..1.0",
+            "colsample_bytree=0.1..1.0",
             "max_bin=8..1024:int:log",
             "min_data_in_bin=1..300:int:log",
         },
@@ -203,7 +203,7 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
             "min_data_in_bin=1..300:int:log",
         },
         .linear => &.{
-            "lambda=0.01..1000:log",
+            "lambda=0.0001..1000:log",
             "alpha=0.0,0.1,1.0,10.0,100.0",
             "lin_epochs=100,300,600",
             "lin_standardize=true,false",
@@ -212,6 +212,17 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const ps = try gpa.alloc(Param, specs.len);
     for (ps, specs) |*p, s| p.* = try parseParam(gpa, s);
     return ps;
+}
+
+/// The default gbdt axis for categorical data: `optimal` closed the whole gap to LightGBM on
+/// House Prices, and a search that never tries it cannot find that. Added only when a feature is
+/// categorical, so numeric files pay nothing.
+pub const cat_split_axis = "cat_split=ordinal,optimal";
+
+/// Whether the binned data has a categorical feature.
+pub fn hasCategorical(kinds: []const data.ColumnKind) bool {
+    for (kinds) |k| if (k == .categorical) return true;
+    return false;
 }
 
 /// The default space minus every axis the command line pinned: a flag like `--n_rounds=100`

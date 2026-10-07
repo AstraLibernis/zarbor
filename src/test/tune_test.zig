@@ -412,3 +412,14 @@ test "a flag pins its axis out of the default space, and pinning a --param axis 
     try testing.expectEqualStrings("max_depth", tune.pinnedAndSearched(&searched, &.{ "n_rounds", "max_depth" }).?);
     try testing.expect(tune.pinnedAndSearched(&searched, &.{"n_rounds"}) == null);
 }
+
+test "cat_split joins the default space only for categorical data, and parses" {
+    try testing.expect(tune.hasCategorical(&.{ .numeric, .categorical }));
+    try testing.expect(!tune.hasCategorical(&.{ .numeric, .numeric }));
+    try testing.expect(!tune.hasCategorical(&.{}));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try parseParam(arena.allocator(), tune.cat_split_axis);
+    try testing.expect(config.hasField(p.name));
+    try testing.expectEqual(@as(usize, 2), p.choices.len);
+}

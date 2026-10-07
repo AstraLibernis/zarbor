@@ -10,59 +10,59 @@ folds    2  (seed 1)
 threads  4
 prep # ms  (read + bin, paid once for the whole search)
 
-  lambda               log_uniform  0.01 .. 1000
+  lambda               log_uniform  0.0001 .. 1000
   alpha                choice  [0.0, 0.1, 1.0, 10.0, 100.0]
   lin_epochs           choice  [100, 300, 600]
   lin_standardize      choice  [true, false]
 
 grid     60 combinations, capped at --trials=40
 
-   1  0.809258  2f #ms  lambda=0.010000 alpha=0.0 lin_epochs=100 lin_standardize=true  <- best
+   1  0.805660  2f #ms  lambda=0.000100 alpha=0.0 lin_epochs=100 lin_standardize=true  <- best
    2  0.826040  2f #ms  lambda=1000.000000 alpha=0.0 lin_epochs=100 lin_standardize=true  <- best
-   3  0.813691  2f #ms  lambda=0.010000 alpha=0.1 lin_epochs=100 lin_standardize=true
+   3  0.813550  2f #ms  lambda=0.000100 alpha=0.1 lin_epochs=100 lin_standardize=true
    4  0.826064  2f #ms  lambda=1000.000000 alpha=0.1 lin_epochs=100 lin_standardize=true  <- best
-   5  0.831009  2f #ms  lambda=0.010000 alpha=1.0 lin_epochs=100 lin_standardize=true  <- best
+   5  0.831011  2f #ms  lambda=0.000100 alpha=1.0 lin_epochs=100 lin_standardize=true  <- best
    6  0.825995  2f #ms  lambda=1000.000000 alpha=1.0 lin_epochs=100 lin_standardize=true
-   7  0.837178  2f #ms  lambda=0.010000 alpha=10.0 lin_epochs=100 lin_standardize=true  <- best
+   7  0.837178  2f #ms  lambda=0.000100 alpha=10.0 lin_epochs=100 lin_standardize=true  <- best
    8  0.827122  2f #ms  lambda=1000.000000 alpha=10.0 lin_epochs=100 lin_standardize=true
-   9  0.757072  2f #ms  lambda=0.010000 alpha=100.0 lin_epochs=100 lin_standardize=true
+   9  0.757072  2f #ms  lambda=0.000100 alpha=100.0 lin_epochs=100 lin_standardize=true
   10  0.782962  2f #ms  lambda=1000.000000 alpha=100.0 lin_epochs=100 lin_standardize=true
-  11  0.809258  2f #ms  lambda=0.010000 alpha=0.0 lin_epochs=300 lin_standardize=true
+  11  0.805660  2f #ms  lambda=0.000100 alpha=0.0 lin_epochs=300 lin_standardize=true
   12  0.826040  2f #ms  lambda=1000.000000 alpha=0.0 lin_epochs=300 lin_standardize=true
-  13  0.813691  2f #ms  lambda=0.010000 alpha=0.1 lin_epochs=300 lin_standardize=true
+  13  0.813550  2f #ms  lambda=0.000100 alpha=0.1 lin_epochs=300 lin_standardize=true
   14  0.826064  2f #ms  lambda=1000.000000 alpha=0.1 lin_epochs=300 lin_standardize=true
-  15  0.831009  2f #ms  lambda=0.010000 alpha=1.0 lin_epochs=300 lin_standardize=true
+  15  0.831011  2f #ms  lambda=0.000100 alpha=1.0 lin_epochs=300 lin_standardize=true
   16  0.825995  2f #ms  lambda=1000.000000 alpha=1.0 lin_epochs=300 lin_standardize=true
-  17  0.837178  2f #ms  lambda=0.010000 alpha=10.0 lin_epochs=300 lin_standardize=true
+  17  0.837178  2f #ms  lambda=0.000100 alpha=10.0 lin_epochs=300 lin_standardize=true
   18  0.827122  2f #ms  lambda=1000.000000 alpha=10.0 lin_epochs=300 lin_standardize=true
-  19  0.757072  2f #ms  lambda=0.010000 alpha=100.0 lin_epochs=300 lin_standardize=true
+  19  0.757072  2f #ms  lambda=0.000100 alpha=100.0 lin_epochs=300 lin_standardize=true
   20  0.782962  2f #ms  lambda=1000.000000 alpha=100.0 lin_epochs=300 lin_standardize=true
-  21  0.809258  2f #ms  lambda=0.010000 alpha=0.0 lin_epochs=600 lin_standardize=true
+  21  0.805660  2f #ms  lambda=0.000100 alpha=0.0 lin_epochs=600 lin_standardize=true
   22  0.826040  2f #ms  lambda=1000.000000 alpha=0.0 lin_epochs=600 lin_standardize=true
-  23  0.813691  2f #ms  lambda=0.010000 alpha=0.1 lin_epochs=600 lin_standardize=true
+  23  0.813550  2f #ms  lambda=0.000100 alpha=0.1 lin_epochs=600 lin_standardize=true
   24  0.826064  2f #ms  lambda=1000.000000 alpha=0.1 lin_epochs=600 lin_standardize=true
-  25  0.831009  2f #ms  lambda=0.010000 alpha=1.0 lin_epochs=600 lin_standardize=true
+  25  0.831011  2f #ms  lambda=0.000100 alpha=1.0 lin_epochs=600 lin_standardize=true
   26  0.825995  2f #ms  lambda=1000.000000 alpha=1.0 lin_epochs=600 lin_standardize=true
-  27  0.837178  2f #ms  lambda=0.010000 alpha=10.0 lin_epochs=600 lin_standardize=true
+  27  0.837178  2f #ms  lambda=0.000100 alpha=10.0 lin_epochs=600 lin_standardize=true
   28  0.827122  2f #ms  lambda=1000.000000 alpha=10.0 lin_epochs=600 lin_standardize=true
-  29  0.757072  2f #ms  lambda=0.010000 alpha=100.0 lin_epochs=600 lin_standardize=true
+  29  0.757072  2f #ms  lambda=0.000100 alpha=100.0 lin_epochs=600 lin_standardize=true
   30  0.782962  2f #ms  lambda=1000.000000 alpha=100.0 lin_epochs=600 lin_standardize=true
-  31  0.842472  2f #ms  lambda=0.010000 alpha=0.0 lin_epochs=100 lin_standardize=false  <- best
+  31  0.837834  2f #ms  lambda=0.000100 alpha=0.0 lin_epochs=100 lin_standardize=false  <- best
   32  0.731125  2f #ms  lambda=1000.000000 alpha=0.0 lin_epochs=100 lin_standardize=false
-  33  0.835572  2f #ms  lambda=0.010000 alpha=0.1 lin_epochs=100 lin_standardize=false
+  33  0.835313  2f #ms  lambda=0.000100 alpha=0.1 lin_epochs=100 lin_standardize=false
   34  0.731028  2f #ms  lambda=1000.000000 alpha=0.1 lin_epochs=100 lin_standardize=false
-  35  0.838210  2f #ms  lambda=0.010000 alpha=1.0 lin_epochs=100 lin_standardize=false
+  35  0.837711  2f #ms  lambda=0.000100 alpha=1.0 lin_epochs=100 lin_standardize=false
   36  0.730400  2f #ms  lambda=1000.000000 alpha=1.0 lin_epochs=100 lin_standardize=false
-  37  0.836701  2f #ms  lambda=0.010000 alpha=10.0 lin_epochs=100 lin_standardize=false
+  37  0.836681  2f #ms  lambda=0.000100 alpha=10.0 lin_epochs=100 lin_standardize=false
   38  0.723954  2f #ms  lambda=1000.000000 alpha=10.0 lin_epochs=100 lin_standardize=false
-  39  0.679352  2f #ms  lambda=0.010000 alpha=100.0 lin_epochs=100 lin_standardize=false
+  39  0.679350  2f #ms  lambda=0.000100 alpha=100.0 lin_epochs=100 lin_standardize=false
   40  0.679941  2f #ms  lambda=1000.000000 alpha=100.0 lin_epochs=100 lin_standardize=false
 
-best     0.842472   40 trials
-  lambda=0.010000 alpha=0.0 lin_epochs=100 lin_standardize=false
-edge     lambda=0.010000 is at the low end of its range; widen it and search again
+best     0.837834   40 trials
+  lambda=0.000100 alpha=0.0 lin_epochs=100 lin_standardize=false
+edge     lambda=0.000100 is at the low end of its range; widen it and search again
 edge     alpha=0.0 is at the low end of its range; widen it and search again
 edge     lin_epochs=100 is at the low end of its range; widen it and search again
-verified 0.842472   (winner re-ran identically)
+verified 0.837834   (winner re-ran identically)
 --- stderr
 --- files

@@ -177,7 +177,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const space = if (specs.items.len == 0)
+    var space = if (specs.items.len == 0)
         try tune.withoutPinned(arena, try defaultSpace(arena, cfg.algo), explicit.items)
     else blk: {
         const ps = try arena.alloc(Param, specs.items.len);
@@ -234,6 +234,16 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const full = &binner.ds;
     try enc.validate(full.labels, cfg.objective());
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
+    if (specs.items.len == 0 and cfg.algo == .gbdt and tune.hasCategorical(full.kinds)) {
+        const axis = try parseParam(arena, tune.cat_split_axis);
+        const added = try tune.withoutPinned(arena, &.{axis}, explicit.items);
+        if (added.len != 0) {
+            const grown = try arena.alloc(Param, space.len + 1);
+            @memcpy(grown[0..space.len], space);
+            grown[space.len] = added[0];
+            space = grown;
+        }
+    }
     const prep_ms = @divTrunc(
         std.Io.Timestamp.now(io, .awake).toNanoseconds() - t0,
         1_000_000,
