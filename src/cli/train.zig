@@ -169,16 +169,19 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         if (n_train == 0) return error.SplitColumnLeftNoTrainingRows;
     } else {
         for (perm, 0..) |*p, i| p.* = @intCast(i);
-        var prng: std.Random.DefaultPrng = .init(split_seed);
-        const r = prng.random();
-        var i: usize = frame.n_rows;
-        while (i > 1) {
-            i -= 1;
-            const j = r.uintLessThan(usize, i + 1);
-            std.mem.swap(u32, &perm[i], &perm[j]);
-        }
         n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(frame.n_rows)) * valid_frac));
         n_train = frame.n_rows - n_valid;
+        // With nothing to hold out, the shuffle and the sort back to file order cancel out.
+        if (n_valid != 0) {
+            var prng: std.Random.DefaultPrng = .init(split_seed);
+            const r = prng.random();
+            var i: usize = frame.n_rows;
+            while (i > 1) {
+                i -= 1;
+                const j = r.uintLessThan(usize, i + 1);
+                std.mem.swap(u32, &perm[i], &perm[j]);
+            }
+        }
         // The shuffle picks which rows validate; each side then goes back to file order. Row order
         // is the time order that ordered target statistics read (`--cat_split=ctr`, CatBoost's
         // `has_time`), so a shuffled training set would change what each row may see.
@@ -194,6 +197,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
     }
 
+    // `bin` times binning alone: the split above and any `auto` choice are not binning.
+    const t_bin0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
         if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
@@ -230,7 +235,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         // the wrong build -- which is exactly what happened once.
         @tagName(builtin.mode),
         @divTrunc(t_read - t0, 1_000_000),
-        @divTrunc(t_bin - t_read, 1_000_000),
+        @divTrunc(t_bin - t_bin0, 1_000_000),
     });
     // Print the encoding rather than leaving it implicit: which class is 1
     // decides the sign of every prediction, and it is the one thing a reader
