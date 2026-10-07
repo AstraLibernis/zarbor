@@ -226,6 +226,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     }
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
+    // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
+    if (cfg.bin.bin_policy == .auto) {
+        var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items, if (group_idx) |gi| frame.values[gi] else null, null, &scores);
+        try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
+    }
+
     // The binner owns the binned matrix from the moment it exists, and frees
     // the old one on every re-bin. It is constructed here, before anything
     // fallible, precisely so there is never a second owner: an

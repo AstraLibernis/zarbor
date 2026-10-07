@@ -193,6 +193,61 @@ pub const Opts = struct {
     early_stop_seed: u64 = 0,
 };
 
+/// One policy's score in `chooseBinPolicy`.
+pub const PolicyScore = struct { policy: data.BinPolicy, score: f64 };
+
+/// Resolve `bin_policy = auto`: bin `frame` under each concrete policy, score each by a 3-fold
+/// CV of `cfg` (grouped when `groups` is given, stratified for logistic, fold seed 1), and
+/// return the best, ties to the earlier policy. Fills `scores` in `data.concrete_policies`
+/// order. One measurement per dataset, made once before the run that uses it.
+pub fn chooseBinPolicy(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    pool: *pool_mod.Pool,
+    frame: *const data.Frame,
+    cfg: config.Config,
+    label: data.LabelSpec,
+    skip: []const []const u8,
+    groups: ?[]const f32,
+    /// Score on these rows only (`train` passes its training rows); null for every row.
+    rows: ?[]const u32,
+    scores: *[data.concrete_policies.len]PolicyScore,
+) !data.BinPolicy {
+    // `groups` is indexed by every row of `frame`; a row subset would need it subset too.
+    if (groups != null and rows != null) return error.GroupsWithRowSubset;
+    const folds: u32 = 3;
+    var best: usize = 0;
+    for (data.concrete_policies, scores, 0..) |p, *sc, i| {
+        var c = cfg;
+        c.bin.bin_policy = p;
+        var all = try data.quantise(gpa, pool, frame, c.bin, label, skip);
+        defer all.deinit();
+        var part: ?data.Dataset = if (rows) |r| try data.subset(gpa, &all, r) else null;
+        defer if (part) |*d| d.deinit();
+        const ds = if (part) |*d| d else &all;
+        const fold_of = if (groups) |g|
+            try assignGroupFolds(gpa, g, folds, 1)
+        else
+            try assignFolds(gpa, ds.labels, folds, 1, cfg.objective() == .logistic);
+        defer gpa.free(fold_of);
+        const oof = try gpa.alloc(f32, ds.n_rows);
+        defer gpa.free(oof);
+        const o = try crossValidate(gpa, io, pool, ds, c, fold_of, folds, .{ .oof = oof, .groups = groups });
+        sc.* = .{ .policy = p, .score = o.pooled };
+        if (better(cfg.objective(), o.pooled, scores[best].score)) best = i;
+    }
+    return scores[best].policy;
+}
+
+/// Prints `chooseBinPolicy`'s table.
+pub fn writePolicyScores(out: *std.Io.Writer, scores: []const PolicyScore, chosen: data.BinPolicy) !void {
+    try out.writeAll("bin policy auto, 3-fold cv:\n");
+    for (scores) |s| try out.print("  {s:<10} {d:.6}{s}\n", .{
+        @tagName(s.policy), s.score, if (s.policy == chosen) "   <- chosen" else "",
+    });
+    try out.flush();
+}
+
 /// Higher AUC, lower RMSE is better. All config ranking goes through here so
 /// the comparison cannot drift from the objective.
 pub fn better(obj: Objective, a: f64, b: f64) bool {

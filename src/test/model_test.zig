@@ -1457,6 +1457,26 @@ test "every model trains on a wide numeric column and survives save and load" {
     }
 }
 
+/// The frame `manyNumeric` bins: `n_cols` numeric columns of ~1000 distinct values each, plus
+/// `y`, a 0/1 label from columns 0 and 1 with noise. Caller deinits.
+fn manyFrame(gpa: std.mem.Allocator, n_rows: usize, n_cols: usize) !data.Frame {
+    const names = try gpa.alloc([]u8, n_cols + 1);
+    const kinds = try gpa.alloc(data.ColumnKind, n_cols + 1);
+    const values = try gpa.alloc([]f32, n_cols + 1);
+    const levels = try gpa.alloc([][]u8, n_cols + 1);
+    for (0..n_cols + 1) |c| {
+        names[c] = if (c == n_cols) try gpa.dupe(u8, "y") else try std.fmt.allocPrint(gpa, "x{d}", .{c});
+        kinds[c] = .numeric;
+        levels[c] = &.{};
+        values[c] = try gpa.alloc(f32, n_rows);
+        for (values[c], 0..) |*v, i| v.* = if (c == n_cols)
+            @floatFromInt(@intFromBool((i * 7) % 1000 + (i * 11 + 131) % 1000 / 2 + ((i *% 2654435761) >> 20) % 300 > 900))
+        else
+            @floatFromInt((i * (2 * c + 7) + c * 131) % 1000);
+    }
+    return .{ .gpa = gpa, .n_rows = n_rows, .names = names, .kinds = kinds, .values = values, .levels = levels };
+}
+
 /// `n_cols` numeric columns of ~1000 distinct values each, plus the label `y`.
 fn manyNumeric(gpa: std.mem.Allocator, pool: *Pool, n_rows: usize, n_cols: usize) !data.Dataset {
     const names = try gpa.alloc([]u8, n_cols + 1);
@@ -1601,4 +1621,57 @@ test "cv's early stopping never looks at the rows it scores" {
     const c = try cv.crossValidate(gpa, testing.io, pool, &ds, cfg, fold_of, 5, .{ .oof = oof, .use_folds = 1 });
     try testing.expect(!c.stopped_early);
     try testing.expectEqual(@as(f64, 30), c.steps);
+}
+
+test "bin_policy=auto picks the best-scoring policy, and on training rows scores only those" {
+    const gpa = testing.allocator;
+    const cv = @import("../cv.zig");
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var f = try manyFrame(gpa, 3_000, 4);
+    defer f.deinit();
+    var enc = try data.LabelEncoder.fromColumn(gpa, &f, 4, null);
+    defer enc.deinit();
+    const spec: data.LabelSpec = .{ .col = 4, .enc = &enc };
+    const cfg = config.Config.from(.{ .n_rounds = 20, .verbose_eval = 0, .max_bin = 32 });
+
+    // Unresolved, binning refuses it.
+    var auto_bin = cfg.bin;
+    auto_bin.bin_policy = .auto;
+    try testing.expectError(error.BinPolicyNotResolved, data.quantise(gpa, pool, &f, auto_bin, spec, &.{}));
+
+    var scores: [data.concrete_policies.len]cv.PolicyScore = undefined;
+    const chosen = try cv.chooseBinPolicy(gpa, testing.io, pool, &f, cfg, spec, &.{}, null, null, &scores);
+    var best = scores[0];
+    for (scores, data.concrete_policies) |sc, p| {
+        try testing.expectEqual(p, sc.policy);
+        if (cv.better(cfg.objective(), sc.score, best.score)) best = sc;
+    }
+    try testing.expectEqual(best.policy, chosen);
+    // The policies really bin differently here, or the choice is untested.
+    try testing.expect(scores[0].score != scores[3].score);
+
+    // On a row subset each score is exactly a 3-fold cv of those rows.
+    var rows: [1_500]u32 = undefined;
+    for (&rows, 0..) |*r, i| r.* = @intCast(i * 2);
+    var sub_scores: [data.concrete_policies.len]cv.PolicyScore = undefined;
+    _ = try cv.chooseBinPolicy(gpa, testing.io, pool, &f, cfg, spec, &.{}, null, &rows, &sub_scores);
+    var c = cfg;
+    c.bin.bin_policy = .logsum;
+    var all = try data.quantise(gpa, pool, &f, c.bin, spec, &.{});
+    defer all.deinit();
+    var part = try data.subset(gpa, &all, &rows);
+    defer part.deinit();
+    const fold_of = try cv.assignFolds(gpa, part.labels, 3, 1, true);
+    defer gpa.free(fold_of);
+    const oof = try gpa.alloc(f32, part.n_rows);
+    defer gpa.free(oof);
+    const o = try cv.crossValidate(gpa, testing.io, pool, &part, c, fold_of, 3, .{ .oof = oof });
+    try testing.expectEqual(o.pooled, sub_scores[2].score);
+    try testing.expect(sub_scores[2].score != scores[2].score);
+
+    const groups = try gpa.alloc(f32, f.n_rows);
+    defer gpa.free(groups);
+    @memset(groups, 0);
+    try testing.expectError(error.GroupsWithRowSubset, cv.chooseBinPolicy(gpa, testing.io, pool, &f, cfg, spec, &.{}, groups, &rows, &sub_scores));
 }

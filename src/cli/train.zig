@@ -141,6 +141,59 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     };
     defer enc.deinit();
 
+    // --- train / validation split ---
+    const perm = try gpa.alloc(u32, frame.n_rows);
+    defer gpa.free(perm);
+
+    var n_train: usize = undefined;
+    var n_valid: usize = undefined;
+
+    if (split_idx) |sc| {
+        // Train rows first, validation rows after, so the same `subset` calls
+        // below work unchanged. A value >= 0.5 means validation; below, or
+        // NaN, means training.
+        const col = frame.values[sc];
+        var head: usize = 0;
+        var tail: usize = frame.n_rows;
+        for (col, 0..) |v, i| {
+            if (v >= 0.5) {
+                tail -= 1;
+                perm[tail] = @intCast(i);
+            } else {
+                perm[head] = @intCast(i);
+                head += 1;
+            }
+        }
+        n_train = head;
+        n_valid = frame.n_rows - head;
+        if (n_train == 0) return error.SplitColumnLeftNoTrainingRows;
+    } else {
+        for (perm, 0..) |*p, i| p.* = @intCast(i);
+        var prng: std.Random.DefaultPrng = .init(split_seed);
+        const r = prng.random();
+        var i: usize = frame.n_rows;
+        while (i > 1) {
+            i -= 1;
+            const j = r.uintLessThan(usize, i + 1);
+            std.mem.swap(u32, &perm[i], &perm[j]);
+        }
+        n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(frame.n_rows)) * valid_frac));
+        n_train = frame.n_rows - n_valid;
+        // The shuffle picks which rows validate; each side then goes back to file order. Row order
+        // is the time order that ordered target statistics read (`--cat_split=ctr`, CatBoost's
+        // `has_time`), so a shuffled training set would change what each row may see.
+        std.sort.pdq(u32, perm[0..n_train], {}, std.sort.asc(u32));
+        std.sort.pdq(u32, perm[n_train..], {}, std.sort.asc(u32));
+    }
+
+    // `--bin_policy=auto`: score each policy by CV on the training rows only, so the hold-out
+    // score below stays a hold-out score.
+    if (cfg.bin.bin_policy == .auto) {
+        var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items, null, perm[0..n_train], &scores);
+        try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
+    }
+
     var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
         if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
@@ -184,51 +237,6 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // cannot check from the numbers alone.
     try printEncoding(out, &enc);
     try out.flush();
-
-    // --- train / validation split ---
-    const perm = try gpa.alloc(u32, full.n_rows);
-    defer gpa.free(perm);
-
-    var n_train: usize = undefined;
-    var n_valid: usize = undefined;
-
-    if (split_idx) |sc| {
-        // Train rows first, validation rows after, so the same `subset` calls
-        // below work unchanged. A value >= 0.5 means validation; below, or
-        // NaN, means training.
-        const col = frame.values[sc];
-        var head: usize = 0;
-        var tail: usize = full.n_rows;
-        for (col, 0..) |v, i| {
-            if (v >= 0.5) {
-                tail -= 1;
-                perm[tail] = @intCast(i);
-            } else {
-                perm[head] = @intCast(i);
-                head += 1;
-            }
-        }
-        n_train = head;
-        n_valid = full.n_rows - head;
-        if (n_train == 0) return error.SplitColumnLeftNoTrainingRows;
-    } else {
-        for (perm, 0..) |*p, i| p.* = @intCast(i);
-        var prng: std.Random.DefaultPrng = .init(split_seed);
-        const r = prng.random();
-        var i: usize = full.n_rows;
-        while (i > 1) {
-            i -= 1;
-            const j = r.uintLessThan(usize, i + 1);
-            std.mem.swap(u32, &perm[i], &perm[j]);
-        }
-        n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(full.n_rows)) * valid_frac));
-        n_train = full.n_rows - n_valid;
-        // The shuffle picks which rows validate; each side then goes back to file order. Row order
-        // is the time order that ordered target statistics read (`--cat_split=ctr`, CatBoost's
-        // `has_time`), so a shuffled training set would change what each row may see.
-        std.sort.pdq(u32, perm[0..n_train], {}, std.sort.asc(u32));
-        std.sort.pdq(u32, perm[n_train..], {}, std.sort.asc(u32));
-    }
 
     var train_ds = try data.subset(gpa, &full, perm[0..n_train]);
     defer train_ds.deinit();

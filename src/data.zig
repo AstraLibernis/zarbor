@@ -36,7 +36,13 @@ pub const BinPolicy = enum {
     /// CatBoost's default `GreedyLogSum`: repeatedly split the bin whose
     /// middle cut most raises the sum of log bin sizes, i.e. most evens them.
     logsum,
+    /// Not a binning: `train`, `cv` and `tune` resolve it before binning by a quick 3-fold CV
+    /// of each policy above (`cv.chooseBinPolicy`). `quantise` refuses it unresolved.
+    auto,
 };
+
+/// The policies `auto` chooses between, in tie-break order.
+pub const concrete_policies = [_]BinPolicy{ .quantile, .greedy, .logsum, .uniform };
 
 /// How `quantise` turns columns into bins. Shared by every model.
 pub const BinParams = struct {
@@ -239,6 +245,7 @@ pub fn quantise(
     label: ?LabelSpec,
     skip: []const []const u8,
 ) !Dataset {
+    if (cfg.bin_policy == .auto) return error.BinPolicyNotResolved;
     var feats: std.ArrayList(usize) = .empty;
     defer feats.deinit(gpa);
     outer: for (0..src.names.len) |c| {

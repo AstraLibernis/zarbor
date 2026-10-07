@@ -356,6 +356,7 @@ pub fn cutsFor(
         .quantile => try quantile(gpa, r, capped, &bounds),
         .greedy => try greedy(gpa, r, budget, min_data_in_bin, &bounds),
         .logsum => try logsum(gpa, r, capped, &bounds),
+        .auto => return error.BinPolicyNotResolved,
         .uniform => {
             // Equal widths are not cuts between runs, so no boundaries: edges
             // directly, and only the bin-count cap applies, not the per-bin floor.

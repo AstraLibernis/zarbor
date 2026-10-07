@@ -162,6 +162,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
     defer enc.deinit();
 
+    // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
+    if (cfg.bin.bin_policy == .auto) {
+        var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items, if (group_idx) |gi| frame.values[gi] else null, null, &scores);
+        try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
+    }
+
     // Bin once. Every fold is a `subset` of this matrix, which also means all
     // folds share one set of bin edges -- the edges are derived from feature
     // values only, never the label, so this leaks nothing.

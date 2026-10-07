@@ -146,6 +146,15 @@ missing bin) before training. The rules every policy shares:
 | `greedy` | LightGBM | `GreedyFindBin`, with zero in a bin of its own |
 | `logsum` | CatBoost | `GreedyLogSum`: merges the pair of runs whose log-weight score suffers least |
 | `uniform` | — | equal widths |
+| `auto` | — | measure, then choose: below |
+
+**`--bin_policy=auto`** scores each of the four policies by a 3-fold CV of your settings on
+your data, prints the table, and trains with the winner (ties go to the earlier row above).
+`train` scores only its training rows, so its hold-out score stays honest; `cv` and `tune`
+score every row, with groups under `--group-col`, so their reported score is slightly
+optimistic about the policy choice. It costs about four extra 3-fold CVs, once per run.
+Which policy wins depends on the data: California keeps `quantile` and Titanic picks
+`greedy`.
 
 **Choosing `max_bin`.** Binning acts as regularisation, and the right amount depends on the
 data's noise, not its size. In 5-fold CV on six datasets, the best `max_bin` ranged from 8
@@ -291,7 +300,8 @@ Defaults in brackets. `random_forest` and `linear` override some of them (sectio
 `--split-col`, `--split-seed` [1], `--max-bytes` [2 GiB], `--max_cat_levels` [255],
 `--n_threads` [0 = all cores].
 
-**Binning:** `--max_bin` [256], `--min_data_in_bin` [3], `--bin_policy` [quantile].
+**Binning:** `--max_bin` [256], `--min_data_in_bin` [3], `--bin_policy` [quantile; greedy,
+logsum, uniform, auto].
 
 **Boosting:** `--algo` [gbdt], `--objective` [logistic], `--n_rounds` [500],
 `--learning_rate` [0.1], `--base_score` [label mean], `--scale_pos_weight` [1],

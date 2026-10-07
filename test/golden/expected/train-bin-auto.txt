@@ -1,0 +1,29 @@
+$ zarbor titanic3.csv --label=survived --drop=name --drop=ticket --drop=boat --drop=body --drop=home.dest --bin_policy=auto --n_rounds=30 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+bin policy auto, 3-fold cv:
+  quantile   0.839121
+  greedy     0.838961
+  logsum     0.839007
+  uniform    0.841468   <- chosen
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.872605  best=0.872605 @0
+[  10] valid=0.883549  best=0.883549 @10
+[  20] valid=0.886926  best=0.886926 @20
+[  29] valid=0.883549  best=0.886926 @20
+
+rounds  30
+train # ms  ( # ms/tree)
+valid   auc=0.883549  logloss=0.411433
+--- stderr
+--- files
