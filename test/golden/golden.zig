@@ -70,7 +70,7 @@ const cases = [_]Case{
     .{ .name = "error-cat-levels", .args = &.{ data_file, "--label=survived", "--max_cat_levels=100" } },
     .{ .name = "error-cv-cat-levels", .args = &.{ "cv", data_file, "--label=survived", "--max_cat_levels=150", "--folds=3" } },
     .{ .name = "train-max-bin-64", .args = &.{ data_file, "--label=survived", "--max_bin=64", "--n_rounds=30" } },
-    .{ .name = "error-bad-max-bin", .args = &.{ data_file, "--label=survived", "--max_bin=300" } },
+    .{ .name = "error-bad-max-bin", .args = &.{ data_file, "--label=survived", "--max_bin=1" } },
     .{ .name = "error-bad-subsample", .args = &.{ data_file, "--label=survived", "--subsample=0" } },
     .{ .name = "error-unbounded-tree", .args = &.{ data_file, "--label=survived", "--max_depth=0" } },
     .{ .name = "error-unbounded-lossguide", .args = &.{ data_file, "--label=survived", "--grow_policy=lossguide", "--max_depth=0" } },
