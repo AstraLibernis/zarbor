@@ -240,16 +240,19 @@ fn summarise(init: std.process.Init, gpa: Allocator, w: *std.Io.Writer, args: []
 
 // ---------------------------------------------------------------- figure
 
-const fig_w: i64 = 1060;
+const fig_w: i64 = 1140;
 const left: i64 = 240;
 const gapw: i64 = 250;
-const right: i64 = 28;
+// Room for the widest gap label ("0.3551% / zarbor ahead") right of the gap panel.
+const right: i64 = 100;
 const track: i64 = fig_w - left - gapw - right - 40;
 const rowh: i64 = 58;
 const top: i64 = 104;
 const gx0: i64 = left + track + 40;
-const t_min = 130.0;
-const t_max = 8000.0;
+// From the fastest model (linear regression, ~110 ms) to the slowest (CatBoost defaults in
+// zarbor, ~60 s), so no dot leaves its panel.
+const t_min = 80.0;
+const t_max = 80000.0;
 const g_min = 1e-7;
 const g_max = 1e-2;
 
@@ -424,7 +427,7 @@ fn figure(init: std.process.Init, gpa: Allocator, args: []const []const u8) !voi
     try data.writeAll("]");
 
     const n_rows: i64 = @intCast(rows.len);
-    for ([_]f64{ 200, 500, 1000, 2000, 5000 }) |t| {
+    for ([_]f64{ 100, 300, 1000, 3000, 10000, 30000 }) |t| {
         try axis.print("<line class=\"grid\" x1=\"{f}\" y1=\"{d}\" x2=\"{f}\" y2=\"{d}\"/>", .{ dec(1, tx(t)), top - 16, dec(1, tx(t)), top + rowh * n_rows });
         try axis.print("<text class=\"tick\" x=\"{f}\" y=\"{d}\">{s}</text>", .{ dec(1, tx(t)), top - 24, try fmtMs(&b1, t) });
     }
@@ -522,7 +525,7 @@ fn writePage(w: *std.Io.Writer, x: Page) !void {
         \\  <p class="sub">Kaggle Playground S6E9 &mdash; 534,932 train / 133,733 validation rows, 13 features.
         \\     Time is <b>prepare + fit + predict</b>, so binning is charged to whichever side does it.</p>
         \\  <p class="meta">Ryzen 7 9800X3D, 16 threads &middot; median of 5 &middot;
-        \\     XGBoost 3.4.1, LightGBM 4.7.0, scikit-learn 1.9.1 &middot; CSV parsing measured separately and charged to neither</p>
+        \\     XGBoost 3.4.1, LightGBM 4.7.0, CatBoost 1.2.10, scikit-learn 1.9.1 &middot; CSV parsing measured separately and charged to neither</p>
         \\  <div class="legend">
         \\    <span><i style="background:var(--series-1)"></i>zarbor</span>
         \\    <span><i style="background:var(--series-2)"></i>standard implementation</span>
@@ -575,10 +578,10 @@ fn writePage(w: *std.Io.Writer, x: Page) !void {
         \\
         \\  </svg>
         \\  <p class="foot">Every row is the same dataset and machine, so the time column is comparable down the page.
-        \\     <b>GBDT&nbsp;+&nbsp;GOSS is the one row where the gap exceeds its own noise floor</b> (1.42&times; the
-        \\     reference's max_bin envelope) &mdash; zarbor scores higher, but that is an unexplained disagreement,
-        \\     not a result. Random forest and linear regression compare deliberately different constructions,
-        \\     so their gaps are design differences rather than defects. See docs/archive/arena.md.</p>
+        \\     <b>Accuracy agrees in every row but GBDT&nbsp;+&nbsp;GOSS</b>, where zarbor ranks rows by |g| as the
+        \\     GOSS paper does and LightGBM by |g&times;h|; with LightGBM's key the gap falls inside its noise floor.
+        \\     <b>CatBoost is the one reference zarbor does not beat on time.</b> Random forest and linear regression
+        \\     compare deliberately different constructions. Method and evidence: docs/correctness.md.</p>
         \\  <details open><summary>Table view &mdash; every number in the figure</summary>
         \\  <table><thead><tr><th>Model</th><th>Reference</th><th>zarbor</th><th>reference</th>
         \\  <th>Metric</th><th>Rel. gap</th><th>Closer to truth</th>

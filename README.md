@@ -41,10 +41,13 @@ work is faster than XGBoost, LightGBM and scikit-learn, and slower than CatBoost
 | gbdt depthwise | XGBoost | 0.000016 | 1.39x faster |
 | gbdt leafwise | LightGBM | 0.000008 | 1.16x faster |
 | random forest | scikit-learn | zarbor ahead by 0.0033 | 2.0x faster |
-| logistic regression | scikit-learn | 0.000013 | 3.2x faster |
+| logistic regression | scikit-learn | 0.000013 | 3.8-6.6x faster |
+| linear regression | scikit-learn | 0.0001% of RMSE | 1.7x faster |
 | symmetric trees | CatBoost | 0.000047 | 1.4x slower |
 | CatBoost's default settings | CatBoost | 0.000138 | 9.7x slower |
 | CSV parsing | pandas | | 4.7x faster |
+
+![zarbor against the standard implementation of each model: model time and accuracy gap](bench/arena/fig_light.png)
 
 Evidence, method and the known differences are in [docs/correctness.md](docs/correctness.md);
 `python bench/parity/parity.py` reruns the tree-for-tree checks in under a minute.

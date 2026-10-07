@@ -19,8 +19,9 @@ Machine: Ryzen 7 9800X3D, 16 threads, Fedora 44, ReleaseFast builds.
   two standard errors of its reference over 10 seeds, with one exception: CatBoost's
   Bernoulli bootstrap (below).
 - **Faster than XGBoost, LightGBM and scikit-learn on the benchmark dataset** (1.16x
-  LightGBM, 1.39x XGBoost, 2.0x scikit-learn's forest, 3.2x its logistic regression on model
-  work; the CSV parser is 4.7x pandas), **but slower than CatBoost**: 1.4x on plain symmetric
+  LightGBM, 1.39x XGBoost, 2.0x scikit-learn's forest, 3.8-6.6x its logistic regression and
+  1.7x its linear regression on model work; the CSV parser is 4.7x pandas), **but slower than
+  CatBoost**: 1.4x on plain symmetric
   trees, 1.75x on ordered boosting and 9.7x with CatBoost's default settings.
 - **It processes messy real data.** 16 datasets from 891 rows to 1M rows ran through every
   command and setting extreme without a crash. Bad input is refused with a reason.
@@ -145,7 +146,8 @@ side's metric is trusted blind.
 | gbdt + GOSS | LightGBM | 0.941313 | 0.940247 | 1.41, zarbor ahead | 591 | 678 | 1.15x faster |
 | random forest | sklearn, 1024-leaf cap | **0.938148** | 0.934829 | different algorithm | 3,184 | 6,479 | 2.03x faster |
 | random forest | sklearn, default | **0.938148** | 0.933515 | different algorithm | 3,184 | 9,497 | 2.98x faster |
-| logistic regression | sklearn | 0.937716 | 0.937729 | — | 268 | 861 | 3.21x faster |
+| logistic regression | sklearn | 0.937716 | 0.937729 | — | 171 | 858-1,135 | 3.8-6.6x faster |
+| linear regression (income, RMSE) | sklearn | 27922.124 | 27922.154 | — | 110 | 185 | 1.68x faster |
 
 | parsing both CSVs (40 MB) | zarbor 38 ms | pandas 178 ms | 4.68x |
 |---|---|---|---|
@@ -155,9 +157,9 @@ binning, target statistics on the six categoricals:
 
 | setting | zarbor AUC | CatBoost AUC | gap / envelope | zarbor model ms | CatBoost ms | speed |
 |---|---:|---:|---:|---:|---:|---:|
-| plain, file order, no sampling (F) | 0.940756 | 0.940803 | 0.09 | 3,082 | 2,201 | **1.40x slower** |
-| ordered boosting (H) | 0.940786 | 0.940730 | 0.09 | 10,509 | 6,005 | **1.75x slower** |
-| CatBoost's defaults: MVS, noise, combinations, permutations (G) | 0.940505 | 0.940643 | 0.25 | 59,524 | 6,107 | **9.7x slower** |
+| plain, file order, no sampling (F) | 0.940756 | 0.940803 | 0.09 | 3,013 | 2,200 | **1.37x slower** |
+| ordered boosting (H) | 0.940786 | 0.940730 | 0.09 | 10,519 | 5,998 | **1.75x slower** |
+| CatBoost's defaults: MVS, noise, combinations, permutations (G) | 0.940505 | 0.940643 | 0.25 | 59,328 | 6,110 | **9.7x slower** |
 
 Accuracy agrees in every row. Speed does not: CatBoost is the one reference zarbor does not
 beat, and with its defaults (three permutation folds, each keeping its own statistics and
@@ -166,6 +168,10 @@ goes has not been profiled yet.
 
 How to read it:
 
+- Rows A-D are from 23999ba; the linear rows and the CatBoost rows below were re-measured at
+  352d45f, after the linear solver's loops were rewritten (fit 258 -> 92 ms on the income data,
+  predictions byte-identical). scikit-learn's logistic fit varied between runs that day (631
+  and 900 ms against zarbor's steady ~125 ms), hence the range.
 - The GOSS gap is the ranking key, not an error. With `--goss_rank=gradient_hessian`
   (LightGBM's key) it fell inside the envelope, at 0.20 (measured 2026-09-23, not re-run).
 - The forest is a different algorithm from scikit-learn's: histogram-binned and leaf-capped,
