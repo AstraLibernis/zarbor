@@ -133,6 +133,23 @@ test "every policy respects the budget, cuts ascending, never inside a value" {
     }
 }
 
+test "min_data_in_bin caps the bin count and floors every bin, under every policy" {
+    var vals: [5000]f32 = undefined;
+    wideColumn(&vals);
+    for (all_policies) |policy| {
+        const e = try cutsOf(&vals, 255, policy, 50);
+        defer testing.allocator.free(e);
+        // 5000 rows / 50 can fill at most 100 bins.
+        try testing.expect(e.len >= 1);
+        try testing.expect(e.len <= 99);
+        // Uniform cuts are not run boundaries; only the count cap applies to it.
+        if (policy == .uniform) continue;
+        var counts = [_]usize{0} ** 256;
+        for (vals) |v| counts[binOf(e, v)] += 1;
+        for (counts[0..e.len]) |c| try testing.expect(c >= 50);
+    }
+}
+
 test "quantile keeps its budget past an atom" {
     // 60% of rows are 0, so most rank targets of the first 60% land on it. The
     // old rule dropped each repeat; XGBoost's moves it to the next value.

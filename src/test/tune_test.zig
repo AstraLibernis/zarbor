@@ -139,6 +139,31 @@ test "the default space covers every model" {
     }
 }
 
+test "a best value in the outer 5% of a range, or on an end choice, is at an edge" {
+    const gpa = testing.allocator;
+    const p = try parseParam(gpa, "max_bin=8..16384:int:log");
+    const b = p.bounds();
+    const span = b.hi - b.lo;
+    try testing.expectEqual(.low, p.atEdge(b.lo).?);
+    try testing.expectEqual(.low, p.atEdge(b.lo + span * 0.04).?);
+    try testing.expect(p.atEdge(b.lo + span * 0.06) == null);
+    try testing.expect(p.atEdge(b.lo + span * 0.5) == null);
+    try testing.expectEqual(.high, p.atEdge(b.hi - span * 0.04).?);
+
+    const c = try parseParam(gpa, "max_depth=3,4,5");
+    defer gpa.free(c.choices);
+    try testing.expectEqual(.low, c.atEdge(0).?);
+    try testing.expect(c.atEdge(1) == null);
+    try testing.expectEqual(.high, c.atEdge(2).?);
+    // Non-numeric or two-way choices have no ends to widen.
+    const t = try parseParam(gpa, "lin_standardize=true,false");
+    defer gpa.free(t.choices);
+    try testing.expect(t.atEdge(0) == null);
+    const two = try parseParam(gpa, "max_depth=3,4");
+    defer gpa.free(two.choices);
+    try testing.expect(two.atEdge(0) == null);
+}
+
 test "TPE keeps exploring when the good set collapses onto one point" {
     const gpa = testing.allocator;
     const p = try parseParam(gpa, "lambda=0.1..50:log");

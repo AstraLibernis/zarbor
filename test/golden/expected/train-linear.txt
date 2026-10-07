@@ -12,17 +12,17 @@ bin # ms
 encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
-[   0] f=0.50416894 |g|max=2.589e-1
-[  10] f=0.37674126 |g|max=2.526e-3
-[  20] f=0.37671129 |g|max=2.198e-5
-[  30] f=0.37671098 |g|max=2.292e-5
+[   0] f=0.50418148 |g|max=2.589e-1
+[  10] f=0.37674872 |g|max=2.527e-3
+[  20] f=0.37671870 |g|max=2.182e-5
+[  30] f=0.37671838 |g|max=1.259e-5
 
-rounds  39
+rounds  33
 train # ms  ( # ms/epoch)
 coefs   196 (25 zero)
-fit     converged, |g|max 1.08e-5 from 2.59e-1
+fit     converged, |g|max 1.24e-5 from 2.59e-1
 saved   l.zm
-valid   auc=0.830779  logloss=0.512038
+valid   auc=0.830844  logloss=0.511995
 --- stderr
 --- files
-l.zm  7956 bytes  sha256 42661e43529b3a1cd000e33b2697455f123c4cba36563dcaf0afd63d35941d20
+l.zm  7244 bytes  sha256 f96919e726063186fb365eb6820654f734d0f7029d15814dd431867422d91861

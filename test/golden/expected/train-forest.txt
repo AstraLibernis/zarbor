@@ -13,15 +13,15 @@ encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
 [   0] trees=1 valid=0.666558
-[  10] trees=11 valid=0.891797
-[  20] trees=21 valid=0.885010
-[  30] trees=31 valid=0.886796
-[  39] trees=40 valid=0.889816
+[  10] trees=11 valid=0.884913
+[  20] trees=21 valid=0.886179
+[  30] trees=31 valid=0.886601
+[  39] trees=40 valid=0.889589
 
 rounds  40
 train # ms  ( # ms/tree)
 saved   f.zm
-valid   auc=0.889816  logloss=0.399279
+valid   auc=0.889589  logloss=0.396358
 --- stderr
 --- files
-f.zm  262560 bytes  sha256 4a1fc9e36bec01828977a75f00ea254775bf05d7c11fce545e3e1851b06d5c43
+f.zm  261436 bytes  sha256 5d6470679e9addf47f9566410fdc8ceb659c4da16c577af8c5b8bdc054c460c4

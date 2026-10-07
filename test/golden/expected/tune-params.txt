@@ -14,19 +14,19 @@ prep # ms  (read + bin, paid once for the whole search)
   lambda               log_uniform  0.5 .. 8
   n_rounds             int_uniform  20 .. 60
 
-   1  0.841234  2f #ms  max_depth=2 lambda=6.683197 n_rounds=46  <- best
-   2  0.841867  2f #ms  max_depth=4 lambda=3.280522 n_rounds=24  <- best
-   3  0.845215  2f #ms  max_depth=2 lambda=2.063352 n_rounds=47  <- best
+   1  0.841073  2f #ms  max_depth=2 lambda=6.683197 n_rounds=46  <- best
+   2  0.842342  2f #ms  max_depth=4 lambda=3.280522 n_rounds=24  <- best
+   3  0.847557  2f #ms  max_depth=2 lambda=2.063352 n_rounds=47  <- best
    4  0.838669  2f #ms  max_depth=2 lambda=2.456002 n_rounds=26
 
-best     0.845215   4 trials
+best     0.847557   4 trials
   max_depth=2 lambda=2.063352 n_rounds=47
-verified 0.845215   (winner re-ran identically)
+verified 0.847557   (winner re-ran identically)
 
 confirming the top 2 on 2 unseen fold seed(s)
 
  rank   searched  seed2        seed3         mean new
-    1   0.845215     0.852556     0.843009   0.847782
-    2   0.841867     0.842272     0.836208   0.839240
+    1   0.847557     0.852675     0.843138   0.847907
+    2   0.842342     0.842464     0.837773   0.840118
 --- stderr
 --- files

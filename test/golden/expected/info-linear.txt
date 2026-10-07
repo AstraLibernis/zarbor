@@ -7,7 +7,7 @@ objective logistic
 features  8
 label     survived  (numeric)
 coefs     196 (25 zero)
-intercept -0.420144
+intercept -0.420356
 
 schema
   pclass                           numeric         4 bins
@@ -15,7 +15,7 @@ schema
   age                              numeric        76 bins
   sibsp                            numeric         8 bins
   parch                            numeric         8 bins
-  fare                             numeric       256 bins
+  fare                             numeric       167 bins
   cabin                            categorical   187 bins
   embarked                         categorical     4 bins
 --- stderr

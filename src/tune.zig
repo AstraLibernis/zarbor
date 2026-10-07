@@ -95,6 +95,26 @@ pub const Param = struct {
         };
     }
 
+    /// Whether `x` (encoded) sits in the outer 5% of a range, or is the first
+    /// or last of three or more numeric choices: a best value there may be
+    /// held back by the range, not found inside it.
+    pub fn atEdge(p: Param, x: f64) ?enum { low, high } {
+        if (p.kind == .choice) {
+            if (p.choices.len < 3) return null;
+            for (p.choices) |c| _ = std.fmt.parseFloat(f64, c) catch return null;
+            const i: usize = @intFromFloat(@round(std.math.clamp(x, 0, @as(f64, @floatFromInt(p.choices.len - 1)))));
+            if (i == 0) return .low;
+            if (i == p.choices.len - 1) return .high;
+            return null;
+        }
+        const b = p.bounds();
+        const margin = (b.hi - b.lo) * 0.05;
+        if (!(margin > 0)) return null;
+        if (x <= b.lo + margin) return .low;
+        if (x >= b.hi - margin) return .high;
+        return null;
+    }
+
     /// Lattice points for `grid`: a continuous axis is cut into `steps` points
     /// end to end in the encoded space (a log axis geometrically).
     pub fn gridPoints(p: Param, gpa: std.mem.Allocator, steps: usize) ![]f64 {
@@ -158,7 +178,8 @@ pub fn parseParam(gpa: std.mem.Allocator, text: []const u8) !Param {
 
 /// Default space per model, so a search needs no explicit params. Ranges
 /// include the shipped defaults; where a default sits at a range's edge
-/// (e.g. `max_bin` 256, `subsample` 1.0), the search can only move one way.
+/// (e.g. `subsample` 1.0), the search can only move one way. The binning
+/// ranges reach the extremes a CV sweep over six datasets found best (docs/binning.md).
 pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     const specs: []const []const u8 = switch (algo) {
         .gbdt => &.{
@@ -169,14 +190,16 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
             "min_child_weight=0.1..100:log",
             "subsample=0.5..1.0",
             "colsample_bytree=0.5..1.0",
-            "max_bin=64,128,256",
+            "max_bin=8..16384:int:log",
+            "min_data_in_bin=1..300:int:log",
         },
         .random_forest => &.{
             "n_rounds=100,200,300",
             "max_leaves=128,256,512,1024,2048",
             "min_child_samples=1,5,20",
             "colsample_bynode=0.2..1.0",
-            "max_bin=64,128,256",
+            "max_bin=8..16384:int:log",
+            "min_data_in_bin=1..300:int:log",
         },
         .linear => &.{
             "lambda=0.01..1000:log",

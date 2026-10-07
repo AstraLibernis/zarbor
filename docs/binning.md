@@ -17,6 +17,14 @@ beyond the budget. XGBoost, LightGBM, CatBoost and scikit-learn all do this. A v
 fewer than `min_data_in_bin` rows (default 3, LightGBM's) merges into the next;
 `--min_data_in_bin=1` keeps every value, as XGBoost does.
 
+**At least `min_data_in_bin` rows per bin, every policy.** A column with more values than the
+budget gets no more bins than its rows can fill (rows / `min_data_in_bin`), and a bin still
+short of the floor merges into the next. `greedy` does this as LightGBM does, per sign while
+it places cuts. `quantile` and `logsum` merge after placing them (`floorBounds`), so their
+bins can come out a little coarser than the floor. `uniform` gets only the cap on the bin
+count. With a high `max_bin`, this floor is what sets the bin count, so the bins grow with
+the data. XGBoost parity needs `--min_data_in_bin=1`.
+
 **Cuts between runs of equal values, never inside one.** Each policy chooses *boundaries*
 between consecutive distinct values; a cut inside a run would split equal values, which no
 tree could use.
@@ -130,8 +138,11 @@ What it shows:
 Guidance: keep 256 as the default. The single-split accuracy above is too noisy to choose
 `max_bin` by data size. In 5-fold CV the best value does not follow row count: Ames, with
 1.5k rows, is best at 8; housing, with 6.8k rows, at 1024; California, with 20k rows, at 1024
-and overfitting past 2048. Tune it with CV. Past about 1024 bins per continuous column, the
-time cost (table above) is high.
+and overfitting past 2048. Nor does one `min_data_in_bin` suit them all: with `max_bin`
+16384 and `greedy`, the best floor is 1 (adult, housing), 3 (bank), 10 (airline), 30 (Ames)
+or 100 (California). The bin count acts as regularisation, so it is a setting to tune.
+`tune`'s default space searches `max_bin` 8..16384 and `min_data_in_bin` 1..300 (both
+log), and `tune` prints an `edge` line when the winner lands in the outer 5% of any range.
 
 ## Not offered
 

@@ -13,11 +13,11 @@ encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
 [   0] trees=1 valid=0.839060
-[  10] trees=11 valid=0.880074
-[  19] trees=20 valid=0.882412
+[  10] trees=11 valid=0.878580
+[  19] trees=20 valid=0.876567
 
 rounds  20
 train # ms  ( # ms/tree)
-valid   auc=0.882412  logloss=0.403338
+valid   auc=0.876567  logloss=0.406453
 --- stderr
 --- files

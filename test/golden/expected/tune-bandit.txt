@@ -5,7 +5,7 @@ data     titanic3.csv
 rows     1309   feats 8   (label "survived")
 algo     gbdt
 search   bandit
-space    8 params
+space    9 params
 folds    2  (seed 1)
 threads  4
 prep # ms  (read + bin, paid once for the whole search)
@@ -17,18 +17,22 @@ prep # ms  (read + bin, paid once for the whole search)
   min_child_weight     log_uniform  0.1 .. 100
   subsample            uniform  0.5 .. 1
   colsample_bytree     uniform  0.5 .. 1
-  max_bin              choice  [64, 128, 256]
+  max_bin              int_log  8 .. 16384
+  min_data_in_bin      int_log  1 .. 300
 
 rung 0  6 configs at 2 folds
-   1  0.838037  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=128  <- best
-   2  0.845695  2f #ms  n_rounds=200 learning_rate=0.027192 max_depth=8 lambda=2.168301 min_child_weight=0.206572 subsample=0.650217 colsample_bytree=0.549356 max_bin=64  <- best
-   3  0.846247  2f #ms  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128  <- best
-   4  0.836376  2f #ms  n_rounds=200 learning_rate=0.182754 max_depth=4 lambda=12.482805 min_child_weight=15.783605 subsample=0.869288 colsample_bytree=0.797336 max_bin=128
-   5  0.824211  2f #ms  n_rounds=500 learning_rate=0.166914 max_depth=8 lambda=0.718305 min_child_weight=0.180809 subsample=0.878119 colsample_bytree=0.971599 max_bin=256
-   6  0.839941  2f #ms  n_rounds=300 learning_rate=0.052907 max_depth=5 lambda=14.045840 min_child_weight=17.762423 subsample=0.803032 colsample_bytree=0.911399 max_bin=64
+   1  0.841004  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=10.716009 min_child_weight=0.347766 subsample=0.900378 colsample_bytree=0.809057 max_bin=11871 min_data_in_bin=2  <- best
+   2  0.828608  2f #ms  n_rounds=200 learning_rate=0.173923 max_depth=5 lambda=0.192068 min_child_weight=0.796712 subsample=0.549356 colsample_bytree=0.587321 max_bin=387 min_data_in_bin=4
+   3  0.842036  2f #ms  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=12155 min_data_in_bin=3  <- best
+   4  0.826346  2f #ms  n_rounds=800 learning_rate=0.108085 max_depth=7 lambda=4.027190 min_child_weight=13.668153 subsample=0.985031 colsample_bytree=0.960731 max_bin=4262 min_data_in_bin=6
+   5  0.835972  2f #ms  n_rounds=200 learning_rate=0.114095 max_depth=8 lambda=6.877927 min_child_weight=1.220972 subsample=0.711240 colsample_bytree=0.743069 max_bin=3451 min_data_in_bin=72
+   6  0.824600  2f #ms  n_rounds=500 learning_rate=0.132993 max_depth=4 lambda=0.182617 min_child_weight=0.153660 subsample=0.919900 colsample_bytree=0.878774 max_bin=324 min_data_in_bin=4
 
-best     0.846247   6 trials   (5 re-bins)
-  n_rounds=500 learning_rate=0.035821 max_depth=8 lambda=18.462150 min_child_weight=0.866611 subsample=0.995297 colsample_bytree=0.570849 max_bin=128
-verified 0.846247   (winner re-ran identically)
+best     0.842036   6 trials   (6 re-bins)
+  n_rounds=800 learning_rate=0.138266 max_depth=4 lambda=47.160861 min_child_weight=0.266130 subsample=0.694709 colsample_bytree=0.599428 max_bin=12155 min_data_in_bin=3
+edge     n_rounds=800 is at the high end of its range; widen it and search again
+edge     lambda=47.160861 is at the high end of its range; widen it and search again
+edge     max_bin=12155 is at the high end of its range; widen it and search again
+verified 0.842036   (winner re-ran identically)
 --- stderr
 --- files

@@ -6,7 +6,7 @@ kind      gbdt
 objective logistic
 features  8
 label     survived  (numeric)
-trees     500 (15542 nodes, 8021 leaves)
+trees     500 (14812 nodes, 7656 leaves)
 base      -0.436605
 
 schema
@@ -15,7 +15,7 @@ schema
   age                              numeric        76 bins
   sibsp                            numeric         8 bins
   parch                            numeric         8 bins
-  fare                             numeric       256 bins
+  fare                             numeric       167 bins
   cabin                            categorical   187 bins
   embarked                         categorical     4 bins
 --- stderr

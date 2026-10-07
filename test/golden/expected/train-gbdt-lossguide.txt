@@ -12,25 +12,25 @@ bin # ms
 encode  numeric target, used as-is
 train   1047 rows / valid 262 rows
 
-[   0] valid=0.838930  best=0.838930 @0
-[  10] valid=0.868254  best=0.868254 @10
-[  20] valid=0.891115  best=0.891115 @20
-[  30] valid=0.890758  best=0.891115 @20
-[  40] valid=0.899753  best=0.899753 @40
-[  50] valid=0.902384  best=0.902384 @50
-[  60] valid=0.904300  best=0.904300 @60
-[  70] valid=0.903780  best=0.904300 @60
-[  80] valid=0.899039  best=0.904300 @60
-[  90] valid=0.901572  best=0.904300 @60
-[ 100] valid=0.902936  best=0.904300 @60
-[ 110] valid=0.902741  best=0.904300 @60
-[ 120] valid=0.901052  best=0.904300 @60
-[ 130] valid=0.901507  best=0.904300 @60
-[ 140] valid=0.903325  best=0.904300 @60
-[ 149] valid=0.902286  best=0.904300 @60
+[   0] valid=0.839579  best=0.839579 @0
+[  10] valid=0.868221  best=0.868221 @10
+[  20] valid=0.892154  best=0.892154 @20
+[  30] valid=0.892609  best=0.892609 @30
+[  40] valid=0.895499  best=0.895499 @40
+[  50] valid=0.898519  best=0.898519 @50
+[  60] valid=0.899428  best=0.899428 @60
+[  70] valid=0.897350  best=0.899428 @60
+[  80] valid=0.896246  best=0.899428 @60
+[  90] valid=0.898065  best=0.899428 @60
+[ 100] valid=0.898714  best=0.899428 @60
+[ 110] valid=0.897090  best=0.899428 @60
+[ 120] valid=0.898844  best=0.899428 @60
+[ 130] valid=0.899493  best=0.899493 @130
+[ 140] valid=0.897480  best=0.899493 @130
+[ 149] valid=0.895791  best=0.899493 @130
 
 rounds  150
 train # ms  ( # ms/tree)
-valid   auc=0.902286  logloss=0.383671
+valid   auc=0.895791  logloss=0.394826
 --- stderr
 --- files

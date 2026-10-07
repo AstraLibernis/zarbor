@@ -14,16 +14,16 @@ train   1047 rows / valid 262 rows
 
 [   0] valid=0.876794  best=0.876794 @0
 [  10] valid=0.888745  best=0.888745 @10
-[  20] valid=0.886764  best=0.888745 @10
-[  30] valid=0.892674  best=0.892674 @30
-[  40] valid=0.898714  best=0.898714 @40
-[  50] valid=0.899039  best=0.899039 @50
-[  60] valid=0.896960  best=0.899039 @50
-[  70] valid=0.894882  best=0.899039 @50
-[  79] valid=0.893713  best=0.899039 @50
+[  20] valid=0.888452  best=0.888745 @10
+[  30] valid=0.892219  best=0.892219 @30
+[  40] valid=0.896506  best=0.896506 @40
+[  50] valid=0.894363  best=0.896506 @40
+[  60] valid=0.894687  best=0.896506 @40
+[  70] valid=0.893583  best=0.896506 @40
+[  79] valid=0.894298  best=0.896506 @40
 
 rounds  80
 train # ms  ( # ms/tree)
-valid   auc=0.893713  logloss=0.401365
+valid   auc=0.894298  logloss=0.407530
 --- stderr
 --- files

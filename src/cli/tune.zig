@@ -454,6 +454,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     try out.print("\nbest     {d:.6}   {d} trials", .{ win.score, results.items.len });
     if (binner.rebins != 0) try out.print("   ({d} re-bins)", .{binner.rebins});
     try out.print("\n  {s}\n", .{win.text});
+    for (space, win.x) |p, wx| if (p.atEdge(wx)) |side| {
+        var buf: [64]u8 = undefined;
+        try out.print("edge     {s}={s} is at the {s} end of its range; widen it and search again\n", .{
+            p.name, try p.render(wx, &buf), @tagName(side),
+        });
+    };
 
     // Re-run the winner from scratch on the folds it was searched on. A
     // reported configuration that does not reproduce means the search applied

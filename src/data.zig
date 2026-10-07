@@ -41,7 +41,9 @@ pub const BinPolicy = enum {
 /// How `quantise` turns columns into bins. Shared by every model.
 pub const BinParams = struct {
     bin_policy: BinPolicy = .quantile,
-    /// Rows a bin must hold under `greedy` before a cut. LightGBM's `min_data_in_bin`.
+    /// Rows a bin must hold before a cut, every policy (LightGBM's
+    /// `min_data_in_bin`). Also caps the bin count at rows / this, so with a
+    /// high `max_bin` the bins a column gets grow with the data.
     min_data_in_bin: u32 = 3,
     /// Bins per numeric feature, the missing bin included; at most 65,535 (`BinIdx`). A column
     /// that ends up with more than 256 bins is stored at two bytes per row in `wide_cols`, as wide

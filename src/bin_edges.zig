@@ -346,16 +346,23 @@ pub fn cutsFor(
         try perValue(gpa, r, 0, nd, min_data_in_bin, &bounds);
         return edgesFrom(gpa, r, bounds.items, cuts);
     }
+    // `greedy` applies `min_data_in_bin` itself, per sign, as LightGBM does.
+    // The other policies get the same floor here: no more bins than the rows
+    // can fill, then any bin still short merges forward (`floorBounds`).
+    const rows_cap = if (min_data_in_bin > 0) r.ends[nd - 1] / min_data_in_bin else budget;
+    const capped = if (policy == .greedy) budget else @max(1, @min(budget, rows_cap));
+    if (capped < 2) return;
     switch (policy) {
-        .quantile => try quantile(gpa, r, budget, &bounds),
+        .quantile => try quantile(gpa, r, capped, &bounds),
         .greedy => try greedy(gpa, r, budget, min_data_in_bin, &bounds),
-        .logsum => try logsum(gpa, r, budget, &bounds),
+        .logsum => try logsum(gpa, r, capped, &bounds),
         .uniform => {
-            // Equal widths are not cuts between runs, so no boundaries: edges directly.
+            // Equal widths are not cuts between runs, so no boundaries: edges
+            // directly, and only the bin-count cap applies, not the per-bin floor.
             const lo = r.values[0];
             const hi = r.values[nd - 1];
-            const step = (hi - lo) / @as(f32, @floatFromInt(budget));
-            for (1..budget) |k| {
+            const step = (hi - lo) / @as(f32, @floatFromInt(capped));
+            for (1..capped) |k| {
                 const c = lo + step * @as(f32, @floatFromInt(k));
                 if (cuts.items.len != 0 and cuts.items[cuts.items.len - 1] >= c) continue;
                 try cuts.append(gpa, c);
@@ -363,7 +370,25 @@ pub fn cutsFor(
             return;
         },
     }
+    if (policy != .greedy) floorBounds(r, &bounds, min_data_in_bin);
     return edgesFrom(gpa, r, bounds.items, cuts);
+}
+
+/// Drops boundaries until every bin but the last holds at least
+/// `min_data_in_bin` rows, a short bin merging forward as in `perValue`.
+/// `bounds` are run indices that end a bin, ascending.
+fn floorBounds(r: Runs, bounds: *std.ArrayList(u32), min_data_in_bin: u32) void {
+    if (min_data_in_bin <= 1) return;
+    var kept: usize = 0;
+    var prev_end: usize = 0; // rows before the current bin
+    for (bounds.items) |b| {
+        const end = r.ends[b];
+        if (end - prev_end < min_data_in_bin) continue;
+        bounds.items[kept] = b;
+        kept += 1;
+        prev_end = end;
+    }
+    bounds.shrinkRetainingCapacity(kept);
 }
 
 pub fn lowerBound(edges: []const f32, v: f32) usize {

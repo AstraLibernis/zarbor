@@ -585,9 +585,10 @@ test "every policy gives a dominant value one bin and spends the budget on the r
             }
         }
         try testing.expect(!seen[zero_bin.?]);
-        // About 400 tail rows and 254 bins left for them. Greedy also keeps
-        // `min_data_in_bin` (3) rows per bin, so it stops near 400 / 3.
-        try testing.expect(tail > 120);
+        // About 400 tail rows and 254 bins left for them, but every policy
+        // keeps `min_data_in_bin` (3) rows per bin: greedy plans for it and
+        // stops near 400 / 3; quantile's 1-2 row bins merge forward to 3-5.
+        try testing.expect(tail > 80);
     }
 }
 
