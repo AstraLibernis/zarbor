@@ -28,6 +28,7 @@ const Case = struct {
 // Order matters: predict/blend/info read models saved by earlier cases.
 const cases = [_]Case{
     .{ .name = "train-gbdt", .args = &.{ data_file, "--label=survived", "--save=g.zm" }, .files = &.{"g.zm"} },
+    .{ .name = "train-gbdt-symmetric", .args = &.{ data_file, "--label=survived", "--grow_policy=symmetric", "--lambda=3", "--n_rounds=60", "--leaf_estimation_iterations=3" } },
     .{ .name = "train-gbdt-lossguide", .args = &.{ data_file, "--label=survived", "--grow_policy=lossguide", "--max_leaves=16", "--sampling=goss", "--colsample_bytree=0.7", "--cat_split=optimal", "--n_rounds=150" } },
     .{ .name = "train-gbdt-linear-leaves", .args = &.{ data_file, "--label=survived", "--linear_leaves=true", "--n_rounds=80", "--subsample=0.8", "--seed=7" } },
     .{ .name = "train-gbdt-regression", .args = &.{ data_file, "--label=pclass", "--objective=squared_error", "--n_rounds=150", "--early_stopping_rounds=20" } },

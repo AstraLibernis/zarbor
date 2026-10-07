@@ -17,6 +17,7 @@ test {
     _ = @import("test/pool_test.zig");
     _ = @import("test/radix_test.zig");
     _ = @import("test/split_test.zig");
+    _ = @import("test/symmetric_test.zig");
     _ = @import("test/sweep_test.zig");
     _ = @import("test/tune_test.zig");
 
@@ -37,6 +38,7 @@ test {
     std.testing.refAllDecls(@import("fitted.zig"));
     std.testing.refAllDecls(@import("hist.zig"));
     std.testing.refAllDecls(@import("split.zig"));
+    std.testing.refAllDecls(@import("symmetric.zig"));
     std.testing.refAllDecls(@import("linear.zig"));
     std.testing.refAllDecls(@import("lin_solve.zig"));
     std.testing.refAllDecls(@import("metric.zig"));

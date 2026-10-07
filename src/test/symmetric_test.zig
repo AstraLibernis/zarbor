@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
+//! Symmetric (CatBoost-style) trees. Row-for-row parity with catboost 1.2.10 is measured outside
+//! the unit tests (docs/catboost.md); these pin the pieces a wrong change would break silently:
+//! the shared split per depth, the leaf-index mapping, Newton leaves, the score functions and the
+//! redundant-split stop.
+
+const std = @import("std");
+const data = @import("../data.zig");
+const config = @import("../config.zig");
+const booster = @import("../booster.zig");
+const tree = @import("../tree.zig");
+const Pool = @import("../pool.zig").Pool;
+const fromBins = @import("split_test.zig").fromBins;
+
+const testing = std.testing;
+
+const n_rows = 1500;
+
+/// Three 6-bin features (bins 1..5, no missing) with signal in the first two.
+fn fixture(gpa: std.mem.Allocator, seed: u64) !data.Dataset {
+    var cols: [3][n_rows]u8 = undefined;
+    var y: [n_rows]f32 = undefined;
+    var prng: std.Random.DefaultPrng = .init(seed);
+    const r = prng.random();
+    for (0..n_rows) |i| {
+        for (&cols) |*c| c[i] = r.intRangeAtMost(u8, 1, 5);
+        const s: f32 = @as(f32, @floatFromInt(cols[0][i])) * 0.6 - @as(f32, @floatFromInt(cols[1][i])) * 0.4 + r.floatNorm(f32);
+        y[i] = if (s > 0.5) 1 else 0;
+    }
+    return fromBins(gpa, &.{ &cols[0], &cols[1], &cols[2] }, &.{ 6, 6, 6 }, &y);
+}
+
+fn train(gpa: std.mem.Allocator, pool: *Pool, ds: *const data.Dataset, opts: anytype) !booster.Model {
+    var cfg = config.Config.from(.{ .grow_policy = .symmetric, .verbose_eval = 0, .base_score = 0 }).gbdt;
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+        if (@hasField(booster.Params, f.name)) @field(cfg, f.name) = @field(opts, f.name) else @field(cfg.tree, f.name) = @field(opts, f.name);
+    }
+    const res = try booster.train(gpa, pool, ds, null, cfg, null);
+    return res.model;
+}
+
+fn binOf(ds: *const data.Dataset, f: usize, r: usize) data.BinIdx {
+    return ds.columnNarrow(f)[r];
+}
+
+/// The split each depth uses, read from the first node of that depth, after checking every node
+/// at the depth agrees.
+fn levelSplits(t: tree.Tree, out: [][2]u32) !usize {
+    var depth: usize = 0;
+    while ((@as(usize, 1) << @intCast(depth)) - 1 < t.nodes.len and !t.nodes[(@as(usize, 1) << @intCast(depth)) - 1].is_leaf) : (depth += 1) {
+        const first = (@as(usize, 1) << @intCast(depth)) - 1;
+        const n0 = t.nodes[first];
+        for (t.nodes[first .. 2 * first + 1]) |nd| {
+            try testing.expect(!nd.is_leaf);
+            try testing.expectEqual(n0.feature, nd.feature);
+            try testing.expectEqual(n0.threshold, nd.threshold);
+        }
+        out[depth] = .{ n0.feature, n0.threshold };
+    }
+    return depth;
+}
+
+test "every depth shares one split, and leaves are Newton steps over the rows they select" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 1);
+    defer ds.deinit();
+
+    const lr: f64 = 0.5;
+    const lambda: f64 = 2;
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 3, .learning_rate = @as(f32, @floatCast(lr)), .lambda = @as(f32, @floatCast(lambda)) });
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.trees.items.len);
+
+    var sp: [16][2]u32 = undefined;
+    const depth = try levelSplits(m.trees.items[0], &sp);
+    try testing.expectEqual(@as(usize, 3), depth);
+
+    // Leaf index = sum over depths of [bin > threshold] << depth; base score 0 means p = 0.5,
+    // g = 0.5 - y and h = 0.25 for every row.
+    var g = [_]f64{0} ** 8;
+    var h = [_]f64{0} ** 8;
+    var idx: [n_rows]usize = undefined;
+    for (0..n_rows) |r| {
+        var i: usize = 0;
+        for (0..depth) |d| if (binOf(&ds, sp[d][0], r) > sp[d][1]) {
+            i |= @as(usize, 1) << @intCast(d);
+        };
+        idx[r] = i;
+        g[i] += 0.5 - ds.labels[r];
+        h[i] += 0.25;
+    }
+    var raw: [n_rows]f32 = undefined;
+    m.predictRaw(pool, &ds, &raw);
+    for (raw, idx) |got, i| {
+        const want = -g[i] / (h[i] + lambda) * lr;
+        try testing.expectApproxEqAbs(want, got, 1e-5);
+    }
+}
+
+/// Brute force over the root's candidates: index of the best (feature, threshold) by `score`.
+fn bruteRoot(ds: *const data.Dataset, lambda: f64, score: tree.ScoreFunction) [2]u32 {
+    var best: [2]u32 = .{ 0, 0 };
+    var best_s = -std.math.inf(f64);
+    for (0..ds.n_features) |f| {
+        const nb = ds.n_bins[f];
+        var k: u32 = 1; // no missing rows, so threshold 0 is not offered
+        while (k + 1 < nb) : (k += 1) {
+            var gs = [2]f64{ 0, 0 };
+            var ns = [2]f64{ 0, 0 };
+            for (0..ds.n_rows) |r| {
+                const side: usize = @intFromBool(binOf(ds, f, r) > k);
+                gs[side] += 0.5 - ds.labels[r];
+                ns[side] += 1;
+            }
+            var num: f64 = 0;
+            var den: f64 = 0;
+            for (gs, ns) |gg, nn| switch (score) {
+                .gain => num += gg * gg / (0.25 * nn + lambda),
+                else => {
+                    const v = if (nn > 0) gg / (nn + lambda) else 0;
+                    num += v * gg;
+                    den += v * v * nn;
+                },
+            };
+            const s = if (score == .cosine) num / @sqrt(den + 1e-100) else num;
+            if (s > best_s) {
+                best_s = s;
+                best = .{ @intCast(f), k };
+            }
+        }
+    }
+    return best;
+}
+
+test "the root split is the argmax of the chosen score function" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    // A large lambda pulls the three scores apart.
+    const lambda: f32 = 400;
+    for (0..4) |seed| {
+        var ds = try fixture(gpa, 10 + seed);
+        defer ds.deinit();
+        for ([_]tree.ScoreFunction{ .cosine, .l2, .gain }) |sf| {
+            var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 1, .lambda = lambda, .score_function = sf });
+            defer m.deinit();
+            const root = m.trees.items[0].nodes[0];
+            const want = bruteRoot(&ds, lambda, sf);
+            try testing.expectEqual(want[0], root.feature);
+            try testing.expectEqual(want[1], @as(u32, root.threshold));
+        }
+    }
+}
+
+test "a split that separates nothing stops the tree" {
+    // One two-valued feature: after splitting on it, any further split leaves one side of every
+    // leaf pair empty, so CatBoost's redundancy rule removes it and the tree ends at depth 1.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var col: [400]u8 = undefined;
+    var y: [400]f32 = undefined;
+    for (&col, &y, 0..) |*c, *l, i| {
+        c.* = if (i % 3 == 0) 1 else 2;
+        l.* = if (i % 3 == 0 and i % 2 == 0) 1 else 0;
+    }
+    var ds = try fromBins(gpa, &.{&col}, &.{3}, &y);
+    defer ds.deinit();
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 4 });
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 3), m.trees.items[0].nodes.len);
+}
+
+test "more Newton steps solve each leaf; squared error needs one" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 3);
+    defer ds.deinit();
+
+    // Logistic, one tree, full step. Each step is -G / (H + lambda) at the moved score, with no
+    // lambda * v term in G (CatBoost's walk, matched to 6e-7 in docs/catboost.md), so lambda only
+    // damps the steps and they converge to the unregularised leaf optimum, sum (sigmoid(v) - y) = 0
+    // over the leaf's rows. One step does not get there.
+    var resid: [2]f64 = undefined;
+    for ([_]u32{ 1, 30 }, 0..) |iters, which| {
+        var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 2, .learning_rate = @as(f32, 1.0), .lambda = @as(f32, 1.0), .leaf_estimation_iterations = iters });
+        defer m.deinit();
+        var raw: [n_rows]f32 = undefined;
+        m.predictRaw(pool, &ds, &raw);
+        // Group rows by their (shared) leaf value.
+        var worst: f64 = 0;
+        for (raw) |v0| {
+            var s: f64 = 0;
+            for (raw, ds.labels) |v, yy| if (v == v0) {
+                s += 1 / (1 + @exp(-@as(f64, v))) - yy;
+            };
+            worst = @max(worst, @abs(s));
+        }
+        resid[which] = worst;
+    }
+    try testing.expect(resid[0] > 1.0);
+    try testing.expect(resid[1] < 1e-2);
+
+    // Squared error without lambda: the Newton step is exact, so further steps change nothing.
+    // (With lambda > 0 they move on toward the unregularised mean, as above.)
+    var raws: [2][n_rows]f32 = undefined;
+    for ([_]u32{ 1, 5 }, 0..) |iters, which| {
+        var cfg = config.Config.from(.{ .grow_policy = .symmetric, .verbose_eval = 0, .objective = .squared_error, .n_rounds = 3, .max_depth = 2, .lambda = 0, .leaf_estimation_iterations = iters }).gbdt;
+        cfg.base_score = 0;
+        var res = try booster.train(gpa, pool, &ds, null, cfg, null);
+        defer res.model.deinit();
+        res.model.predictRaw(pool, &ds, &raws[which]);
+    }
+    for (raws[0], raws[1]) |a, b| try testing.expectApproxEqAbs(a, b, 1e-5);
+}
+
+test "symmetric refuses options it does not implement" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 4);
+    defer ds.deinit();
+    const bad = [_]config.Config{
+        config.Config.from(.{ .grow_policy = .symmetric, .subsample = 0.5 }),
+        config.Config.from(.{ .grow_policy = .symmetric, .colsample_bytree = 0.5 }),
+        config.Config.from(.{ .grow_policy = .symmetric, .cat_split = .optimal }),
+        config.Config.from(.{ .grow_policy = .symmetric, .sampling = .goss }),
+        config.Config.from(.{ .grow_policy = .symmetric, .max_depth = 0 }),
+    };
+    for (bad) |c| {
+        if (booster.train(gpa, pool, &ds, null, c.gbdt, null)) |res| {
+            var m = res.model;
+            m.deinit();
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+}
+
+test "an exact tie goes to the lower feature index" {
+    // Two identical columns score identically at every threshold; CatBoost keeps the first
+    // maximum in feature order, and so must the tree.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var col: [600]u8 = undefined;
+    var y: [600]f32 = undefined;
+    for (&col, &y, 0..) |*c, *l, i| {
+        c.* = @intCast(1 + i % 4);
+        l.* = if (i % 4 >= 2 and i % 7 != 0) 1 else 0;
+    }
+    var ds = try fromBins(gpa, &.{ &col, &col }, &.{ 5, 5 }, &y);
+    defer ds.deinit();
+    var m = try train(gpa, pool, &ds, .{ .n_rounds = 1, .max_depth = 1 });
+    defer m.deinit();
+    try testing.expectEqual(@as(u32, 0), m.trees.items[0].nodes[0].feature);
+}

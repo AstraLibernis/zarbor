@@ -19,7 +19,12 @@ pub const GrowPolicy = enum {
     depthwise,
     /// Split the highest-gain leaf first (LightGBM-style). Stronger per tree; cap via `max_leaves`.
     lossguide,
+    /// One split per depth shared by every node at that depth (CatBoost's oblivious trees):
+    /// `max_depth` questions, 2^depth leaves. Grown by symmetric.zig.
+    symmetric,
 };
+
+pub const ScoreFunction = @import("symmetric.zig").ScoreFunction;
 
 /// How a categorical feature's levels are partitioned at a split.
 pub const CatSplit = enum {
@@ -79,6 +84,12 @@ pub const Params = struct {
     lin_leaf_lambda: f32 = 1.0,
     /// Cap on path features in one leaf's fit.
     lin_leaf_max_terms: u32 = 8,
+    /// How `symmetric` scores a level's split; `auto` is CatBoost's cosine there. Depthwise and
+    /// lossguide always use gain.
+    score_function: ScoreFunction = .auto,
+    /// Newton steps per leaf under `symmetric` (CatBoost's `leaf_estimation_iterations`, without
+    /// its backtracking): >1 re-takes the derivatives at the moved score.
+    leaf_estimation_iterations: u32 = 1,
     seed: u64 = 0,
 
     /// Upper bound on leaves for allocation sizing.
@@ -97,6 +108,15 @@ pub const Params = struct {
         if (p.colsample_bylevel <= 0 or p.colsample_bylevel > 1) return error.BadColsample;
         if (p.colsample_bynode <= 0 or p.colsample_bynode > 1) return error.BadColsample;
         if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
+        if (p.leaf_estimation_iterations == 0) return error.BadLeafIterations;
+        if (p.grow_policy == .symmetric) {
+            if (p.max_depth == 0 or p.max_depth > @import("symmetric.zig").max_depth) return error.BadSymmetricDepth;
+            // Not built for symmetric trees yet; refused rather than silently ignored.
+            if (p.subsample != 1 or p.colsample_bytree != 1 or p.colsample_bylevel != 1 or
+                p.colsample_bynode != 1 or p.bootstrap or p.linear_leaves or
+                p.cat_split != .ordinal or p.alpha != 0 or p.max_delta_step != 0)
+                return error.SymmetricUnsupported;
+        }
     }
 
     /// An unbounded tree is only safe if *something* caps its leaves.

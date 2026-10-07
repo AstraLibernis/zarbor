@@ -122,6 +122,7 @@ pub const Config = struct {
             .gbdt => switch (c.gbdt.tree.grow_policy) {
                 .depthwise => "gradient-boosted trees (depthwise, XGBoost-style)",
                 .lossguide => "gradient-boosted trees (leafwise, LightGBM-style)",
+                .symmetric => "gradient-boosted trees (symmetric, CatBoost-style)",
             },
             .random_forest => "random forest (bagged unshrunk trees)",
             .linear => switch (l.objective) {

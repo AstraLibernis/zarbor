@@ -18,7 +18,7 @@ const testing = std.testing;
 
 /// A dataset from explicit column-major bins (bin 0 = missing) and labels.
 /// Edges are 1, 2, ... so a real bin `b` stands for the value `b`.
-fn fromBins(gpa: std.mem.Allocator, cols: []const []const u8, n_bins: []const u16, labels: []const f32) !data.Dataset {
+pub fn fromBins(gpa: std.mem.Allocator, cols: []const []const u8, n_bins: []const u16, labels: []const f32) !data.Dataset {
     const n_features = cols.len;
     const n_rows = labels.len;
 

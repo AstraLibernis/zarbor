@@ -11,6 +11,7 @@ const data = @import("data.zig");
 const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const tree = @import("tree.zig");
+const symmetric = @import("symmetric.zig");
 const metric = @import("metric.zig");
 const prof = @import("prof.zig");
 const Objective = @import("objective.zig").Objective;
@@ -72,6 +73,7 @@ pub const Params = struct {
         // next round's gradient comes from one accumulated score per row.
         if (p.tree.bootstrap) return error.BootstrapWithBoosting;
         if (p.sampling == .goss) {
+            if (p.tree.grow_policy == .symmetric) return error.SymmetricUnsupported;
             if (p.top_rate <= 0 or p.top_rate >= 1) return error.BadTopRate;
             if (p.other_rate <= 0 or p.other_rate >= 1) return error.BadOtherRate;
             if (p.top_rate + p.other_rate > 1) return error.GossRatesExceedOne;
@@ -290,6 +292,20 @@ const ApplyAllCtx = struct {
 /// with only a couple of chunks per worker, so the barrier waits on whichever worker drew one
 /// extra; smaller chunks even out the load. Rows are independent, so the chunking changes
 /// nothing but the wait. `forest.valid_min_chunk` follows the same reasoning.
+/// Adds a symmetric tree's leaf values by each row's leaf index, which the builder already holds.
+/// The same f32 sum as predicting the tree, without walking it.
+const SymApplyCtx = struct {
+    leaf: []const u16,
+    values: []const f64,
+    raw: []f32,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SymApplyCtx = @ptrCast(@alignCast(ctx));
+        for (self.raw[begin..end], self.leaf[begin..end]) |*r, l| r.* += @floatCast(self.values[l]);
+    }
+};
+
 const valid_min_chunk = 1024;
 
 const ValidCtx = struct {
@@ -412,8 +428,17 @@ pub fn train(
     const span_buf = try gpa.alloc(tree.LeafSpan, cfg.tree.leafBudget());
     defer gpa.free(span_buf);
 
-    var builder = try tree.Builder.init(gpa, pool, ds, cfg.tree);
-    defer builder.deinit();
+    // Exactly one of the two builders exists: symmetric trees have their own (symmetric.zig).
+    var sym: ?symmetric.Builder = if (cfg.tree.grow_policy == .symmetric) try symmetric.Builder.init(gpa, pool, ds, .{
+        .depth = cfg.tree.max_depth,
+        .lambda = cfg.tree.lambda,
+        .learning_rate = cfg.tree.learning_rate,
+        .score = cfg.tree.score_function,
+        .leaf_iterations = cfg.tree.leaf_estimation_iterations,
+    }) else null;
+    defer if (sym) |*s| s.deinit();
+    var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;
+    defer if (builder_opt) |*b| b.deinit();
 
     const better = higherIsBetter(cfg.objective);
     var best_score: f64 = if (better) -std.math.inf(f64) else std.math.inf(f64);
@@ -440,32 +465,43 @@ pub fn train(
             break :blk gossSelect(pool, grads, goss_counts, goss_chunks, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
         } else null;
 
-        var t = try builder.growRows(grads, subset);
-        errdefer t.deinit(gpa);
-        try model.trees.append(gpa, t);
-
-        // Spans cover only rows the tree saw (all rows only without sampling).
-        const t_ap = prof.start();
-        // Span fast path needs constant leaves; a linear leaf has no single constant.
-        if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
-            const spans = span_buf[0..builder.leafSpans().len];
-            @memcpy(spans, builder.leafSpans());
-            std.sort.pdq(tree.LeafSpan, spans, {}, ApplyCtx.byStart);
-            var actx = ApplyCtx{
-                .spans = spans,
-                .rows = builder.rows,
-                .raw = raw,
-            };
-            pool.parallelFor(builder.activeRows().len, &actx, ApplyCtx.run, 8192);
+        if (sym) |*s| {
+            var t = try s.grow(grads, raw, ds.labels, cfg.objective, cfg.scale_pos_weight);
+            errdefer t.deinit(gpa);
+            try model.trees.append(gpa, t);
+            const t_ap = prof.start();
+            var sctx = SymApplyCtx{ .leaf = s.leaf, .values = s.values, .raw = raw };
+            pool.parallelFor(ds.n_rows, &sctx, SymApplyCtx.run, 8192);
+            prof.stop(.apply, t_ap);
         } else {
-            var actx = ApplyAllCtx{
-                .t = &model.trees.items[model.trees.items.len - 1],
-                .ds = ds,
-                .raw = raw,
-            };
-            pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
+            const builder = &builder_opt.?;
+            var t = try builder.growRows(grads, subset);
+            errdefer t.deinit(gpa);
+            try model.trees.append(gpa, t);
+
+            // Spans cover only rows the tree saw (all rows only without sampling).
+            const t_ap = prof.start();
+            // Span fast path needs constant leaves; a linear leaf has no single constant.
+            if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
+                const spans = span_buf[0..builder.leafSpans().len];
+                @memcpy(spans, builder.leafSpans());
+                std.sort.pdq(tree.LeafSpan, spans, {}, ApplyCtx.byStart);
+                var actx = ApplyCtx{
+                    .spans = spans,
+                    .rows = builder.rows,
+                    .raw = raw,
+                };
+                pool.parallelFor(builder.activeRows().len, &actx, ApplyCtx.run, 8192);
+            } else {
+                var actx = ApplyAllCtx{
+                    .t = &model.trees.items[model.trees.items.len - 1],
+                    .ds = ds,
+                    .raw = raw,
+                };
+                pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
+            }
+            prof.stop(.apply, t_ap);
         }
-        prof.stop(.apply, t_ap);
 
         if (valid) |v| {
             const wall0 = prof.now();

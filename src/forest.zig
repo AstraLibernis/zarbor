@@ -43,6 +43,7 @@ pub const Params = struct {
         // `train` forces the step to 1, so only that value is checked.
         var t = p.tree;
         t.learning_rate = 1.0;
+        if (t.grow_policy == .symmetric) return error.SymmetricUnsupported;
         try t.validate();
         try p.tree.validateCapacity();
     }
