@@ -87,7 +87,7 @@ Measured or read in source; none moves a tree under the parity conditions above.
 |---|---|---|---|
 | base score with `scale_pos_weight` | logit of the label mean, ignoring the weight | **LightGBM: the same.** XGBoost: one Newton step from 0 | First trees differ from XGBoost's when `scale_pos_weight != 1`. The references disagree; zarbor follows LightGBM. |
 | `max_bin` | 256 = 255 real bins + the missing bin | XGBoost: 256 real; LightGBM: 255 including a NaN bin when present | One bin of budget. |
-| `colsample_*` count | `round(n × rate)` | XGBoost `floor`, LightGBM `round` over non-trivial features | 13 features at 0.5: zarbor 7, XGBoost 6. |
+| `colsample_*` count | `floor(n × rate)`, at least 1 (was `round` until 2026-10-07) | XGBoost the same; LightGBM `round` over non-trivial features | 13 features at 0.5: zarbor and XGBoost 6, LightGBM 7. |
 | `subsample` | exactly `round(n × rate)` rows | XGBoost: a Bernoulli draw per row | Same expectation, different variance. |
 | missing direction when a node saw no missing rows | the larger child | XGBoost right; LightGBM left | Predictions on new NaNs only. |
 | cut placement for unseen values | midpoint between training values (since the binning rewrite) | XGBoost the left value; LightGBM, CatBoost, scikit-learn the midpoint | Predictions on values between training values only. |
@@ -161,9 +161,10 @@ opens each block.
 | `colsample_bylevel` 0.5 / 0.54 | | | 0.10 / 0.45 |
 | `colsample_bynode` 0.5 / 0.54 | | | 0.57 / 1.11 |
 
-`colsample_bytree` 0.5 on 13 columns: zarbor keeps `round(6.5) = 7`, XGBoost `floor = 6`. At 0.54
+`colsample_bytree` 0.5 on 13 columns: zarbor kept `round(6.5) = 7`, XGBoost `floor = 6`. At 0.54
 both keep 7 and the gap falls within two standard errors (zarbor's result is identical at 0.5 and
-0.54, as it should be).
+0.54, as it should be). **Changed since:** zarbor now counts `max(1, floor(n * rate))` like XGBoost
+and scikit-learn, so a fraction is a ceiling; LightGBM rounds.
 
 | LightGBM | lightgbm | zarbor | diff / s.e. |
 |---|---|---|---|

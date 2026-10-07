@@ -9,10 +9,10 @@ folds   3  (seed 1, stratified)
 threads 4
 prep # ms  (read + bin, paid once for all folds)
 
-fold 0  872 train / 437 valid   auc=0.838468
-fold 1  873 train / 436 valid   auc=0.851780
-fold 2  873 train / 436 valid   auc=0.844634
+fold 0  872 train / 437 valid   auc=0.841395
+fold 1  873 train / 436 valid   auc=0.856031
+fold 2  873 train / 436 valid   auc=0.835263
 
-oof     0.845059   mean 0.844960   sd 0.005440 # ms
+oof     0.844335   mean 0.844230   sd 0.008712 # ms
 --- stderr
 --- files

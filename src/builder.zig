@@ -357,13 +357,16 @@ pub const Builder = struct {
         b.free_slots.appendAssumeCapacity(id);
     }
 
-    /// Partial Fisher-Yates: sample `k` of `src[0..n]` into `dst`.
+    /// Partial Fisher-Yates: sample `k` of `src[0..n]` into `dst`. `k` is `floor(n * rate)`, at
+    /// least 1, as XGBoost (whose `colsample_*` names these are) and scikit-learn's `max_features`
+    /// count it, so a fraction is a ceiling on the columns a tree sees. LightGBM rounds instead; on
+    /// 13 columns at 0.5 that is 7 against 6 (docs/parity.md).
     fn sample(b: *Builder, src: []u32, n: usize, dst: []u32, rate: f32) usize {
         if (rate >= 1.0) {
             @memcpy(dst[0..n], src[0..n]);
             return n;
         }
-        var k: usize = @intFromFloat(@round(@as(f32, @floatFromInt(n)) * rate));
+        var k: usize = @intFromFloat(@floor(@as(f32, @floatFromInt(n)) * rate));
         k = std.math.clamp(k, 1, n);
         const r = b.rng.random();
         var i: usize = 0;

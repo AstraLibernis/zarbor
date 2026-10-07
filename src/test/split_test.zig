@@ -214,3 +214,51 @@ test "with max_delta_step a node is scored by its clipped weight" {
     p.max_delta_step = 0;
     try testing.expectApproxEqAbs(@as(f64, 100.0 / 3.0), split.nodeScore(-10, 2, p), 1e-12);
 }
+
+test "colsample keeps floor(n * rate) columns: 6 of 13 at 0.5" {
+    // XGBoost's count (and scikit-learn's): the fraction is a ceiling. Every column carries signal
+    // and the trees are deep, so each tree uses as many columns as it is given.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    const n = 4000;
+    const nf = 13;
+    var cols: [nf][n]u8 = undefined;
+    var y: [n]f32 = undefined;
+    var prng: std.Random.DefaultPrng = .init(61);
+    const r = prng.random();
+    for (0..n) |i| {
+        var s: f32 = 0;
+        for (&cols, 0..) |*c, f| {
+            c[i] = r.intRangeAtMost(u8, 1, 8);
+            s += @as(f32, @floatFromInt(c[i])) * (if (f % 2 == 0) @as(f32, 0.1) else -0.1);
+        }
+        y[i] = if (s + r.floatNorm(f32) * 0.5 > 0) 1 else 0;
+    }
+    var views: [nf][]const u8 = undefined;
+    for (&views, &cols) |*v, *c| v.* = c;
+    var nb: [nf]u16 = undefined;
+    @memset(&nb, 9);
+    var ds = try fromBins(gpa, &views, &nb, &y);
+    defer ds.deinit();
+    var res = try booster.train(gpa, pool, &ds, null, config.Config.from(.{
+        .n_rounds = 20,
+        .max_depth = 8,
+        .colsample_bytree = 0.5,
+        .min_child_samples = 1,
+        .verbose_eval = 0,
+    }).gbdt, null);
+    defer res.model.deinit();
+    var most: usize = 0;
+    for (res.model.trees.items) |t| {
+        var used = [_]bool{false} ** nf;
+        for (t.nodes) |nd| {
+            if (!nd.is_leaf) used[nd.feature] = true;
+        }
+        var k: usize = 0;
+        for (used) |u| k += @intFromBool(u);
+        try testing.expect(k <= 6);
+        most = @max(most, k);
+    }
+    try testing.expectEqual(@as(usize, 6), most);
+}
