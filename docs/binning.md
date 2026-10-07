@@ -127,10 +127,11 @@ What it shows:
   700k, both peaking at one bin per value). There is none on small data (California) or on
   continuous data, where the synthetic set peaks at 1024 and declines after it.
 
-Guidance: keep 256 as the default. Try 1024 to 4096 when there are more than about 100k rows
-and the columns have more than 256 distinct values but not millions. Beyond about 1024 per
-continuous column you pay a lot of time for nothing. Tune it like any other setting, with CV
-rather than a single split.
+Guidance: keep 256 as the default. The single-split accuracy above is too noisy to choose
+`max_bin` by data size. In 5-fold CV the best value does not follow row count: Ames, with
+1.5k rows, is best at 8; housing, with 6.8k rows, at 1024; California, with 20k rows, at 1024
+and overfitting past 2048. Tune it with CV. Past about 1024 bins per continuous column, the
+time cost (table above) is high.
 
 ## Not offered
 
