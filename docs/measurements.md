@@ -72,6 +72,11 @@ should read 558 and 436; binshape's `WIDTHS` is corrected.
 ### sigmoid8
 - Original comment: "`sigmoid` for eight rows. Scalar `@exp` is a libm call at 7.8 ns/element (glibc `expf` no faster). Inline `2^(-x*log2e)`, integer part into the exponent field, fraction by degree-5 minimax polynomial, vectorises to 0.67 ns: 11.7x, and gradients were 15% of a fit. Error < 1e-6 absolute (a few f32 ulp), pinned by `\"vectorised sigmoid matches the scalar one\"`. Still an approximation, so it is confined to gradients; predictions use the scalar `sigmoid`."
 - Introduced: 96a63db (2026-09-21) — from `git log -S`; current wording from c43a41f (2026-09-29)
+- **Re-measured 2026-10-07 [MEASURED]:** the "(a few f32 ulp)" claim was wrong. Against an f64
+  sigmoid, over x in [-30, 30] at step 1e-4 (ReleaseSafe, the function copied verbatim from
+  a9ee25b): max absolute error 8.11e-7, max relative error 4.92e-6, max 58.3 f32 ulp, the worst at
+  x = -25.99 where the value is tiny. Harmless in practice: with it, zarbor's predictions match
+  XGBoost's row for row through 500 trees (docs/parity.md). Comment corrected.
 
 ### valid_min_chunk (duplicate in src/forest.zig, now a pointer to booster's)
 - Original comment: "Validation rows per pool chunk, at least. 4096 cut 133k rows into 33 chunks for 16 workers, so the barrier waited on a worker with three while the average had two; 1024 gives 131. Rows are independent, so the chunking changes nothing but the wait."

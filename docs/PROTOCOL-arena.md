@@ -178,6 +178,13 @@ Known irreducible mismatch, recorded rather than smoothed over: LightGBM's
 LightGBM is given 255 where the others get 256. That is inside the envelope
 the envelope is built from.
 
+**Erratum (2026-10-07, from the audit in `parity.md`).** Two statements above
+are wrong. XGBoost's `max_bin` does not include a missing bin: 256 gives it 256
+real bins, where zarbor's 256 gives 255 real plus missing. And
+`min_child_samples` does not exist in XGBoost, so row A ran zarbor with a
+constraint XGBoost did not have. Results recorded under this protocol stand as
+measured; the comparison was not as like-for-like as stated.
+
 For D, sklearn is run twice — once with `max_leaf_nodes=1024` to mirror
 zarbor's cap, and once at its own uncapped default — because the cap is the
 single largest construction difference and pinning it is the only way to tell

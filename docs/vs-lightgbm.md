@@ -86,7 +86,9 @@ and there are two concrete suspects:
 - **`cat_l2` is added to the parent score as well as the children.** That was
   a deliberate choice for self-consistency. `cat_l2=0` improving suggests it
   biases the comparison against categorical splits rather than regularising
-  them.
+  them. *(Resolved: `cat_l2` now goes into the children only, as LightGBM
+  does, pinned by the test "cat_l2 penalises the children and not the
+  parent".)*
 
 Neither is confirmed. Both are testable, and neither should be "fixed" by
 tuning the constant on `housing`, which is the trap this document exists for.
@@ -173,5 +175,7 @@ result.
 
 Both fixes are opt-in. `--cat_split=optimal` and `--bin_policy=greedy` change
 results, so making either the default would break the bit-identity that every
-earlier protocol in this repo checks against. They are what `--algo=lightgbm`
-will select.
+earlier protocol in this repo checks against. An `--algo=lightgbm` preset to
+select them was planned and never built (`config.Algo` is `gbdt`,
+`random_forest`, `linear`): pass both flags by hand. The tree-for-tree audit
+against LightGBM 4.7.0 and XGBoost 3.4.1 that followed is in `parity.md`.

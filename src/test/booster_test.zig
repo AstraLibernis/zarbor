@@ -23,8 +23,8 @@ const testing = std.testing;
 
 test "vectorised sigmoid matches the scalar one" {
     // The gradient loop uses an inlined 2^x rather than libm's expf, which is
-    // much faster and approximate. This pins how approximate: anything worse
-    // than a few f32 ulp would start moving split decisions around.
+    // much faster and approximate. This pins how approximate in absolute
+    // terms, which is what moves gradient sums and so split decisions.
     var max_err: f32 = 0;
     var x: f32 = -60.0;
     while (x <= 60.0) : (x += 0.0007) {

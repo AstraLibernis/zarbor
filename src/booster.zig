@@ -147,9 +147,10 @@ pub const F8 = @Vector(lanes, f32);
 /// `sigmoid` for eight rows. Scalar `@exp` is a libm call per element (glibc `expf`
 /// no better), and gradients are a noticeable share of a fit. Inline `2^(-x*log2e)`,
 /// integer part into the exponent field, fraction by degree-5 minimax polynomial,
-/// vectorises and is much faster. Error < 1e-6 absolute (a few f32 ulp), pinned by
-/// `"vectorised sigmoid matches the scalar one"`. Still an approximation, so it is
-/// confined to gradients; predictions use the scalar `sigmoid`.
+/// vectorises and is much faster. Error < 1e-6 absolute, pinned by `"vectorised
+/// sigmoid matches the scalar one"`; relative to the true value it is tens of f32 ulp
+/// in the far tail, not "a few" (docs/measurements.md). Still an approximation, so it
+/// is confined to gradients; predictions use the scalar `sigmoid`.
 pub inline fn sigmoid8(x: F8) F8 {
     const one: F8 = @splat(1.0);
     // exp overflows f32 past ~88; sigmoid has saturated long before, so clamp.

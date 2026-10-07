@@ -65,14 +65,14 @@ Four guards, all of them standard, all fixed before measuring:
 |---|---|---|
 | `cat_smooth` | 10.0 | the sort key is `G_k / (H_k + cat_smooth)`, so a category with little mass is pulled toward the middle of the order instead of the ends |
 | `cat_l2` | 10.0 | extra L2 in the gain for categorical splits only, since a `K`-way choice overfits harder than a binary threshold at equal sample size |
-| `cat_min_group` | `min_child_samples` | categories with fewer rows than the tree's own child-size floor are excluded from the scan and join the right child |
+| `min_data_per_group` | 100 | rows that must accumulate since the last evaluated cut before the next is scored, and a floor on the right child (LightGBM's name and default) |
 | `max_cat_threshold` | 32 | cap on how many categories may land on the left, so a split cannot enumerate a large set one rare level at a time |
 
 `cat_smooth`, `cat_l2` and `max_cat_threshold` are LightGBM's defaults.
-`cat_min_group` is coupled to `min_child_samples` rather than given LightGBM's
-independent 100, because a second, larger, unrelated sample floor in the same
-tree is a magic number, and because at `min_child_samples = 20` a flat 100
-would disable the feature outright on the smaller tables.
+An earlier design named the floor `cat_min_group` and coupled it to
+`min_child_samples`. The code now follows LightGBM: `min_data_per_group`
+(default 100) paces the scan, and which levels take part at all is decided by
+`cat_smooth` as a row count (`split.zig`, `bestCatSplit`).
 
 Note that these guards are the feature's real risk. If F1 measures as harmful,
 the first thing to check is whether it is the search or the regularisation
