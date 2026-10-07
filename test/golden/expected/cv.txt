@@ -10,11 +10,11 @@ threads 4
 prep # ms  (read + bin, paid once for all folds)
 
 fold 0  872 train / 437 valid   auc=0.832080
-fold 1  873 train / 436 valid   auc=0.850322
+fold 1  873 train / 436 valid   auc=0.850344
 fold 2  873 train / 436 valid   auc=0.851394
 
-oof     0.843375   mean 0.844599   sd 0.008863 # ms
+oof     0.843377   mean 0.844606   sd 0.008868 # ms
 wrote   oof.csv
 --- stderr
 --- files
-oof.csv  19657 bytes  sha256 84d47c6dfbda34c6bd9994fb33318ad4e1ace8951b0d7c8662323399bff1b47b
+oof.csv  19657 bytes  sha256 6d5d01359711465524a944df5912ab299524e677fda6132254fb2a274cf7c08c

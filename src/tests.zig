@@ -15,6 +15,7 @@ test {
     _ = @import("test/model_test.zig");
     _ = @import("test/pool_test.zig");
     _ = @import("test/radix_test.zig");
+    _ = @import("test/split_test.zig");
     _ = @import("test/sweep_test.zig");
     _ = @import("test/tune_test.zig");
 

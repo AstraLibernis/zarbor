@@ -114,7 +114,10 @@ inline fn consider(
     const min_n: f64 = @floatFromInt(p.min_child_samples);
     if (left.n < min_n or right.n < min_n) return;
     if (left.h < p.min_child_weight or right.h < p.min_child_weight) return;
-    const gain = 0.5 * (nodeScore(left.g, left.h, p) + nodeScore(right.g, right.h, p) - parent_score) - p.min_split_gain;
+    // No 0.5: the unhalved score sum is XGBoost's `loss_chg` and LightGBM's split gain, which their
+    // `gamma` / `min_gain_to_split` are compared against. Halving it made `min_split_gain` act as
+    // twice the same number there.
+    const gain = nodeScore(left.g, left.h, p) + nodeScore(right.g, right.h, p) - parent_score - p.min_split_gain;
     if (gain > best.gain) {
         best.* = .{
             .feature = fid,
@@ -188,8 +191,8 @@ fn bestCatSplit(
             const right = total.sub(left);
             if (left.n < min_n or right.n < min_n) continue;
             if (left.h < p.min_child_weight or right.h < p.min_child_weight) continue;
-            const gain = 0.5 * (nodeScore(left.g, left.h, p) +
-                nodeScore(right.g, right.h, p) - parent_score) - p.min_split_gain;
+            const gain = nodeScore(left.g, left.h, p) +
+                nodeScore(right.g, right.h, p) - parent_score - p.min_split_gain;
             if (gain > best.gain) {
                 var ids: [max_cat_ids]data.BinIdx = @splat(0);
                 ids[0] = @intCast(b);
@@ -254,8 +257,8 @@ fn bestCatSplit(
             if (group < group_floor) continue;
             group = 0;
 
-            const gain = 0.5 * (nodeScore(acc.g, acc.h, pc) +
-                nodeScore(right.g, right.h, pc) - parent_score) - p.min_split_gain;
+            const gain = nodeScore(acc.g, acc.h, pc) +
+                nodeScore(right.g, right.h, pc) - parent_score - p.min_split_gain;
             if (gain > best_gain) {
                 best_gain = gain;
                 best_k = k;
@@ -291,7 +294,8 @@ fn bestCatSplit(
     };
 }
 
-/// Best split for one node over `features`. Bin 0 holds the missing mass and is never a threshold.
+/// Best split for one node over `features`. Bin 0 holds the missing mass; it is a threshold only in
+/// the missing-vs-present split (`threshold = 0`, missing left).
 /// With missing rows at this node a feature is scanned twice (missing left, then right), learning
 /// the default direction per split. With none it is scanned once: both directions score
 /// identically, and `consider` keeps the first strictly-better candidate, so `missing_left = true`
@@ -313,7 +317,17 @@ pub fn bestSplit(
     for (features) |fid| {
         const h = bank.featureSliceConst(hist, fid);
         const nb = ds.n_bins[fid];
-        if (nb < 3) continue; // missing bin plus one real bin: nothing to cut
+        if (nb < 2) continue;
+        const missing = h[0];
+
+        // Missing alone against every present value: `threshold = 0` sends only bin 0 left. No scan
+        // below reaches this partition (each keeps at least one real bin with the missing mass), so
+        // without it a column whose signal is *being* missing could not be split on at all; XGBoost
+        // reaches it from its scan's end points. Numeric or categorical alike: bins >= 1 fail
+        // `bin <= 0`, so it needs no level list. The mirror (missing right, all present left) is the
+        // same partition.
+        if (missing.n != 0) consider(&best, fid, 0, true, missing, total.sub(missing), parent_score, p);
+        if (nb < 3) continue; // one real bin: missing-vs-present was the only cut
 
         if (p.cat_optimal and ds.kinds[fid] == .categorical) {
             if (nb <= cat_scratch_small) {
@@ -322,8 +336,6 @@ pub fn bestSplit(
             } else bestCatSplitWide(&best, fid, h, nb, total, p);
             continue;
         }
-
-        const missing = h[0];
 
         if (missing.n == 0) {
             // One scan; the direction comes from the split, not loop order. Gains are unchanged, so

@@ -1,9 +1,9 @@
 $ zarbor cv titanic3.csv --label=survived --folds=3 --repeats=3 --quiet=1 --n_rounds=40 --oof=oofr.csv --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
 exit 0
 --- stdout
-repeats 3   oof 0.849831   sd 0.008744   best 0.837466   worst 0.856190 # ms
+repeats 3   oof 0.849831   sd 0.008745   best 0.837466   worst 0.856193 # ms
 note    --oof is the first repeat only
 wrote   oofr.csv
 --- stderr
 --- files
-oofr.csv  19657 bytes  sha256 6a2b8c3959ca0a7fccc039890a065eef7be1e4773f055f0429f9f7ec99efc9d7
+oofr.csv  19657 bytes  sha256 622a27bed84982cd8c689774746e01327272ac41b45a57b9d926699def09d5aa

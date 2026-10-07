@@ -29,14 +29,15 @@ pub inline fn goesLeft(bin: data.BinIdx, t: split.SplitTest) bool {
 /// A numeric split as one unsigned compare: `(bin - lo) <= hi` in wrapping u32 arithmetic, with
 /// `lo = 1` when missing goes right (bin 0 wraps to the top and fails) and `lo = 0` when it goes
 /// left (bin 0 passes). `goesLeft` compiled to three conditional jumps per row; near a good split
-/// the side is a coin flip, so they mispredicted constantly. Same decision for every bin: bin 0 is
-/// missing and never a threshold, so `threshold >= 1` and `hi` never wraps.
+/// the side is a coin flip, so they mispredicted constantly. Same decision for every bin. The one
+/// split with `threshold = 0` is missing-vs-present, always `missing_left` (`lo = 0`, `hi = 0`:
+/// only bin 0 passes); with missing right, `threshold >= 1`, so `hi` never wraps.
 const NumTest = struct {
     lo: u32,
     hi: u32,
 
     fn of(t: split.SplitTest) NumTest {
-        std.debug.assert(!t.is_cat and t.threshold != 0);
+        std.debug.assert(!t.is_cat and (t.threshold != 0 or t.missing_left));
         const lo: u32 = @intFromBool(!t.missing_left);
         return .{ .lo = lo, .hi = @as(u32, t.threshold) - lo };
     }
