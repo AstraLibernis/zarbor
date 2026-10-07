@@ -198,3 +198,19 @@ test "min_split_gain compares against the unhalved gain, as XGBoost's gamma does
     defer above.deinit();
     try testing.expect(above.trees.items[0].nodes[0].is_leaf);
 }
+
+test "with max_delta_step a node is scored by its clipped weight" {
+    // g = -10, h = 2, lambda = 1: the free weight 10/3 is clipped to 0.5, which buys
+    // -(2 * -10 * 0.5 + 3 * 0.25) = 9.25, not the free 100/3. Without the cap, the free score.
+    const split = @import("../split.zig");
+    var p: split.SplitParams = .{ .lambda = 1, .alpha = 0, .min_split_gain = 0, .min_child_weight = 0, .min_child_samples = 0, .max_delta_step = 0.5 };
+    try testing.expectApproxEqAbs(@as(f64, 9.25), split.nodeScore(-10, 2, p), 1e-12);
+    // L1 too: g = -10, alpha = 1 -> free weight 9/3 = 3, clipped 0.5: -(-10 + 0.75 + 1) = 8.25.
+    p.alpha = 1;
+    try testing.expectApproxEqAbs(@as(f64, 8.25), split.nodeScore(-10, 2, p), 1e-12);
+    // A weight inside the cap scores as the free weight does: g = -1 -> w = 1/3 < 0.5.
+    p.alpha = 0;
+    try testing.expectApproxEqAbs(@as(f64, 1.0 / 3.0), split.nodeScore(-1, 2, p), 1e-12);
+    p.max_delta_step = 0;
+    try testing.expectApproxEqAbs(@as(f64, 100.0 / 3.0), split.nodeScore(-10, 2, p), 1e-12);
+}

@@ -88,8 +88,16 @@ inline fn softThreshold(g: f64, alpha: f64) f64 {
     return 0;
 }
 
-/// Structure score of a node: the loss reduction its optimal leaf weight buys.
+/// Structure score of a node: the loss reduction its optimal leaf weight buys. With
+/// `max_delta_step` the leaf cannot take that weight, so the score is what the *clipped* weight
+/// buys, `-(2 g w + (h + lambda) w^2 + 2 alpha |w|)` (XGBoost's `CalcGainGivenWeight`; LightGBM's
+/// `GetLeafGainGivenOutput` is the same quantity). Unclipped, that equals the expression below.
 pub inline fn nodeScore(g: f64, h: f64, p: SplitParams) f64 {
+    if (p.max_delta_step > 0) {
+        if (h <= 0) return 0;
+        const w = leafWeight(g, h, p);
+        return -(2 * g * w + (h + p.lambda) * w * w + 2 * p.alpha * @abs(w));
+    }
     const t = softThreshold(g, p.alpha);
     return (t * t) / (h + p.lambda);
 }
