@@ -74,7 +74,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 csv_path = p;
                 continue;
             },
-            .bare => return error.FlagNeedsValue,
+            .bare => {
+                // `--help`, or a flag missing its `=value`: show what is accepted.
+                try out.writeAll(usage);
+                try out.flush();
+                return error.FlagNeedsValue;
+            },
             .flag => |f| f,
         };
         const key, const val = .{ flag.key, flag.val };
