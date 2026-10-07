@@ -47,6 +47,10 @@ pub const Params = struct {
     max_depth: u32 = 6,
     /// Leaf cap. 0 disables.
     max_leaves: u32 = 0,
+    /// Histogram memory per tree, MiB (LightGBM's `histogram_pool_size`). A tree wanting more
+    /// than fits evicts queued nodes' histograms and builds their children directly: slower, not
+    /// refused. Only past the size of three histograms does training stop.
+    histogram_pool_size: u32 = 2048,
     /// Minimum training rows per leaf.
     min_child_samples: u32 = 20,
     /// Minimum leaf hessian sum: for logistic, confidence mass not rows; the more principled cap.

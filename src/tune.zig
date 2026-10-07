@@ -213,6 +213,25 @@ pub fn defaultSpace(gpa: std.mem.Allocator, algo: config.Algo) ![]Param {
     return ps;
 }
 
+/// The default space minus every axis the command line pinned: a flag like `--n_rounds=100`
+/// is a promise the search will not vary it, and searching it anyway once silently overrode
+/// the pin. Returned in `gpa`, reusing `space`'s entries.
+pub fn withoutPinned(gpa: std.mem.Allocator, space: []const Param, pinned: []const []const u8) ![]Param {
+    var kept: std.ArrayList(Param) = .empty;
+    errdefer kept.deinit(gpa);
+    outer: for (space) |p| {
+        for (pinned) |name| if (std.mem.eql(u8, p.name, name)) continue :outer;
+        try kept.append(gpa, p);
+    }
+    return kept.toOwnedSlice(gpa);
+}
+
+/// The first `--param` axis that a flag also pins, if any: one of the two would be ignored.
+pub fn pinnedAndSearched(space: []const Param, pinned: []const []const u8) ?[]const u8 {
+    for (space) |p| for (pinned) |name| if (std.mem.eql(u8, p.name, name)) return name;
+    return null;
+}
+
 // ----- trials
 
 pub const Trial = struct {

@@ -91,7 +91,9 @@ const BatchBuildCtx = struct {
             if (!j.search) continue;
             const sl = b.slot(j.slot_l);
             const sr = b.slot(j.slot_r);
-            // Accumulate the smaller side; derive the larger by subtraction.
+            // Accumulate the smaller side; derive the larger by subtraction. `batchSize` leaves
+            // evicted parents to the one-at-a-time loop.
+            std.debug.assert(j.parent_slot != no_slot);
             if (j.mid - j.start <= j.end - j.mid) {
                 hist.buildInto(&b.bank, b.ds, b.rows[j.start..j.mid], b.g, self.tree_feats, sl);
                 hist.subtractInto(&b.bank, sr, b.slot(j.parent_slot), sl);
@@ -152,9 +154,12 @@ const SampleCtx = struct {
     }
 };
 
-/// Hard ceiling on histogram slot memory; beyond it the caller must shrink the tree, not the
-/// allocator decide.
-const slot_memory_budget: usize = 2 << 30;
+/// `Work.slot` of a queued node whose histogram was evicted: its split is already chosen, so the
+/// histogram only served to derive one child by subtraction, and both children are built instead.
+const no_slot: u32 = std.math.maxInt(u32);
+
+/// The fewest slots a tree can grow in: a node being split and its two children.
+const min_slots: usize = 3;
 
 pub const Builder = struct {
     gpa: std.mem.Allocator,
@@ -166,6 +171,8 @@ pub const Builder = struct {
     /// `cfg.leafBudget() + 2` histograms (`want_slots` in `init`), each `bank.slotLen()` bins.
     slots: []hist.Bin,
     free_slots: std.ArrayList(u32),
+    /// Histograms evicted under `histogram_pool_size`, over the builder's life.
+    evictions: usize = 0,
 
     rows: []u32,
     /// Gradients indexed by original row id, borrowed for the current tree. Not permuted to match
@@ -228,9 +235,12 @@ pub const Builder = struct {
         errdefer bank.deinit();
 
         const slot_len = bank.slotLen();
-        const want_slots: usize = @as(usize, cfg.leafBudget()) + 2;
-        const affordable = slot_memory_budget / (slot_len * @sizeOf(hist.Bin));
-        if (want_slots > affordable) return error.TreeTooLargeForHistogramBudget;
+        // A tree that wants more slots than `histogram_pool_size` holds gets fewer, and
+        // `takeSlot` evicts a queued node's histogram when they run out.
+        const pool_bytes = @as(usize, cfg.histogram_pool_size) << 20;
+        const affordable = pool_bytes / (slot_len * @sizeOf(hist.Bin));
+        if (affordable < min_slots) return error.TreeTooLargeForHistogramBudget;
+        const want_slots: usize = @min(@as(usize, cfg.leafBudget()) + 2, affordable);
 
         const slots = try gpa.alloc(hist.Bin, want_slots * slot_len);
         errdefer gpa.free(slots);
@@ -349,11 +359,40 @@ pub const Builder = struct {
         return b.slots[@as(usize, id) * len ..][0..len];
     }
 
+    /// A free slot, or one evicted from a queued node. Only the one-at-a-time loop can run out:
+    /// `batchSize` keeps a batch within the free slots, so its just-queued children, whose
+    /// histograms are not built yet, are never evicted.
     fn takeSlot(b: *Builder) u32 {
-        return b.free_slots.pop().?;
+        if (b.free_slots.pop()) |id| return id;
+        return b.evictSlot();
+    }
+
+    /// Takes the histogram of the pending node least likely to need it: the lowest split gain (no
+    /// valid split counts lowest, as it can only become a leaf), the latest queued among ties so
+    /// the choice is deterministic. Slots are held only by the popped node and pending ones, and
+    /// at least `min_slots` exist, so with none free a pending node holds one.
+    fn evictSlot(b: *Builder) u32 {
+        var pick: usize = 0;
+        var pick_gain = std.math.inf(f64);
+        var found = false;
+        for (b.queue.items[b.queue_head..], b.queue_head..) |w, i| {
+            if (w.slot == no_slot) continue;
+            const g = if (w.split.valid()) w.split.gain else -std.math.inf(f64);
+            if (!found or g <= pick_gain) {
+                pick = i;
+                pick_gain = g;
+                found = true;
+            }
+        }
+        std.debug.assert(found);
+        const id = b.queue.items[pick].slot;
+        b.queue.items[pick].slot = no_slot;
+        b.evictions += 1;
+        return id;
     }
 
     fn giveSlot(b: *Builder, id: u32) void {
+        if (id == no_slot) return;
         b.free_slots.appendAssumeCapacity(id);
     }
 
@@ -676,6 +715,12 @@ pub const Builder = struct {
             if (children_are_leaves) {
                 // Nothing to build; slots still go through the normal path so the free list behaves
                 // the same.
+            } else if (w.slot == no_slot) {
+                // Evicted parent: no histogram to subtract from, so build both sides.
+                const t_hb = prof.start();
+                hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.g, tree_feats, b.slot(slot_l));
+                hist.build(b.pool, &b.bank, b.ds, b.rows[mid..w.end], b.g, tree_feats, b.slot(slot_r));
+                prof.stop(.hist_build, t_hb);
             } else if (n_left <= n_right) {
                 const t_hb = prof.start();
                 hist.build(b.pool, &b.bank, b.ds, b.rows[w.start..mid], b.g, tree_feats, b.slot(slot_l));
@@ -832,7 +877,10 @@ pub const Builder = struct {
         const limit = @min(@min(leaf_cap - used, b.free_slots.items.len / 2), batch_max_nodes);
         var k: usize = 0;
         for (b.queue.items[b.queue_head..]) |w| {
-            if (k == limit or w.end - w.start > batch_max_rows) break;
+            // An evicted node has no histogram to subtract from; the one-at-a-time loop builds
+            // both its children. Evictions need every slot taken and a batch needs eight free,
+            // so the two rarely meet, and one tested path beats two.
+            if (k == limit or w.end - w.start > batch_max_rows or w.slot == no_slot) break;
             k += 1;
         }
         return k;

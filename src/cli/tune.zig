@@ -173,12 +173,22 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const arena = arena_state.allocator();
 
     const space = if (specs.items.len == 0)
-        try defaultSpace(arena, cfg.algo)
+        try tune.withoutPinned(arena, try defaultSpace(arena, cfg.algo), explicit.items)
     else blk: {
         const ps = try arena.alloc(Param, specs.items.len);
         for (ps, specs.items) |*p, s| p.* = try parseParam(arena, s);
+        if (tune.pinnedAndSearched(ps, explicit.items)) |name| {
+            try out.print("--{s} is both pinned by a flag and searched by --param; drop one.\n", .{name});
+            try out.flush();
+            return error.PinnedAndSearched;
+        }
         break :blk ps;
     };
+    if (space.len == 0) {
+        try out.writeAll("every setting in the search space is pinned by a flag; nothing to tune.\n");
+        try out.flush();
+        return error.EmptySearchSpace;
+    }
 
     const pool = try pool_mod.Pool.init(gpa, cfg.n_threads);
     defer pool.deinit();

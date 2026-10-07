@@ -1456,3 +1456,78 @@ test "every model trains on a wide numeric column and survives save and load" {
         try testing.expect(try aucOf(gpa, &a, &y) > 0.95);
     }
 }
+
+/// `n_cols` numeric columns of ~1000 distinct values each, plus the label `y`.
+fn manyNumeric(gpa: std.mem.Allocator, pool: *Pool, n_rows: usize, n_cols: usize) !data.Dataset {
+    const names = try gpa.alloc([]u8, n_cols + 1);
+    const kinds = try gpa.alloc(data.ColumnKind, n_cols + 1);
+    const values = try gpa.alloc([]f32, n_cols + 1);
+    const levels = try gpa.alloc([][]u8, n_cols + 1);
+    for (0..n_cols + 1) |c| {
+        names[c] = if (c == n_cols) try gpa.dupe(u8, "y") else try std.fmt.allocPrint(gpa, "x{d}", .{c});
+        kinds[c] = .numeric;
+        levels[c] = &.{};
+        values[c] = try gpa.alloc(f32, n_rows);
+        for (values[c], 0..) |*v, i| v.* = @floatFromInt((i * (2 * c + 7) + c * 131) % 1000);
+    }
+    var f: data.Frame = .{ .gpa = gpa, .n_rows = n_rows, .names = names, .kinds = kinds, .values = values, .levels = levels };
+    defer f.deinit();
+    return data.quantise(gpa, pool, &f, .{ .max_bin = 1024, .min_data_in_bin = 1 }, null, &.{"y"});
+}
+
+test "a tree past histogram_pool_size evicts histograms and grows exactly the same tree" {
+    const gpa = testing.allocator;
+    const builder = @import("../builder.zig");
+    inline for (.{ 1, 3, 16 }) |threads| {
+        const pool = try Pool.init(gpa, threads);
+        defer pool.deinit();
+        var ds = try manyNumeric(gpa, pool, 20_000, 6);
+        defer ds.deinit();
+        // Integer gradients sum exactly in f64, so a histogram built directly equals one derived
+        // by subtraction, and any difference in the trees is a real one.
+        const gp = try gpa.alloc(hist.GradPair, ds.n_rows);
+        defer gpa.free(gp);
+        for (gp, 0..) |*p, i| {
+            const a = (i * 7) % 1000;
+            const b = (i * 11 + 131) % 1000;
+            // Plus integer noise no column explains, so the tree keeps splitting to its caps.
+            const noise: i32 = @intCast(((i *% 2654435761) >> 13) % 5);
+            p.* = .{ .g = @floatFromInt(@as(i32, @intFromBool(a > 500)) * 2 - 1 + @as(i32, @intFromBool(b < 300)) + noise - 2), .h = 1 };
+        }
+        inline for (.{ tree.GrowPolicy.depthwise, .lossguide }) |policy| {
+            // Deep enough that evicted nodes are split well before the leaf cap, so the children
+            // built without a parent histogram are searched in turn.
+            const base: tree.Params = .{ .grow_policy = policy, .max_depth = if (policy == .depthwise) 10 else 0, .max_leaves = if (policy == .depthwise) 0 else 511, .min_child_samples = 2, .min_child_weight = 0 };
+            var roomy = try builder.Builder.init(gpa, pool, &ds, base);
+            defer roomy.deinit();
+            var a = try roomy.grow(gp);
+            defer a.deinit(gpa);
+            try testing.expectEqual(@as(usize, 0), roomy.evictions);
+            try testing.expect(a.nodes.len > 200);
+            // 1 MiB holds ~5 histograms of 6 x ~1000 bins, too few for a batch (8 free); 6 MiB
+            // (~32) lets batches run between evictions. The tree wants hundreds either way.
+            for ([_]u32{ 1, 6 }) |mib| {
+                var tight_p = base;
+                tight_p.histogram_pool_size = mib;
+                var tight = try builder.Builder.init(gpa, pool, &ds, tight_p);
+                defer tight.deinit();
+                var b = try tight.grow(gp);
+                defer b.deinit(gpa);
+                try testing.expect(tight.evictions > 0);
+                try testing.expectEqual(a.nodes.len, b.nodes.len);
+                for (a.nodes, b.nodes) |x, y| try testing.expect(std.meta.eql(x, y));
+            }
+        }
+    }
+}
+
+test "histogram_pool_size below three histograms is refused, not overrun" {
+    const gpa = testing.allocator;
+    const builder = @import("../builder.zig");
+    const pool = try Pool.init(gpa, 1);
+    defer pool.deinit();
+    // 60 columns of ~1000 bins: one histogram is ~1.9 MiB, so 1 MiB holds none.
+    var ds = try manyNumeric(gpa, pool, 2_000, 60);
+    defer ds.deinit();
+    try testing.expectError(error.TreeTooLargeForHistogramBudget, builder.Builder.init(gpa, pool, &ds, .{ .histogram_pool_size = 1 }));
+}

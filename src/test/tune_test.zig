@@ -392,3 +392,23 @@ test "Binner: every binning parameter re-bins, including min_data_in_bin" {
     _ = try b.get(config.Config.from(.{ .min_data_in_bin = 50, .max_bin = 32, .max_cat_levels = 100 }));
     try testing.expectEqual(@as(usize, 4), b.rebins);
 }
+
+test "a flag pins its axis out of the default space, and pinning a --param axis is caught" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const full = try defaultSpace(a, .gbdt);
+    const kept = try tune.withoutPinned(a, full, &.{ "n_rounds", "max_bin", "not_in_space" });
+    try testing.expectEqual(full.len - 2, kept.len);
+    for (kept) |p| {
+        try testing.expect(!std.mem.eql(u8, p.name, "n_rounds"));
+        try testing.expect(!std.mem.eql(u8, p.name, "max_bin"));
+    }
+    // Order of the rest is kept.
+    try testing.expectEqualStrings("learning_rate", kept[0].name);
+    try testing.expectEqual(full.len, (try tune.withoutPinned(a, full, &.{})).len);
+
+    const searched = [_]Param{ try parseParam(a, "lambda=0.1..10:log"), try parseParam(a, "max_depth=3,4") };
+    try testing.expectEqualStrings("max_depth", tune.pinnedAndSearched(&searched, &.{ "n_rounds", "max_depth" }).?);
+    try testing.expect(tune.pinnedAndSearched(&searched, &.{"n_rounds"}) == null);
+}
