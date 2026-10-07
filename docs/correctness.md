@@ -18,13 +18,19 @@ Machine: Ryzen 7 9800X3D, 16 threads, Fedora 44, ReleaseFast builds.
 - **Where randomness differs, the distributions agree.** Every sampling option sits within
   two standard errors of its reference over 10 seeds, with one exception: CatBoost's
   Bernoulli bootstrap (below).
-- **Faster than every reference on the benchmark dataset**: 1.16x LightGBM, 1.39x XGBoost,
-  2.0x scikit-learn's forest and 3.2x its logistic regression on model work, and the CSV
-  parser is 4.7x pandas.
+- **Faster than XGBoost, LightGBM and scikit-learn on the benchmark dataset** (1.16x
+  LightGBM, 1.39x XGBoost, 2.0x scikit-learn's forest, 3.2x its logistic regression on model
+  work; the CSV parser is 4.7x pandas), **but slower than CatBoost**: 1.4x on plain symmetric
+  trees, 1.75x on ordered boosting and 9.7x with CatBoost's default settings.
 - **It processes messy real data.** 16 datasets from 891 rows to 1M rows ran through every
   command and setting extreme without a crash. Bad input is refused with a reason.
 
 ## 1. Exact parity: the same trees
+
+**Rerun it:** `python bench/parity/parity.py` (42 s; exits non-zero on any failure) runs the
+core cases on seeded synthetic data. All 12 pass: XGBoost to 500 trees, LightGBM to 30 trees
+at 31 leaves and 50 at 15, CatBoost to 300 trees, with ordered boosting and target statistics.
+The tables below come from the original harness on competition data.
 
 **Method.** Compare predictions row for row on data where binning cannot differ: 100,000
 rows of 13 integer columns with values 0–5 (Kaggle S6E10 ratings, binary target). Every
@@ -75,7 +81,9 @@ because they make LightGBM less exact.
 - **A feature unsplittable at a node is skipped in all its descendants.** Gain is not
   monotone down a branch: one column had best gain −0.18 at depth 5 and 17.8 at depth 11,
   where LightGBM could no longer see it. With squared error, LightGBM's 45th tree splits a
-  leaf with gain 2.78 instead of one with 4.12 for this reason.
+  leaf with gain 2.78 instead of one with 4.12 for this reason. On the synthetic parity data
+  the first miss is tree 34 at 31 leaves: LightGBM splits a leaf of gain 4.731 because the
+  better leaf's best split (4.761) is on a feature it pruned there.
 
 ### Known differences, by design
 
@@ -142,6 +150,20 @@ side's metric is trusted blind.
 | parsing both CSVs (40 MB) | zarbor 38 ms | pandas 178 ms | 4.68x |
 |---|---|---|---|
 
+**CatBoost**, same data and protocol, symmetric depth-6 trees, `lambda` 3, its `GreedyLogSum`
+binning, target statistics on the six categoricals:
+
+| setting | zarbor AUC | CatBoost AUC | gap / envelope | zarbor model ms | CatBoost ms | speed |
+|---|---:|---:|---:|---:|---:|---:|
+| plain, file order, no sampling (F) | 0.940756 | 0.940803 | 0.09 | 3,082 | 2,201 | **1.40x slower** |
+| ordered boosting (H) | 0.940786 | 0.940730 | 0.09 | 10,509 | 6,005 | **1.75x slower** |
+| CatBoost's defaults: MVS, noise, combinations, permutations (G) | 0.940505 | 0.940643 | 0.25 | 59,524 | 6,107 | **9.7x slower** |
+
+Accuracy agrees in every row. Speed does not: CatBoost is the one reference zarbor does not
+beat, and with its defaults (three permutation folds, each keeping its own statistics and
+scores, plus categorical combinations) zarbor is an order of magnitude slower. Where the time
+goes has not been profiled yet.
+
 How to read it:
 
 - The GOSS gap is the ranking key, not an error. With `--goss_rank=gradient_hessian`
@@ -151,9 +173,6 @@ How to read it:
 - Compared with the 2026-09-23 run: the leafwise fit went from 1.07x *slower* than LightGBM
   to 1.16x faster, and parsing from 1.31x to 4.68x pandas. The forest AUC moved from
   0.939025 to 0.938148 with the binning changes; it is still ahead.
-
-Not yet timed against its reference: CatBoost-style symmetric trees and ordered boosting.
-Treat their speed as unknown.
 
 ## 4. Real, messy data
 
@@ -200,6 +219,6 @@ The most expensive cases: 1M x 20 continuous columns at 65535 bins takes 274 s a
   reference implementation diverges earlier, at tree 103, so the cause may be in neither.
 - On EEG data, hold-out error at 4096 bins varies more than 5x between binning policies;
   unexplained.
-- No speed comparison against CatBoost yet.
-- The parity harness uses competition data and lives outside the repo; porting it to
-  synthetic data so it can ship in `bench/` is open.
+- zarbor's CatBoost-style training is 1.4-9.7x slower than CatBoost (section 3); not profiled.
+- `bench/parity/parity.py` covers the exact cases; the statistical (sampling) comparisons
+  still live outside the repo.

@@ -150,8 +150,83 @@
     }
   },
   "_parser": {
-    "zarbor_ms": 38,
-    "pandas_ms": 177.83154000062495,
-    "ratio": 4.679777368437499
+    "zarbor_ms": 36,
+    "pandas_ms": 176.8963630001963,
+    "ratio": 4.913787861116564
+  },
+  "F catboost-plain": {
+    "kind": "parity",
+    "reference": "catboost",
+    "zarbor_auc": 0.9407557845276306,
+    "zarbor_self_auc": 0.940756,
+    "ref_auc": 0.9408026288370256,
+    "gap": 4.684430939494444e-05,
+    "envelope": 0.0005409339868159835,
+    "zarbor": {
+      "read": 37,
+      "prepare": 102,
+      "fit": 2942,
+      "predict": 38,
+      "model_total": 3082,
+      "total": 3119
+    },
+    "ref": {
+      "read": 176.8963630001963,
+      "prepare": 21.827733999089105,
+      "fit": 2116.4147290000983,
+      "predict": 62.341662000108045,
+      "model_total": 2200.5841249992955,
+      "total": 2377.4804879994917
+    }
+  },
+  "G catboost-defaults": {
+    "kind": "parity",
+    "reference": "catboost",
+    "zarbor_auc": 0.9405052747468959,
+    "zarbor_self_auc": 0.940505,
+    "ref_auc": 0.9406429752086197,
+    "gap": 0.0001377004617237887,
+    "envelope": 0.0005494996570961641,
+    "zarbor": {
+      "read": 38,
+      "prepare": 102,
+      "fit": 59386,
+      "predict": 36,
+      "model_total": 59524,
+      "total": 59562
+    },
+    "ref": {
+      "read": 176.8963630001963,
+      "prepare": 21.482656000443967,
+      "fit": 6023.453651998352,
+      "predict": 62.46810999982699,
+      "model_total": 6107.404417998623,
+      "total": 6284.300780998819
+    }
+  },
+  "H catboost-ordered": {
+    "kind": "parity",
+    "reference": "catboost-ordered",
+    "zarbor_auc": 0.9407856990119849,
+    "zarbor_self_auc": 0.940786,
+    "ref_auc": 0.9407302036936873,
+    "gap": 5.5495318297626994e-05,
+    "envelope": 0.0005906495529544031,
+    "zarbor": {
+      "read": 37,
+      "prepare": 101,
+      "fit": 10370,
+      "predict": 38,
+      "model_total": 10509,
+      "total": 10546
+    },
+    "ref": {
+      "read": 176.8963630001963,
+      "prepare": 21.41851200030942,
+      "fit": 5921.15467199983,
+      "predict": 62.240420000307495,
+      "model_total": 6004.8136040004465,
+      "total": 6181.709967000643
+    }
   }
 }

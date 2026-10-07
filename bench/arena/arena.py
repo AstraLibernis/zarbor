@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import catboost as cb
 import lightgbm as lgb
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
@@ -164,6 +165,18 @@ def lgb_model(max_bin=None, goss=False, **kw):
         cat_smooth=10.0, cat_l2=10.0, min_data_per_group=P["mcs"], **kw)
 
 
+def cb_model(max_bin=None, **kw):
+    """CatBoost with zarbor's matched settings. border_count is borders, so
+    bins = borders + 1, and zarbor's 256 counts its missing bin: 254 borders."""
+    p = dict(iterations=P["n_rounds"], learning_rate=P["lr"], depth=P["depth"],
+             l2_leaf_reg=3.0, border_count=(max_bin or P["max_bin"]) - 2,
+             feature_border_type="GreedyLogSum", leaf_estimation_method="Newton",
+             leaf_estimation_iterations=1, leaf_estimation_backtracking="No",
+             thread_count=THREADS, random_seed=0, verbose=0, allow_writing_files=False)
+    p.update(kw)
+    return cb.CatBoostClassifier(**p)
+
+
 def envelope(make, Xtr, ytr, Xva, yva):
     """Reference's own spread over max_bin {63,127,255}: the noise floor."""
     s = []
@@ -171,6 +184,19 @@ def envelope(make, Xtr, ytr, Xva, yva):
         m = make(max_bin=mb); m.fit(Xtr, ytr)
         s.append(roc_auc_score(yva, m.predict_proba(Xva)[:, 1]))
     return max(s) - min(s)
+
+
+class _CbFit:
+    """CatBoost needs cat_features at fit(); this keeps py_phases/envelope generic."""
+    def __init__(self, m, fit_kw):
+        self.m, self.kw = m, fit_kw
+
+    def fit(self, X, y):
+        self.m.fit(X, y, **self.kw)
+        return self
+
+    def predict_proba(self, X):
+        return self.m.predict_proba(X)
 
 
 # ---------------------------------------------------------------- main ----
@@ -242,7 +268,17 @@ def main():
         return np.hstack([d[_num].to_numpy(np.float64), _oh.transform(d[cats])])
 
     _sc = StandardScaler().fit(oh(dtr))
-    results = {}
+
+    # CatBoost takes categoricals as strings and builds its own pool inside fit().
+    def cb_tr():
+        return dtr.astype({c: str for c in cats})
+
+    def cb_va():
+        return dva.astype({c: str for c in cats})
+
+    # Merge into the last results so --only reruns one row without dropping the others.
+    out_path = ARENA / "results.json"
+    results = json.loads(out_path.read_text()) if out_path.exists() else {}
 
     def record(key, z, r, refname, kind, env=None):
         za, ra = roc_auc_score(yva, z["pred"]), roc_auc_score(yva, r["pred"])
@@ -323,6 +359,44 @@ def main():
                                                  max_iter=300, tol=1e-7),
                       ytr, a.repeats)
         record("E linear", z, r, "sklearn-logreg", "family")
+
+    # CatBoost: the zarbor side matches its plain, file-order, CTR settings exactly (F, H);
+    # G runs both with CatBoost's defaults, which are random, so it compares distributions.
+    zc = [f"--n_rounds={P['n_rounds']}", f"--learning_rate={P['lr']}",
+          f"--max_depth={P['depth']}", "--grow_policy=symmetric", "--lambda=3",
+          "--base_score=0", "--bin_policy=logsum", "--min_data_in_bin=1",
+          f"--max_bin={P['max_bin']}", "--cat_split=ctr"]
+    cbf = dict(cat_features=cats)
+    if not only or "F" in only:
+        print("F  symmetric GBDT, target statistics  (parity, vs catboost)", flush=True)
+        z = zarbor(zc + ["--has_time=true", "--max_ctr_complexity=1"], "F", a.repeats)
+        mk = lambda max_bin=None: cb_model(max_bin, boosting_type="Plain", bootstrap_type="No",
+                                           random_strength=0, has_time=True, one_hot_max_size=2,
+                                           max_ctr_complexity=1)
+        r = py_phases(cb_tr, cb_va, lambda: _CbFit(mk(), cbf), ytr, a.repeats)
+        env = None if a.skip_envelope else envelope(
+            lambda max_bin: _CbFit(mk(max_bin), cbf), cb_tr(), ytr, cb_va(), yva)
+        record("F catboost-plain", z, r, "catboost", "parity", env)
+
+    if not only or "G" in only:
+        print("G  CatBoost defaults: MVS, noise, combinations, permutations", flush=True)
+        z = zarbor(zc + ["--bootstrap_type=mvs", "--subsample=0.8", "--random_strength=1"], "G", a.repeats)
+        mk = lambda max_bin=None: cb_model(max_bin, boosting_type="Plain", one_hot_max_size=2)
+        r = py_phases(cb_tr, cb_va, lambda: _CbFit(mk(), cbf), ytr, a.repeats)
+        env = None if a.skip_envelope else envelope(
+            lambda max_bin: _CbFit(mk(max_bin), cbf), cb_tr(), ytr, cb_va(), yva)
+        record("G catboost-defaults", z, r, "catboost", "parity", env)
+
+    if not only or "H" in only:
+        print("H  ordered boosting  (parity, vs catboost)", flush=True)
+        z = zarbor(zc + ["--has_time=true", "--max_ctr_complexity=1", "--boosting_type=ordered"], "H", a.repeats)
+        mk = lambda max_bin=None: cb_model(max_bin, boosting_type="Ordered", bootstrap_type="No",
+                                           random_strength=0, has_time=True, one_hot_max_size=2,
+                                           max_ctr_complexity=1)
+        r = py_phases(cb_tr, cb_va, lambda: _CbFit(mk(), cbf), ytr, a.repeats)
+        env = None if a.skip_envelope else envelope(
+            lambda max_bin: _CbFit(mk(max_bin), cbf), cb_tr(), ytr, cb_va(), yva)
+        record("H catboost-ordered", z, r, "catboost-ordered", "parity", env)
 
     results["_parser"] = dict(zarbor_ms=zarbor_read, pandas_ms=pandas_read,
                               ratio=pandas_read / zarbor_read)
