@@ -29,6 +29,10 @@ without changing anything else:
 
 Folds are stratified on the label for a classification objective, so
 each fold holds the same class balance as the whole file.
+
+--early_stopping_rounds=N stops each fold's boosting on a tenth of its own
+training rows (grouped and stratified like the folds), never on the rows
+it is scored on, and reports the rounds kept.
 --- stderr
 error: UnknownFlag
 --- files

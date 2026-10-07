@@ -149,7 +149,33 @@ pub const Outcome = struct {
     sd: f64,
     fit_ms: i64,
     folds_run: u32,
+    /// Mean over folds of the rounds (trees, epochs) each fold's model kept: under early
+    /// stopping, the round count a final `train` should use.
+    steps: f64 = 0,
+    /// Whether the folds stopped early on a nested slice.
+    stopped_early: bool = false,
 };
+
+/// Parts of the inner assignment; part 0 is the early-stopping slice, a tenth of each fold's
+/// training rows.
+pub const early_stop_parts: u32 = 10;
+
+/// Every row's inner part, dealt like the folds themselves (by group when `groups` is given,
+/// stratified for logistic), so a group never straddles the slice and the scored fold.
+/// Caller frees.
+pub fn assignEarlyStop(
+    gpa: std.mem.Allocator,
+    labels: []const f32,
+    groups: ?[]const f32,
+    seed: u64,
+    stratify: bool,
+) ![]u32 {
+    const s = seed ^ 0x5EED_E5_0001;
+    return if (groups) |g|
+        assignGroupFolds(gpa, g, early_stop_parts, s)
+    else
+        assignFolds(gpa, labels, early_stop_parts, s, stratify);
+}
 
 pub const Opts = struct {
     /// Evaluate only the first N folds (0 = all): a cheap search fidelity, a
@@ -161,6 +187,10 @@ pub const Opts = struct {
     oof: ?[]f32 = null,
     /// One line per fold while it runs.
     progress: ?*std.Io.Writer = null,
+    /// The rows' groups, when folds are grouped: the early-stopping slice is then grouped too.
+    groups: ?[]const f32 = null,
+    /// Seed of the early-stopping slice; vary it with the fold seed.
+    early_stop_seed: u64 = 0,
 };
 
 /// Higher AUC, lower RMSE is better. All config ranking goes through here so
@@ -189,6 +219,18 @@ pub fn crossValidate(
 
     const perm = try gpa.alloc(u32, full.n_rows);
     defer gpa.free(perm);
+
+    // Early stopping is nested: each fold stops on a slice of its own training rows, never on
+    // the rows it is scored on, which would let the score pick its own stopping point.
+    const stop_early = cfg.algo == .gbdt and cfg.gbdt.early_stopping_rounds != 0;
+    const es_of: ?[]u32 = if (stop_early)
+        try assignEarlyStop(gpa, full.labels, opts.groups, opts.early_stop_seed, cfg.objective() == .logistic)
+    else
+        null;
+    defer if (es_of) |e| gpa.free(e);
+    const fit_rows = try gpa.alloc(u32, if (stop_early) full.n_rows else 0);
+    defer gpa.free(fit_rows);
+    var steps_sum: f64 = 0;
     const per_fold = try gpa.alloc(f64, run_folds);
     defer gpa.free(per_fold);
 
@@ -213,16 +255,37 @@ pub fn crossValidate(
         std.mem.reverse(u32, perm[head..]);
         if (head == 0) return error.FoldLeftNoTrainingRows;
 
-        var train_ds = try data.subset(gpa, full, perm[0..head]);
+        // Under early stopping the training rows split, in order, into fitting rows and the
+        // slice (inner part 0) that picks the round.
+        var n_fit: usize = head;
+        if (es_of) |e| {
+            n_fit = 0;
+            for (perm[0..head]) |row| if (e[row] != 0) {
+                fit_rows[n_fit] = row;
+                n_fit += 1;
+            };
+            var at = n_fit;
+            for (perm[0..head]) |row| if (e[row] == 0) {
+                fit_rows[at] = row;
+                at += 1;
+            };
+            if (n_fit == 0 or n_fit == head) return error.EarlyStopSliceEmpty;
+        }
+        const train_rows = if (es_of != null) fit_rows[0..n_fit] else perm[0..head];
+
+        var train_ds = try data.subset(gpa, full, train_rows);
         defer train_ds.deinit();
         var valid_ds = try data.subset(gpa, full, perm[head..]);
         defer valid_ds.deinit();
+        var stop_ds: ?data.Dataset = if (es_of != null) try data.subset(gpa, full, fit_rows[n_fit..head]) else null;
+        defer if (stop_ds) |*d| d.deinit();
 
         const scores = try gpa.alloc(f32, valid_ds.n_rows);
         defer gpa.free(scores);
 
-        var res = try Fitted.train(gpa, pool, &train_ds, null, cfg, opts.progress);
+        var res = try Fitted.train(gpa, pool, &train_ds, if (stop_ds) |*d| d else null, cfg, opts.progress);
         defer res.model.deinit();
+        steps_sum += @floatFromInt(res.steps);
         res.model.predict(pool, &valid_ds, scores);
 
         if (opts.oof) |o| for (perm[head..], scores) |row, s| {
@@ -235,11 +298,13 @@ pub fn crossValidate(
             .squared_error => metric.rmse(scores, valid_ds.labels),
         };
         if (opts.progress) |w| {
-            try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}\n", .{
-                k,               head,
+            try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}", .{
+                k,               n_fit,
                 valid_ds.n_rows, if (cfg.objective() == .logistic) "auc" else "rmse",
                 per_fold[k],
             });
+            if (stop_early) try w.print("   stopped at {d} rounds on {d} rows", .{ res.steps, head - n_fit });
+            try w.writeAll("\n");
             try w.flush();
         }
     }
@@ -270,5 +335,13 @@ pub fn crossValidate(
         .squared_error => metric.rmse(ps, ys),
     };
 
-    return .{ .pooled = pooled, .mean = mean, .sd = sd, .fit_ms = fit_ms, .folds_run = run_folds };
+    return .{
+        .pooled = pooled,
+        .mean = mean,
+        .sd = sd,
+        .fit_ms = fit_ms,
+        .folds_run = run_folds,
+        .steps = steps_sum / @as(f64, @floatFromInt(run_folds)),
+        .stopped_early = stop_early,
+    };
 }

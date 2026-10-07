@@ -45,6 +45,10 @@ const usage =
     \\Folds are stratified on the label for a classification objective, so
     \\each fold holds the same class balance as the whole file.
     \\
+    \\--early_stopping_rounds=N stops each fold's boosting on a tenth of its own
+    \\training rows (grouped and stratified like the folds), never on the rows
+    \\it is scored on, and reports the rounds kept.
+    \\
 ;
 
 pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) !void {
@@ -233,6 +237,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             .oof = oof,
             // Per-fold progress on every repeat is `n_folds` x N lines nobody reads.
             .progress = if (quiet or repeats > 1) null else out,
+            .groups = groups,
+            .early_stop_seed = seed,
         });
         try pooled_buf.append(gpa, r.pooled);
         total_fit_ms += r.fit_ms;
@@ -242,6 +248,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             try out.print("oof     {d:.6}   mean {d:.6}   sd {d:.6}   {d} ms\n", .{
                 r.pooled, r.mean, r.sd, r.fit_ms,
             });
+            if (r.stopped_early) try out.print(
+                "rounds  {d:.0} per fold, stopped early on a nested slice; train with --n_rounds={d:.0}\n",
+                .{ r.steps, r.steps },
+            );
         } else if (!quiet) {
             try out.print("seed {d: <4} oof {d:.6}   folds mean {d:.6} sd {d:.6}\n", .{
                 seed, r.pooled, r.mean, r.sd,

@@ -32,6 +32,11 @@ usage: zarbor tune <train.csv> --label=<column> [options]
   --eta=N             bandit's cull factor per rung (default 3)
   --min-folds=N       bandit's cheapest rung (default 2)
 
+gbdt searches do not vary n_rounds: each fold stops early (patience 50,
+cap 5000) on a tenth of its own training rows, and the winner's rounds
+are reported for train. Pin --n_rounds or --early_stopping_rounds to
+change that.
+
 Any Config flag pins a value for the whole search:
   zarbor tune t.csv --label=y --algo=linear --search=bayes --trials=80
 --- stderr

@@ -121,8 +121,8 @@ seed and purpose, not by thread.
 
 `optimal` is regularised with `cat_smooth` (10), `max_cat_threshold` (32) and
 `min_data_per_group` (100), as in LightGBM. It is not the default: in a pre-registered test
-it helped one dataset of three (archive: `RESULTS.md`). If categoricals matter in your data,
-try it. `tune` does not search it by default; add `--param=cat_split=ordinal,optimal`.
+it helped one dataset of three (archive: `RESULTS.md`). `tune` searches it whenever the data
+has a categorical column.
 
 ## 6. Binning
 
@@ -222,8 +222,10 @@ not generalisation: on a two-month panel of ZIP codes, row-wise CV reported RMSE
 grouped CV 14.17. The group column is dropped as a feature. `--oof=FILE` writes the
 out-of-fold predictions.
 
-Limitation: `cv` and `tune` ignore `--early_stopping_rounds`. It applies only to `train`, which
-has a validation set.
+**Early stopping is nested.** With `--early_stopping_rounds=N`, each fold sets aside a tenth of
+its own training rows (stratified, and grouped when `--group-col` is given) and stops on those.
+It never stops on the rows it is scored on, which would let the score pick its own stopping
+point. `cv` reports the mean rounds kept: use that as `--n_rounds` for the final `train`.
 
 ## 11. Hyperparameter search
 
@@ -240,12 +242,16 @@ The space is declared with `--param`, any config field: `--param=max_depth=4,5,6
 `--param=lambda=0.1..50:log`, `--param=n_rounds=200..800:int`. Without `--param`, each
 algorithm has a default space:
 
-- **gbdt:** `n_rounds` {200, 300, 500, 800}, `learning_rate` 0.02..0.2 (log), `max_depth` 3..8,
-  `lambda` 0.1..50 (log), `min_child_weight` 0.1..100 (log), `subsample` and
-  `colsample_bytree` 0.5..1, `max_bin` 8..1024 (log), `min_data_in_bin` 1..300 (log).
+- **gbdt:** `learning_rate` 0.02..0.2 (log), `max_depth` 3..8, `lambda` 0.1..300 (log),
+  `min_child_weight` 0.01..300 (log), `subsample` 0.5..1, `colsample_bytree` 0.1..1,
+  `max_bin` 8..1024 (log), `min_data_in_bin` 1..300 (log), and `cat_split` {ordinal,
+  optimal} when the data has a categorical column. `n_rounds` is not searched: each fold
+  stops early (patience 50, cap 5000, nested as in `cv`), every trial line shows the rounds
+  it kept, and the winner's rounds are printed for `train`. Pinning `--n_rounds` or
+  `--early_stopping_rounds` turns this off.
 - **random_forest:** `n_rounds` {100, 200, 300}, `max_leaves` 128..2048, `min_child_samples`
   {1, 5, 20}, `colsample_bynode` 0.2..1, and the same two binning ranges.
-- **linear:** `lambda` 0.01..1000 (log), `alpha` {0, 0.1, 1, 10, 100}, `lin_epochs`
+- **linear:** `lambda` 0.0001..1000 (log), `alpha` {0, 0.1, 1, 10, 100}, `lin_epochs`
   {100, 300, 600}, `lin_standardize`.
 
 Rules that keep a search honest:

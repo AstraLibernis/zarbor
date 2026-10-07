@@ -5,12 +5,11 @@ data     titanic3.csv
 rows     1309   feats 8   (label "survived")
 algo     gbdt
 search   bandit
-space    10 params
+space    9 params
 folds    4  (seed 1)
 threads  4
 prep # ms  (read + bin, paid once for the whole search)
 
-  n_rounds             choice  [200, 300, 500, 800]
   learning_rate        log_uniform  0.02 .. 0.2
   max_depth            choice  [3, 4, 5, 6, 7, 8]
   lambda               log_uniform  0.1 .. 300
@@ -23,13 +22,11 @@ prep # ms  (read + bin, paid once for the whole search)
 
 rung 0  6 configs at 2 folds
 rung 1  1 configs at 4 folds
-   1  0.863514  4f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=41.240157 min_child_weight=0.064240 subsample=0.900378 colsample_bytree=0.656302 max_bin=834 min_data_in_bin=2 cat_split=ordinal  <- best
+   1  0.849582  4f #ms    31r  learning_rate=0.080741 max_depth=6 lambda=0.414180 min_child_weight=0.027155 subsample=0.531093 colsample_bytree=0.855820 max_bin=316 min_data_in_bin=16 cat_split=ordinal  <- best
 
-best     0.863514   1 trials   (7 re-bins)
-  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=41.240157 min_child_weight=0.064240 subsample=0.900378 colsample_bytree=0.656302 max_bin=834 min_data_in_bin=2 cat_split=ordinal
-edge     n_rounds=800 is at the high end of its range; widen it and search again
-edge     max_depth=3 is at the low end of its range; widen it and search again
-edge     max_bin=834 is at the high end of its range; widen it and search again
-verified 0.863514   (winner re-ran identically)
+best     0.849582   1 trials   (6 re-bins)
+  learning_rate=0.080741 max_depth=6 lambda=0.414180 min_child_weight=0.027155 subsample=0.531093 colsample_bytree=0.855820 max_bin=316 min_data_in_bin=16 cat_split=ordinal
+rounds   31 per fold, stopped early on a nested slice (cap 5000); train with --n_rounds=31
+verified 0.849582   (winner re-ran identically)
 --- stderr
 --- files

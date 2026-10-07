@@ -56,6 +56,11 @@ const usage =
     \\  --eta=N             bandit's cull factor per rung (default 3)
     \\  --min-folds=N       bandit's cheapest rung (default 2)
     \\
+    \\gbdt searches do not vary n_rounds: each fold stops early (patience 50,
+    \\cap 5000) on a tenth of its own training rows, and the winner's rounds
+    \\are reported for train. Pin --n_rounds or --early_stopping_rounds to
+    \\change that.
+    \\
     \\Any Config flag pins a value for the whole search:
     \\  zarbor tune t.csv --label=y --algo=linear --search=bayes --trials=80
     \\
@@ -177,8 +182,19 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // gbdt stops each fold early instead of searching n_rounds, unless either is pinned.
+    const auto_stop = cfg.algo == .gbdt and specs.items.len == 0 and
+        !tune.isPinned(explicit.items, "n_rounds") and !tune.isPinned(explicit.items, "early_stopping_rounds");
+    if (auto_stop) {
+        cfg.set("n_rounds", tune.auto_round_cap);
+        cfg.set("early_stopping_rounds", tune.auto_stop_rounds);
+    }
+    var hidden: std.ArrayList([]const u8) = .empty;
+    defer hidden.deinit(gpa);
+    try hidden.appendSlice(gpa, explicit.items);
+    if (auto_stop) try hidden.append(gpa, "n_rounds");
     var space = if (specs.items.len == 0)
-        try tune.withoutPinned(arena, try defaultSpace(arena, cfg.algo), explicit.items)
+        try tune.withoutPinned(arena, try defaultSpace(arena, cfg.algo), hidden.items)
     else blk: {
         const ps = try arena.alloc(Param, specs.items.len);
         for (ps, specs.items) |*p, s| p.* = try parseParam(arena, s);
@@ -269,6 +285,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         .fold_of = fold_of,
         .n_folds = n_folds,
         .oof = oof,
+        .groups = if (group_idx) |gi| frame.values[gi] else null,
+        .early_stop_seed = fold_seed,
     };
 
     try out.print(
@@ -334,6 +352,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 .folds = o.folds_run,
                 .ms = o.fit_ms,
                 .text = text,
+                .steps = o.steps,
             });
             const i = list.items.len - 1;
             var mark: []const u8 = "";
@@ -341,11 +360,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 best_i.* = i;
                 mark = "  <- best";
             }
-            try w.print("{d:>4}  {d:.6}  {d}f {d:>6}ms  {s}{s}\n", .{
+            try w.print("{d:>4}  {d:.6}  {d}f {d:>6}ms  ", .{
                 i + 1,       o.pooled,
                 o.folds_run, @as(u64, @intCast(@max(o.fit_ms, 0))),
-                text,        mark,
             });
+            // Rounds kept under early stopping: how long each trial really trained.
+            if (o.stopped_early) try w.print("{d:>4.0}r  ", .{o.steps});
+            try w.print("{s}{s}\n", .{ text, mark });
             try w.flush();
         }
     }.go;
@@ -480,6 +501,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     try out.print("\nbest     {d:.6}   {d} trials", .{ win.score, results.items.len });
     if (binner.rebins != 0) try out.print("   ({d} re-bins)", .{binner.rebins});
     try out.print("\n  {s}\n", .{win.text});
+    if (cfg.algo == .gbdt and cfg.gbdt.early_stopping_rounds != 0) try out.print(
+        "rounds   {d:.0} per fold, stopped early on a nested slice (cap {d}); train with --n_rounds={d:.0}\n",
+        .{ win.steps, cfg.gbdt.n_rounds, win.steps },
+    );
     for (space, win.x) |p, wx| if (p.atEdge(wx)) |side| {
         var buf: [64]u8 = undefined;
         try out.print("edge     {s}={s} is at the {s} end of its range; widen it and search again\n", .{
@@ -531,6 +556,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 defer gpa.free(folds2);
                 var ev2 = ev;
                 ev2.fold_of = folds2;
+                ev2.early_stop_seed = fs;
                 if (try ev2.run(t.x, 0)) |o| {
                     try out.print("  {d:11.6}", .{o.pooled});
                     sum += o.pooled;

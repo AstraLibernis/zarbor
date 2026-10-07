@@ -1566,3 +1566,39 @@ test "GOSS warm-up rounds train on every row: the same trees as no sampling" {
     // Sampling from round 1 grows different trees, or the test proves nothing.
     try testing.expect(!same_cold);
 }
+
+test "cv's early stopping never looks at the rows it scores" {
+    const gpa = testing.allocator;
+    const cv = @import("../cv.zig");
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try manyNumeric(gpa, pool, 3_000, 4);
+    defer ds.deinit();
+    const labels = try gpa.alloc(f32, ds.n_rows);
+    for (labels, 0..) |*l, i| l.* = @floatFromInt(@intFromBool(((i * 7) % 1000) + ((i *% 2654435761) >> 20) % 400 > 650));
+    ds.labels = labels;
+    const fold_of = try cv.assignFolds(gpa, ds.labels, 5, 3, true);
+    defer gpa.free(fold_of);
+    const oof = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(oof);
+
+    var cfg = config.Config.from(.{ .n_rounds = 2000, .early_stopping_rounds = 20, .learning_rate = 0.3, .verbose_eval = 0 });
+    const a = try cv.crossValidate(gpa, testing.io, pool, &ds, cfg, fold_of, 5, .{ .oof = oof, .use_folds = 1 });
+    try testing.expect(a.stopped_early);
+    try testing.expect(a.steps < 2000);
+
+    // Invert the scored fold's labels. Its model trains and stops on the other folds only, so
+    // the round count cannot move; stopping on the scored rows would move it.
+    for (ds.labels, fold_of) |*y, f| if (f == 0) {
+        y.* = 1 - y.*;
+    };
+    const b = try cv.crossValidate(gpa, testing.io, pool, &ds, cfg, fold_of, 5, .{ .oof = oof, .use_folds = 1 });
+    try testing.expectEqual(a.steps, b.steps);
+
+    // Without early stopping every fold trains to the cap.
+    cfg.set("early_stopping_rounds", 0);
+    cfg.set("n_rounds", 30);
+    const c = try cv.crossValidate(gpa, testing.io, pool, &ds, cfg, fold_of, 5, .{ .oof = oof, .use_folds = 1 });
+    try testing.expect(!c.stopped_early);
+    try testing.expectEqual(@as(f64, 30), c.steps);
+}

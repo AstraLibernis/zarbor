@@ -200,9 +200,6 @@ The most expensive cases: 1M x 20 continuous columns at 65535 bins takes 274 s a
   reference implementation diverges earlier, at tree 103, so the cause may be in neither.
 - On EEG data, hold-out error at 4096 bins varies more than 5x between binning policies;
   unexplained.
-- `cv` and `tune` ignore early stopping.
-- `tune`'s default space does not include `cat_split`, which was the setting that mattered
-  on House Prices.
 - No speed comparison against CatBoost yet.
 - The parity harness uses competition data and lives outside the repo; porting it to
   synthetic data so it can ship in `bench/` is open.

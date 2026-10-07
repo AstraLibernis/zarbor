@@ -238,6 +238,12 @@ pub fn withoutPinned(gpa: std.mem.Allocator, space: []const Param, pinned: []con
     return kept.toOwnedSlice(gpa);
 }
 
+/// Whether the command line set `name`.
+pub fn isPinned(pinned: []const []const u8, name: []const u8) bool {
+    for (pinned) |p| if (std.mem.eql(u8, p, name)) return true;
+    return false;
+}
+
 /// The first `--param` axis that a flag also pins, if any: one of the two would be ignored.
 pub fn pinnedAndSearched(space: []const Param, pinned: []const []const u8) ?[]const u8 {
     for (space) |p| for (pinned) |name| if (std.mem.eql(u8, p.name, name)) return name;
@@ -253,7 +259,14 @@ pub const Trial = struct {
     ms: i64,
     /// Rendered `name=value` pairs, for printing and for the CSV.
     text: []const u8,
+    /// Mean rounds kept per fold (`cv.Outcome.steps`).
+    steps: f64 = 0,
 };
+
+/// gbdt searches stop each fold early on a nested slice rather than search `n_rounds`, unless
+/// the command line pins either: a cap, not a choice.
+pub const auto_stop_rounds: u32 = 50;
+pub const auto_round_cap: u32 = 5000;
 
 /// Holds the binned matrix; rebuilds it when a trial's binning differs.
 /// Binning happens before trials, so a binning knob varied unnoticed reports a
@@ -306,6 +319,9 @@ pub const Evaluator = struct {
     fold_of: []const u32,
     n_folds: u32,
     oof: []f32,
+    /// Row groups when folds are grouped, so the early-stopping slice is grouped too.
+    groups: ?[]const f32 = null,
+    early_stop_seed: u64 = 0,
 
     fn apply(e: Evaluator, x: []const f64) !config.Config {
         var cfg = e.base;
@@ -345,6 +361,8 @@ pub const Evaluator = struct {
         return cv.crossValidate(e.gpa, e.io, e.pool, ds, cfg, e.fold_of, e.n_folds, .{
             .use_folds = use_folds,
             .oof = e.oof,
+            .groups = e.groups,
+            .early_stop_seed = e.early_stop_seed,
         }) catch |err| switch (err) {
             error.FoldLeftNoTrainingRows => return null,
             else => return err,

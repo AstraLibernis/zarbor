@@ -5,12 +5,11 @@ data     titanic3.csv
 rows     1309   feats 8   (label "survived")
 algo     gbdt
 search   bayes
-space    10 params
+space    9 params
 folds    2  (seed 1)
 threads  4
 prep # ms  (read + bin, paid once for the whole search)
 
-  n_rounds             choice  [200, 300, 500, 800]
   learning_rate        log_uniform  0.02 .. 0.2
   max_depth            choice  [3, 4, 5, 6, 7, 8]
   lambda               log_uniform  0.1 .. 300
@@ -21,20 +20,22 @@ prep # ms  (read + bin, paid once for the whole search)
   min_data_in_bin      int_log  1 .. 300
   cat_split            choice  [ordinal, optimal]
 
-   1  0.844810  2f #ms  n_rounds=800 learning_rate=0.074386 max_depth=3 lambda=41.240157 min_child_weight=0.064240 subsample=0.900378 colsample_bytree=0.656302 max_bin=834 min_data_in_bin=2 cat_split=ordinal  <- best
-   2  0.824892  2f #ms  n_rounds=800 learning_rate=0.062528 max_depth=3 lambda=1.108268 min_child_weight=0.027666 subsample=0.587321 colsample_bytree=0.557810 max_bin=27 min_data_in_bin=79 cat_split=optimal
-   3  0.831121  2f #ms  n_rounds=300 learning_rate=0.195715 max_depth=3 lambda=2.259718 min_child_weight=0.077679 subsample=0.980418 colsample_bytree=0.267124 max_bin=347 min_data_in_bin=65 cat_split=optimal
-   4  0.679430  2f #ms  n_rounds=500 learning_rate=0.103023 max_depth=6 lambda=159.968597 min_child_weight=48.579915 subsample=0.658636 colsample_bytree=0.177166 max_bin=314 min_data_in_bin=217 cat_split=optimal
-   5  0.845889  2f #ms  n_rounds=300 learning_rate=0.184076 max_depth=3 lambda=8.391793 min_child_weight=0.028528 subsample=0.998279 colsample_bytree=0.927129 max_bin=825 min_data_in_bin=1 cat_split=ordinal  <- best
-   6  0.843930  2f #ms  n_rounds=200 learning_rate=0.188836 max_depth=5 lambda=75.208783 min_child_weight=0.013619 subsample=0.993398 colsample_bytree=0.996910 max_bin=1011 min_data_in_bin=1 cat_split=ordinal
+   1  0.819740  2f #ms    38r  learning_rate=0.096102 max_depth=7 lambda=0.183958 min_child_weight=23.306193 subsample=0.590214 colsample_bytree=0.820680 max_bin=161 min_data_in_bin=236 cat_split=ordinal  <- best
+   2  0.772659  2f #ms    31r  learning_rate=0.027192 max_depth=8 lambda=5.264314 min_child_weight=0.029526 subsample=0.650217 colsample_bytree=0.188842 max_bin=19 min_data_in_bin=18 cat_split=ordinal
+   3  0.499691  2f #ms     1r  learning_rate=0.116665 max_depth=6 lambda=1.221733 min_child_weight=272.274214 subsample=0.570849 colsample_bytree=0.450476 max_bin=21 min_data_in_bin=240 cat_split=ordinal
+   4  0.823786  2f #ms    57r  learning_rate=0.119602 max_depth=6 lambda=36.992860 min_child_weight=4.596413 subsample=0.855952 colsample_bytree=0.973055 max_bin=700 min_data_in_bin=110 cat_split=ordinal  <- best
+   5  0.832187  2f #ms   110r  learning_rate=0.194700 max_depth=7 lambda=221.334401 min_child_weight=8.140591 subsample=0.989595 colsample_bytree=0.977003 max_bin=826 min_data_in_bin=242 cat_split=ordinal  <- best
+   6  0.831100  2f #ms    92r  learning_rate=0.199926 max_depth=4 lambda=149.659684 min_child_weight=1.733179 subsample=0.979057 colsample_bytree=0.996680 max_bin=991 min_data_in_bin=268 cat_split=optimal
 
-best     0.845889   6 trials   (6 re-bins)
-  n_rounds=300 learning_rate=0.184076 max_depth=3 lambda=8.391793 min_child_weight=0.028528 subsample=0.998279 colsample_bytree=0.927129 max_bin=825 min_data_in_bin=1 cat_split=ordinal
-edge     learning_rate=0.184076 is at the high end of its range; widen it and search again
-edge     max_depth=3 is at the low end of its range; widen it and search again
-edge     subsample=0.998279 is at the high end of its range; widen it and search again
-edge     max_bin=825 is at the high end of its range; widen it and search again
-edge     min_data_in_bin=1 is at the low end of its range; widen it and search again
-verified 0.845889   (winner re-ran identically)
+best     0.832187   6 trials   (6 re-bins)
+  learning_rate=0.194700 max_depth=7 lambda=221.334401 min_child_weight=8.140591 subsample=0.989595 colsample_bytree=0.977003 max_bin=826 min_data_in_bin=242 cat_split=ordinal
+rounds   110 per fold, stopped early on a nested slice (cap 5000); train with --n_rounds=110
+edge     learning_rate=0.194700 is at the high end of its range; widen it and search again
+edge     lambda=221.334401 is at the high end of its range; widen it and search again
+edge     subsample=0.989595 is at the high end of its range; widen it and search again
+edge     colsample_bytree=0.977003 is at the high end of its range; widen it and search again
+edge     max_bin=826 is at the high end of its range; widen it and search again
+edge     min_data_in_bin=242 is at the high end of its range; widen it and search again
+verified 0.832187   (winner re-ran identically)
 --- stderr
 --- files
