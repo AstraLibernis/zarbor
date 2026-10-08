@@ -1,0 +1,8 @@
+$ zarbor cv titanic3.csv --label=survived --drop=no_such_column --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 1
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+error: --drop=no_such_column: no column has that name. --drop takes one column; repeat it for more (--drop=a --drop=b).
+--- stderr
+error: DropColumnNotFound
+--- files

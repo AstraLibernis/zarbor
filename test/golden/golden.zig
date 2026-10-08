@@ -70,6 +70,8 @@ const cases = [_]Case{
     .{ .name = "error-unknown-flag", .args = &.{ data_file, "--label=survived", "--no_such_flag=1" } },
     .{ .name = "error-flag-no-value", .args = &.{ data_file, "--label" } },
     .{ .name = "error-cv-unknown-flag", .args = &.{ "cv", data_file, "--label=survived", "--nope=2" } },
+    .{ .name = "error-drop-comma-list", .args = &.{ data_file, "--label=survived", "--drop=name,ticket" } },
+    .{ .name = "error-cv-drop-unknown", .args = &.{ "cv", data_file, "--label=survived", "--drop=no_such_column" } },
     .{ .name = "error-tune-no-input", .train_flags = false, .args = &.{"tune"} },
     .{ .name = "error-predict-no-model", .train_flags = false, .args = &.{ "predict", data_file } },
     .{ .name = "error-info-no-model", .train_flags = false, .args = &.{ "info", "g.zm" } },

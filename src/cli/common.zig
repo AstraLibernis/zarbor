@@ -50,3 +50,13 @@ pub fn explainLabel(out: *std.Io.Writer, err: anyerror, target: []const u8) !voi
     try out.flush();
     std.process.exit(1);
 }
+
+/// Refuse a `--drop` name that matches no column. Ignoring it silently trains on a column the
+/// user meant to remove, and the usual cause is a comma list where the flag takes one name.
+pub fn checkDrops(out: *std.Io.Writer, frame: *const zarbor.data.Frame, drops: []const []const u8) !void {
+    for (drops) |d| if (frame.columnIndex(d) == null) {
+        try out.print("error: --drop={s}: no column has that name. --drop takes one column; repeat it for more (--drop=a --drop=b).\n", .{d});
+        try out.flush();
+        return error.DropColumnNotFound;
+    };
+}

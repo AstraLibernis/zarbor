@@ -128,6 +128,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     }
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+    try common.checkDrops(out, &frame, drops.items);
 
     // An explicit split column assigns rows to train/validation by value
     // instead of by a random draw. It exists so an external tool can hand this

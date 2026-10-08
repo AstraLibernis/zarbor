@@ -4,6 +4,7 @@
 //! `zarbor cv`: k-fold cross-validation from the command line (see zarbor.cv).
 
 const std = @import("std");
+const common = @import("common.zig");
 const builtin = @import("builtin");
 const zarbor = @import("zarbor");
 const args = @import("args.zig");
@@ -159,6 +160,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     }
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+    try common.checkDrops(out, &frame, drops.items);
 
     // The grouping column is a label on the rows, never a feature: leaving a
     // ZIP or subject id in the matrix invites the model to memorise it.

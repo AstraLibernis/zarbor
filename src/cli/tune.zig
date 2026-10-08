@@ -4,6 +4,7 @@
 //! `zarbor tune`: hyperparameter search from the command line (see zarbor.tune).
 
 const std = @import("std");
+const common = @import("common.zig");
 const builtin = @import("builtin");
 const zarbor = @import("zarbor");
 const args = @import("args.zig");
@@ -228,6 +229,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer frame.deinit();
     try data.checkShape(&frame, out);
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+    try common.checkDrops(out, &frame, drops.items);
     // A weight column is read with the label and is never a feature.
     var weight_idx: ?usize = null;
     if (weight_col) |name| {
