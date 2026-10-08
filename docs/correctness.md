@@ -120,9 +120,12 @@ comes from the sampling.
 | CatBoost split noise, strength 1 | 0.951015 | 0.950967 | −0.88 |
 | CatBoost defaults (MVS + noise) | 0.950966 | 0.950941 | −0.48 |
 | CatBoost permutations, CTRs | 0.945326 | 0.945267 | −0.56 |
-| CatBoost permutations, ordered | 0.944993 | 0.945087 | 0.55 |
+| CatBoost permutations, ordered | 0.944993 | 0.945024 | 0.19 |
 | CatBoost defaults with combinations | 0.945536 | 0.945493 | −0.38 |
 | **CatBoost Bernoulli 0.5** | 0.950820 | 0.950959 | **+4.25** |
+
+The ordered row was 0.945087 (0.55) before a48ebd7: ordered scoring now subtracts histograms,
+so its sums round differently; every other row reproduced to the digit.
 
 The Bernoulli outlier: Bernoulli costs CatBoost about twice the AUC it costs zarbor. Single
 trees agree, and the cause is not found. zarbor's result is the better of the two.
@@ -157,14 +160,24 @@ binning, target statistics on the six categoricals:
 
 | setting | zarbor AUC | CatBoost AUC | gap / envelope | zarbor model ms | CatBoost ms | speed |
 |---|---:|---:|---:|---:|---:|---:|
-| plain, file order, no sampling (F) | 0.940756 | 0.940803 | 0.09 | 3,013 | 2,200 | **1.37x slower** |
-| ordered boosting (H) | 0.940786 | 0.940730 | 0.09 | 10,519 | 5,998 | **1.75x slower** |
-| CatBoost's defaults: MVS, noise, combinations, permutations (G) | 0.940505 | 0.940643 | 0.25 | 59,328 | 6,110 | **9.7x slower** |
+| plain, file order, no sampling (F) | 0.940756 | 0.940803 | 0.09 | 1,755 | 2,204 | 1.26x faster |
+| ordered boosting (H) | 0.940786 | 0.940730 | 0.09 | 5,113 | 5,939 | 1.16x faster |
+| CatBoost's defaults: MVS, noise, combinations, permutations (G) | 0.940505 | 0.940643 | 0.25 | 10,324 | 6,105 | **1.69x slower** |
 
-Accuracy agrees in every row. Speed does not: CatBoost is the one reference zarbor does not
-beat, and with its defaults (three permutation folds, each keeping its own statistics and
-scores, plus categorical combinations) zarbor is an order of magnitude slower. Where the time
-goes has not been profiled yet.
+**[MEASURED] 2026-10-08** at a48ebd7 (CatBoost rows only). Accuracy agrees in every row, and
+zarbor's AUCs are the same to the last digit as before the speed work (3,013 / 10,519 / 59,328
+ms at 352d45f). What changed, found with `--profile=1`'s `sym_*` phases:
+
+- Histograms were rebuilt from every row at every level. Below the root zarbor now counts only
+  the rows on the smaller side of the newest split and takes the other side as the parent minus
+  them, as CatBoost does (`SetSmallestSideControl` / `FixUpStats`); under ordered boosting each
+  prefix keeps its own body and tail histograms for this (capped by `--ordered_bank_limit`).
+- Combination statistics (CatBoost's defaults) were built one per thread with two hash lookups
+  per row: 48 of the 59 s. They are now built in parallel row chunks from integer counts.
+- Prefix derivatives, fold updates and leaf assignment ran serially over every row.
+
+With its defaults zarbor is still slower; the remainder is the combinations (about 45% of
+fit) and their histograms, which are new at each level and so cannot be subtracted.
 
 How to read it:
 
@@ -225,6 +238,6 @@ The most expensive cases: 1M x 20 continuous columns at 65535 bins takes 274 s a
   reference implementation diverges earlier, at tree 103, so the cause may be in neither.
 - On EEG data, hold-out error at 4096 bins varies more than 5x between binning policies;
   unexplained.
-- zarbor's CatBoost-style training is 1.4-9.7x slower than CatBoost (section 3); not profiled.
+- zarbor is 1.7x slower than CatBoost under CatBoost's defaults (section 3): the combinations.
 - `bench/parity/parity.py` covers the exact cases; the statistical (sampling) comparisons
   still live outside the repo.

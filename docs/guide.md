@@ -324,7 +324,8 @@ logsum, uniform, auto].
 `--mvs_reg` [CatBoost's rule], `--random_strength` [0], `--one_hot_max_size` [2],
 `--model_size_reg` [0.5], `--max_ctr_complexity` [4], `--has_time` [false],
 `--permutation_count` [4], `--permutation_block` [0 = CatBoost's rule], `--boosting_type`
-[plain].
+[plain], `--ordered_bank_limit` [1 GiB of per-prefix histograms kept between levels; above it
+ordered boosting recounts every row, same trees, slower].
 
 **Linear:** `--lin_solver` [lbfgs], `--lin_epochs` [300], `--lin_lr` [0.05], `--lin_tol`
 [1e-7], `--lin_standardize` [true].

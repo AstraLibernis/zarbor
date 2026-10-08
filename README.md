@@ -34,7 +34,8 @@ any thread count.
 
 Given the same data and settings, zarbor grows the same trees as XGBoost, LightGBM and
 CatBoost, to the 6-decimal print precision. On a 535k-row benchmark (2026-10-07) its model
-work is faster than XGBoost, LightGBM and scikit-learn, and slower than CatBoost:
+work is faster than XGBoost, LightGBM and scikit-learn, and than CatBoost except under
+CatBoost's default settings (2026-10-08 for the CatBoost rows):
 
 | | reference | AUC gap | speed |
 |---|---|---:|---:|
@@ -43,8 +44,9 @@ work is faster than XGBoost, LightGBM and scikit-learn, and slower than CatBoost
 | random forest | scikit-learn | zarbor ahead by 0.0033 | 2.0x faster |
 | logistic regression | scikit-learn | 0.000013 | 3.8-6.6x faster |
 | linear regression | scikit-learn | 0.0001% of RMSE | 1.7x faster |
-| symmetric trees | CatBoost | 0.000047 | 1.4x slower |
-| CatBoost's default settings | CatBoost | 0.000138 | 9.7x slower |
+| symmetric trees | CatBoost | 0.000047 | 1.26x faster |
+| ordered boosting | CatBoost | 0.000055 | 1.16x faster |
+| CatBoost's default settings | CatBoost | 0.000138 | 1.7x slower |
 | CSV parsing | pandas | | 4.7x faster |
 
 ![zarbor against the standard implementation of each model: model time and accuracy gap](bench/arena/fig_light.png)
