@@ -55,7 +55,14 @@ regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows,
 columns so the binned design holds the raw values, standardisation off on both sides): the
 penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`
 100), and to 1.8e-8 with L1 (`alpha` 50, against SAGA); probabilities within 1.1e-4 (L2) and
-3.6e-4 (L1), the f32 flat-direction differences the binary model shows too.
+3.6e-4 (L1), the f32 flat-direction differences the binary model shows too. Regression
+losses (2026-10-08): LightGBM `regression_l1` (30 trees, leaves re-fitted to the median
+residual, max difference 8.8e-7) and `quantile` at alpha 0.8 (25 trees, 1.4e-6); XGBoost
+`reg:pseudohubererror` with slope 0.7 (100 trees, 1.1e-6) and `count:poisson` (100 trees,
+1.4e-6). The quantile case stops at 25 trees because LightGBM skips one split there: at tree
+29 an 11-row split of gain 1.09 is pruned by a shortcut in its leaf-wise search that zarbor does
+not copy. Poisson matches only with XGBoost's tree `max_delta_step` of 0.7, which its learner
+sets for this objective alone.
 The tables below come from the original harness on competition data.
 
 **Method.** Compare predictions row for row on data where binning cannot differ: 100,000

@@ -237,11 +237,11 @@ fn evaluate(
     if (weights.len != 0) return switch (obj) {
         .logistic => try metric.aucW(gpa, pred, labels, weights),
         .squared_error => metric.rmseW(pred, labels, weights),
-        .softmax => unreachable, // Refused by `Config.validate`.
+        else => unreachable, // Refused by `Config.validate`.
     };
     return switch (obj) {
         .logistic => try metric.auc(gpa, pred, labels),
         .squared_error => metric.rmse(pred, labels),
-        .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
+        else => unreachable, // Refused by `Config.validate`: boosting only for now.
     };
 }

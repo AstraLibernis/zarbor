@@ -202,6 +202,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
                 metric.mloglossProb(preds, ds.labels, width),
                 metric.accuracy(preds, ds.labels, width),
             }),
+            else => {
+                const b = &bundles.items[0];
+                try out.print("score   {s}={d:.6}  rmse={d:.6}\n", .{
+                    @tagName(b.objective), lossMetric(b.objective, preds, ds.labels, b.quantile_alpha, b.huber_slope), metric.rmse(preds, ds.labels),
+                });
+            },
         }
     }
 
@@ -221,6 +227,18 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
 }
 
 /// Writes `id,prediction` when an id column is named, else one column.
+/// A regression loss's own holdout metric, from natural-scale predictions: MAE, pinball loss,
+/// mean pseudo-Huber error, or Poisson negative log-likelihood.
+fn lossMetric(obj: zarbor.objective.Objective, pred: []const f32, labels: []const f32, alpha: f32, slope: f32) f64 {
+    return switch (obj) {
+        .absolute_error => metric.mae(pred, labels, &.{}),
+        .quantile => metric.pinball(pred, labels, &.{}, alpha),
+        .pseudo_huber => metric.mphe(pred, labels, &.{}, slope),
+        .poisson => metric.poissonNloglik(pred, labels, &.{}),
+        else => unreachable,
+    };
+}
+
 fn writePredictions(
     gpa: std.mem.Allocator,
     io: std.Io,

@@ -141,7 +141,7 @@ pub const Config = struct {
 
     /// Whether the target is classes, which folds are stratified on.
     pub fn classifies(c: Config) bool {
-        return c.objective() != .squared_error;
+        return c.objective().classifies();
     }
 
     /// The metric a holdout is scored by: AUC, RMSE or multiclass log loss.
@@ -150,6 +150,10 @@ pub const Config = struct {
             .logistic => "auc",
             .squared_error => "rmse",
             .softmax => "mlogloss",
+            .absolute_error => "mae",
+            .quantile => "pinball",
+            .pseudo_huber => "mphe",
+            .poisson => "poisson-nloglik",
         };
     }
 
@@ -189,6 +193,7 @@ pub const Config = struct {
                     "multinomial logistic regression (L2 / ridge)"
                 else
                     "multinomial logistic regression (unpenalised)",
+                else => "linear model (objective not available)",
             },
         };
     }
@@ -206,7 +211,7 @@ pub const Config = struct {
         const p_f: f32 = @floatFromInt(n_features);
         const want: f32 = switch (c.random_forest.objective) {
             .logistic, .softmax => @sqrt(p_f),
-            .squared_error => p_f / 3.0,
+            else => p_f / 3.0,
         };
         c.random_forest.tree.colsample_bynode = std.math.clamp(want / p_f, 1.0 / p_f, 1.0);
     }
@@ -215,6 +220,10 @@ pub const Config = struct {
     pub fn validate(c: Config) !void {
         try c.bin.validate();
         if (c.class_weight != .none and !c.classifies()) return error.ClassWeightNeedsClasses;
+        switch (c.objective()) {
+            .absolute_error, .quantile, .pseudo_huber, .poisson => if (c.algo != .gbdt) return error.ObjectiveNeedsGbdt,
+            else => {},
+        }
         // Not yet for the forest (docs/PLAN.md milestone 1, stage 1c).
         if (c.algo == .random_forest and c.objective() == .softmax) return error.SoftmaxForestUnsupported;
         switch (c.algo) {

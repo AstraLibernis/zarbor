@@ -13,6 +13,7 @@ test {
     _ = @import("test/explain_test.zig");
     _ = @import("test/cv_test.zig");
     _ = @import("test/linear_test.zig");
+    _ = @import("test/losses_test.zig");
     _ = @import("test/metric_test.zig");
     _ = @import("test/model_test.zig");
     _ = @import("test/multiclass_test.zig");

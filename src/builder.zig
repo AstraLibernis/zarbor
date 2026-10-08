@@ -491,7 +491,7 @@ pub const Builder = struct {
             .lin_ofs = lin_ofs,
         };
         b.stats.items[w.node] = .{ .hess = @floatCast(w.total.h), .count = @floatCast(w.total.n) };
-        try b.leaves.append(b.gpa, .{ .start = w.start, .end = w.end, .weight = weight });
+        try b.leaves.append(b.gpa, .{ .start = w.start, .end = w.end, .weight = weight, .node = w.node });
         b.giveSlot(w.slot);
     }
 
@@ -996,6 +996,12 @@ pub const Builder = struct {
             }
         }
         return b.queue.orderedRemove(best);
+    }
+
+    /// Replace the leaves' values (same spans, new weights), as an objective that renews leaf
+    /// values after the tree is grown does.
+    pub fn setLeafSpans(b: *Builder, spans: []const LeafSpan) void {
+        @memcpy(b.leaves.items, spans);
     }
 
     pub fn leafSpans(b: *const Builder) []const LeafSpan {

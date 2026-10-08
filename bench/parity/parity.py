@@ -391,6 +391,42 @@ def cat_baseline():
     report("catboost baseline, 50 trees", z, ref)
 
 
+# ---- regression losses ----------------------------------------------------------------------
+# Counts for Poisson, from the same ratings.
+YCNT = np.random.default_rng(8).poisson(np.exp(0.25 * X.r0 - 0.2 * X.r3 + 0.15 * X.r7 - 0.5))
+pd.concat([X, pd.Series(YCNT, name="ycnt")], axis=1).to_csv(WORK / "cnt.csv", index=False)
+
+
+def lgb_reg(objective, rounds, **kw):
+    p = dict(objective=objective, max_bin=255, num_threads=16, seed=0, verbose=-1, max_depth=-1, num_leaves=31,
+             min_data_in_leaf=0, min_sum_hessian_in_leaf=1.0, lambda_l2=1.0, learning_rate=0.1, **kw)
+    return lgb.train(p, lgb.Dataset(X, yreg), rounds).predict(X)
+
+
+@case
+def lgb_l1_quantile():
+    z = zarbor("reg.csv", "yreg", LZ + ["--objective=absolute_error", "--n_rounds=30", "--learning_rate=0.1"])
+    report("lgb regression_l1 (median leaves), 30 trees", z, lgb_reg("regression_l1", 30))
+    # Quantile gradients take two values, so LightGBM's descendant pruning (above) bites sooner:
+    # at tree 29 here it skips an 11-row split of gain 1.09 that zarbor takes. Stop before it.
+    z = zarbor("reg.csv", "yreg", LZ + ["--objective=quantile", "--quantile_alpha=0.8", "--n_rounds=25",
+                                       "--learning_rate=0.1"])
+    report("lgb quantile 0.8, 25 trees", z, lgb_reg("quantile", 25, alpha=0.8))
+
+
+@case
+def xgb_huber_poisson():
+    z = zarbor("reg.csv", "yreg", XZ + ["--objective=pseudo_huber", "--huber_slope=0.7", "--n_rounds=100",
+                                       "--max_depth=6", "--learning_rate=0.1"])
+    p = dict(objective="reg:pseudohubererror", huber_slope=0.7, tree_method="hist", max_bin=256, nthread=16, seed=0,
+             base_score=float(np.mean(yreg)), eta=0.1, max_depth=6)
+    report("xgb pseudo-Huber 0.7, 100 trees", z, xgb.train(p, xgb.DMatrix(X, yreg), 100).predict(xgb.DMatrix(X)))
+    z = zarbor("cnt.csv", "ycnt", XZ + ["--objective=poisson", "--n_rounds=100", "--max_depth=6", "--learning_rate=0.1"])
+    p = dict(objective="count:poisson", tree_method="hist", max_bin=256, nthread=16, seed=0,
+             base_score=float(np.mean(YCNT)), eta=0.1, max_depth=6)
+    report("xgb count:poisson, 100 trees", z, xgb.train(p, xgb.DMatrix(X, YCNT), 100).predict(xgb.DMatrix(X)))
+
+
 # ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------
 def zarbor_shap(csv, label, flags, cover):
     """Train like `zarbor`, then `zarbor explain --shap`: one column per feature, then the bias."""

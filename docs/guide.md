@@ -28,7 +28,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 
 | Setting | Kind | When to touch it |
 |---|---|---|
-| `--label`, `--objective` | task | always: `logistic` for a yes/no target, `softmax` for three or more classes, `squared_error` for a number |
+| `--label`, `--objective` | task | always: `logistic` for a yes/no target, `softmax` for three or more classes, `squared_error` for a number; see section 3 for the other losses |
 | `--pos-label` | task | when the sorted class order guesses wrong ("abnormal" < "normal") |
 | `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
 | `--weight-col` | task | rows of unequal importance: survey or exposure weights, recent data, deduplicated rows |
@@ -126,6 +126,25 @@ by sorted class order, as in scikit-learn's `LabelEncoder`, so `No < Yes` makes 
 positive class; `--pos-label` overrides. Refused with a reason: more than two classes under
 logistic, a single class, missing target values, and numeric values outside [0, 1] under
 logistic. `--scale_pos_weight` weights the positives.
+
+**Other regression losses** (gbdt with depthwise or lossguide trees):
+
+| `--objective` | predicts | use it when | from |
+|---|---|---|---|
+| `squared_error` | the mean | the default for a number | |
+| `absolute_error` | the median | outliers you do not want chasing the fit; scored by MAE | LightGBM `regression_l1` |
+| `quantile` | the `--quantile_alpha` percentile [0.5] | a prediction interval: train at 0.1 and 0.9 | LightGBM `quantile` |
+| `pseudo_huber` | between mean and median | some outliers, but a smooth loss; `--huber_slope` [1] is the residual size where it turns from squared to absolute, in label units | XGBoost `reg:pseudohubererror` |
+| `poisson` | a mean count or rate (always > 0) | counts: claims, visits, defects; labels must be >= 0 | XGBoost `count:poisson` |
+
+`absolute_error` and `quantile` re-fit each leaf to the median (or percentile) of its rows'
+residuals after the tree is grown, as LightGBM does; without that, their gradients carry no
+size and the fit is poor. The starting score is the label median (percentile). `poisson`
+works on the log scale: `predict` returns `exp(raw)`, and the tree leaves are capped at 0.7 per
+round (XGBoost's `max_delta_step` for this loss; `--max_delta_step` overrides). Each loss is
+reported and early-stopped on its own metric: MAE, pinball loss, mean pseudo-Huber error,
+Poisson negative log-likelihood. Not built yet: these losses with symmetric trees, linear
+leaves, the forest or the linear model (refused with a reason).
 
 **Sample weights** (`--weight-col=NAME`, in `train`, `cv` and `tune`): a numeric column of
 per-row weights, at least 0, none missing; it is never a feature. A row's weight multiplies its
@@ -425,7 +444,8 @@ Defaults in brackets. `random_forest` and `linear` override some of them (sectio
 **Binning:** `--max_bin` [256], `--min_data_in_bin` [3], `--bin_policy` [quantile; greedy,
 logsum, uniform, auto].
 
-**Boosting:** `--algo` [gbdt], `--objective` [logistic; squared_error, softmax],
+**Boosting:** `--algo` [gbdt], `--objective` [logistic; squared_error, absolute_error, quantile, pseudo_huber, poisson,
+softmax], `--quantile_alpha` [0.5], `--huber_slope` [1],
 `--softmax_hessian` [xgboost], `--n_rounds` [500],
 `--learning_rate` [0.1], `--base_score` [label mean], `--scale_pos_weight` [1],
 `--early_stopping_rounds` [0 = off], `--verbose_eval` [10], `--seed` [0].

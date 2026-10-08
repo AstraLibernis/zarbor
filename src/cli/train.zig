@@ -349,8 +349,22 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     if (valid_ds) |*v| {
         const scores = try gpa.alloc(f32, v.n_rows * cfg.width());
         defer gpa.free(scores);
-        const scale = res.model.predictForReport(pool, v, scores);
-        try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width(), v.weights);
+        switch (cfg.objective()) {
+            .absolute_error, .quantile, .pseudo_huber, .poisson => {
+                // The loss's own metric on natural-scale predictions, as cv scores it.
+                res.model.predict(pool, v, scores);
+                try out.print("valid   {s}={d:.6}  rmse={d:.6}{s}\n", .{
+                    cfg.metricName(),
+                    try zarbor.cv.holdoutScore(gpa, cfg, scores, v.labels, v.weights),
+                    if (v.weights.len != 0) metric.rmseW(scores, v.labels, v.weights) else metric.rmse(scores, v.labels),
+                    if (v.weights.len != 0) "  (weighted)" else "",
+                });
+            },
+            else => {
+                const scale = res.model.predictForReport(pool, v, scores);
+                try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width(), v.weights);
+            },
+        }
     }
     try prof.report(out);
     try out.flush();
@@ -415,6 +429,7 @@ fn report(
                 },
                 metric.accuracyW(pred, labels, width, weights),
             }),
+            else => unreachable, // the regression losses report at the call site
         }
         return;
     }
@@ -437,6 +452,7 @@ fn report(
             };
             try out.print("valid   mlogloss={d:.6}  accuracy={d:.6}\n", .{ ll, metric.accuracy(pred, labels, width) });
         },
+        else => unreachable, // the regression losses report at the call site
     }
 }
 

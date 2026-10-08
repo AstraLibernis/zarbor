@@ -193,6 +193,11 @@ pub const LabelEncoder = struct {
             for (labels) |y| if (!(y >= 0 and y < k and y == @trunc(y))) return error.LabelOutOfRange;
             return;
         }
+        if (obj == .poisson) {
+            // Counts and rates: a negative label has no Poisson likelihood.
+            for (labels) |y| if (!(y >= 0)) return error.LabelOutOfRange;
+            return;
+        }
         if (obj != .logistic) return;
         // Written so NaN fails too.
         for (labels) |y| if (!(y >= 0 and y <= 1)) return error.LabelOutOfRange;

@@ -75,6 +75,7 @@ const EvalCtx = struct {
                         r *= rw;
                     },
                     .softmax => unreachable, // `multinomial`
+                    else => unreachable, // Refused by `Config.validate`: boosting only for now.
                 }
                 self.resid[i] = @floatCast(r);
                 rs += r;

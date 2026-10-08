@@ -55,6 +55,13 @@ pub const Params = struct {
     scale_pos_weight: f32 = 1.0,
     /// Classes under `objective = softmax`; set from the label's classes, not by hand.
     num_class: u32 = 0,
+    /// `quantile`: the percentile predicted, in (0, 1).
+    quantile_alpha: f32 = 0.5,
+    /// `pseudo_huber`: the residual size where squared error turns into absolute error.
+    huber_slope: f32 = 1.0,
+    /// `poisson`: added to the raw score in the hessian (`exp(raw + this)`), XGBoost's
+    /// `max_delta_step` for `count:poisson`, which damps the first steps on counts.
+    poisson_max_delta_step: f32 = 0.7,
     /// Softmax hessian: XGBoost's `2 p (1 - p)` or LightGBM's `K / (K - 1) p (1 - p)`. The two
     /// agree at two classes; above, they give different trees, so parity with either needs its own.
     softmax_hessian: SoftmaxHessian = .xgboost,
@@ -79,6 +86,17 @@ pub const Params = struct {
 
     pub fn validate(p: Params) !void {
         if (p.n_rounds == 0) return error.NoRounds;
+        if (!(p.quantile_alpha > 0 and p.quantile_alpha < 1)) return error.BadQuantileAlpha;
+        if (!(p.huber_slope > 0)) return error.BadHuberSlope;
+        switch (p.objective) {
+            .absolute_error, .quantile, .pseudo_huber, .poisson => {
+                // CatBoost estimates these leaves its own way; not built yet (PLAN 4).
+                if (p.tree.grow_policy == .symmetric) return error.ObjectiveSymmetricUnsupported;
+                if (p.tree.linear_leaves) return error.ObjectiveLinearLeavesUnsupported;
+                if (p.scale_pos_weight != 1) return error.ScalePosWeightNeedsBinary;
+            },
+            else => {},
+        }
         if (p.objective == .softmax) {
             if (p.num_class < 2) return error.SoftmaxNeedsClasses;
             // Not yet with softmax (docs/PLAN.md milestone 1): each needs its own multiclass rule.
@@ -115,6 +133,9 @@ pub const Model = struct {
     /// `i % num_class`. Otherwise 1 and empty.
     num_class: u32 = 1,
     class_base: []f32 = &.{},
+    /// The loss's own parameters, which scoring a holdout needs (`quantile`, `pseudo_huber`).
+    quantile_alpha: f32 = 0.5,
+    huber_slope: f32 = 1.0,
 
     pub fn deinit(m: *Model) void {
         for (m.trees.items) |*t| t.deinit(m.gpa);
@@ -137,7 +158,7 @@ pub const Model = struct {
     /// Natural-scale predictions: probabilities for logistic and softmax, raw for regression. The
     /// link runs in the workers, as `model.zig` does it, not in a serial pass after them.
     pub fn predict(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
-        m.predictScaled(pool, ds, out, m.objective != .squared_error);
+        m.predictScaled(pool, ds, out, m.objective.hasLink());
     }
 
     fn predictScaled(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32, prob: bool) void {
@@ -177,8 +198,14 @@ const PredictCtx = struct {
         for (m.trees.items) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
-        if (self.prob) for (out) |*v| {
-            v.* = sigmoid(v.*);
+        if (self.prob) switch (m.objective) {
+            .logistic => for (out) |*v| {
+                v.* = sigmoid(v.*);
+            },
+            .poisson => for (out) |*v| {
+                v.* = @exp(v.*);
+            },
+            else => {},
         };
     }
 };
@@ -247,6 +274,9 @@ const GradCtx = struct {
     objective: Objective,
     /// Per-row weights multiplying each gradient and hessian; empty for none.
     weights: []const f32 = &.{},
+    quantile_alpha: f32 = 0.5,
+    huber_slope: f32 = 1.0,
+    poisson_max_delta_step: f32 = 0.7,
     /// Softmax: classes, and the hessian form. `grads` is then class-major, `grads[c * n + r]`.
     num_class: usize = 1,
     softmax_hessian: SoftmaxHessian = .xgboost,
@@ -298,6 +328,29 @@ const GradCtx = struct {
                 },
                 .squared_error => {
                     self.grads[i] = .{ .g = self.raw[i] - y, .h = 1.0 };
+                },
+                // LightGBM's `regression_l1`: the sign of the residual (0 on a tie), hessian 1.
+                .absolute_error => {
+                    const d = @as(f64, self.raw[i]) - y;
+                    self.grads[i] = .{ .g = @floatFromInt(@as(i32, @intFromBool(d > 0)) - @intFromBool(d < 0)), .h = 1.0 };
+                },
+                // LightGBM's `quantile`: 1 - alpha at or above the label, -alpha below.
+                .quantile => {
+                    const d: f32 = @floatCast(@as(f64, self.raw[i]) - y);
+                    const a = self.quantile_alpha;
+                    self.grads[i] = .{ .g = if (d >= 0) 1.0 - a else -a, .h = 1.0 };
+                },
+                // XGBoost's `reg:pseudohubererror`, in its f32 arithmetic.
+                .pseudo_huber => {
+                    const z = self.raw[i] - y;
+                    const s2 = self.huber_slope * self.huber_slope;
+                    const scale_sqrt = @sqrt(1 + z * z / s2);
+                    self.grads[i] = .{ .g = z / scale_sqrt, .h = s2 / ((s2 + z * z) * scale_sqrt) };
+                },
+                // XGBoost's `count:poisson`.
+                .poisson => {
+                    const p = self.raw[i];
+                    self.grads[i] = .{ .g = @exp(p) - y, .h = @exp(p + self.poisson_max_delta_step) };
                 },
                 .softmax => unreachable,
             }
@@ -463,16 +516,31 @@ fn higherIsBetter(obj: Objective) bool {
 
 fn evaluate(
     gpa: std.mem.Allocator,
-    obj: Objective,
+    cfg: Params,
     raw: []const f32,
     labels: []const f32,
     num_class: usize,
     weights: []const f32,
 ) !f64 {
+    const obj = cfg.objective;
+    switch (obj) {
+        // The regression losses' own metrics, on the natural scale (raw is natural but Poisson's).
+        .absolute_error => return metric.mae(raw, labels, weights),
+        .quantile => return metric.pinball(raw, labels, weights, cfg.quantile_alpha),
+        .pseudo_huber => return metric.mphe(raw, labels, weights, cfg.huber_slope),
+        .poisson => {
+            const mu = try gpa.alloc(f32, raw.len);
+            defer gpa.free(mu);
+            for (mu, raw) |*m, r| m.* = @exp(r);
+            return metric.poissonNloglik(mu, labels, weights);
+        },
+        else => {},
+    }
     if (weights.len != 0) return switch (obj) {
         .logistic => try metric.aucW(gpa, raw, labels, weights),
         .squared_error => metric.rmseW(raw, labels, weights),
         .softmax => metric.mloglossW(raw, labels, num_class, weights),
+        else => unreachable,
     };
     return switch (obj) {
         .logistic => blk: {
@@ -481,6 +549,7 @@ fn evaluate(
         },
         .squared_error => metric.rmse(raw, labels),
         .softmax => metric.mlogloss(raw, labels, num_class),
+        else => unreachable,
     };
 }
 
@@ -517,6 +586,81 @@ fn fillBase(raw: []f32, m: *const Model, init: []const f32) void {
     for (0..raw.len / k) |r| @memcpy(raw[r * k ..][0..k], m.class_base);
 }
 
+/// LightGBM's percentile of `values` at `alpha` (`regression_objective.hpp`): unweighted, the
+/// interpolation between the order statistics around `(n - 1)(1 - alpha)` counted from the top
+/// (`PercentileFun`); weighted, along the cumulative weights (`WeightedPercentileFun`).
+/// Reorders `values`.
+pub fn percentile(gpa: std.mem.Allocator, values: []f64, weights: []const f32, alpha: f64) !f64 {
+    const n = values.len;
+    if (n <= 1) return values[0];
+    if (weights.len == 0) {
+        std.sort.pdq(f64, values, {}, std.sort.desc(f64));
+        const float_pos = @as(f64, @floatFromInt(n - 1)) * (1.0 - alpha);
+        const pos: usize = @as(usize, @intFromFloat(float_pos)) + 1;
+        if (pos >= n) return values[n - 1];
+        const bias = float_pos - @as(f64, @floatFromInt(pos - 1));
+        const v1 = values[pos - 1];
+        const v2 = values[pos];
+        return v1 - (v1 - v2) * bias;
+    }
+    // Weighted: a stable ascending sort through indices, then the cumulative weights.
+    const idx = try gpa.alloc(u32, n);
+    defer gpa.free(idx);
+    for (idx, 0..) |*v, i| v.* = @intCast(i);
+    std.sort.block(u32, idx, values, struct {
+        fn lt(v: []const f64, a: u32, b: u32) bool {
+            return v[a] < v[b];
+        }
+    }.lt);
+    const cdf = try gpa.alloc(f64, n);
+    defer gpa.free(cdf);
+    cdf[0] = weights[idx[0]];
+    for (1..n) |i| cdf[i] = cdf[i - 1] + weights[idx[i]];
+    const threshold = cdf[n - 1] * alpha;
+    var pos: usize = n;
+    for (cdf, 0..) |c, i| if (c > threshold) {
+        pos = i;
+        break;
+    };
+    pos = @min(pos, n - 1);
+    if (pos == 0 or pos == n - 1) return values[idx[pos]];
+    const v1 = values[idx[pos - 1]];
+    const v2 = values[idx[pos]];
+    if (cdf[pos] - cdf[pos - 1] >= 1.0) return (threshold - cdf[pos - 1]) / (cdf[pos] - cdf[pos - 1]) * (v2 - v1) + v1;
+    return v1;
+}
+
+/// LightGBM's `RenewTreeOutput`: each leaf's value becomes the (weighted) median or
+/// alpha-percentile of its rows' residuals `label - score` before this tree, times the learning
+/// rate. `spans` are the builder's leaves over `rows`; both the tree's node and the span change.
+fn renewLeaves(
+    gpa: std.mem.Allocator,
+    t: *tree.Tree,
+    spans: []tree.LeafSpan,
+    rows: []const u32,
+    raw: []const f32,
+    ds: *const Dataset,
+    alpha: f64,
+    learning_rate: f32,
+) !void {
+    var buf: std.ArrayList(f64) = .empty;
+    defer buf.deinit(gpa);
+    var wbuf: std.ArrayList(f32) = .empty;
+    defer wbuf.deinit(gpa);
+    for (spans) |*s| {
+        if (s.end == s.start) continue;
+        buf.clearRetainingCapacity();
+        wbuf.clearRetainingCapacity();
+        for (rows[s.start..s.end]) |r| {
+            try buf.append(gpa, @as(f64, ds.labels[r]) - raw[r]);
+            if (ds.weights.len != 0) try wbuf.append(gpa, ds.weights[r]);
+        }
+        const v: f32 = @floatCast(try percentile(gpa, buf.items, wbuf.items, alpha) * learning_rate);
+        t.nodes[s.node].weight = v;
+        s.weight = v;
+    }
+}
+
 /// LightGBM's `iter < static_cast<int>(1.0f / learning_rate)`, in f32 as there: 10 rounds at
 /// 0.1, 3 at 0.3.
 pub fn gossWarmupRounds(learning_rate: f32) u32 {
@@ -541,6 +685,8 @@ pub fn train(
         .base_score = 0,
         .objective = cfg.objective,
         .n_features = ds.n_features,
+        .quantile_alpha = cfg.quantile_alpha,
+        .huber_slope = cfg.huber_slope,
     };
     errdefer model.deinit();
 
@@ -578,7 +724,17 @@ pub fn train(
                 const p = std.math.clamp(mean, 1e-6, 1 - 1e-6);
                 break :b @floatCast(@log(p / (1 - p)));
             },
-            .squared_error => @floatCast(mean),
+            .squared_error, .pseudo_huber => @floatCast(mean),
+            // LightGBM's `BoostFromScore`: the labels' (weighted) median or alpha-percentile.
+            .absolute_error, .quantile => b: {
+                const ys = try gpa.alloc(f64, ds.n_rows);
+                defer gpa.free(ys);
+                for (ys, ds.labels) |*o, y| o.* = y;
+                const a: f64 = if (cfg.objective == .quantile) cfg.quantile_alpha else 0.5;
+                break :b @floatCast(try percentile(gpa, ys, ds.weights, a));
+            },
+            // The log of the mean count (XGBoost's `ProbToMargin` for `count:poisson`).
+            .poisson => @floatCast(@log(@max(mean, 1e-16))),
             .softmax => unreachable,
         };
     };
@@ -647,7 +803,11 @@ pub fn train(
     }) else null;
     defer if (sym) |*s| s.deinit();
     prof.stop(.sym_init, t_init);
-    var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;
+    // XGBoost's `count:poisson` sets `max_delta_step` to 0.7 for the objective and the trees alike
+    // (learner.cc): unset, the trees clip leaves to the Poisson value too.
+    var tree_cfg = cfg.tree;
+    if (cfg.objective == .poisson and tree_cfg.max_delta_step == 0) tree_cfg.max_delta_step = cfg.poisson_max_delta_step;
+    var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, tree_cfg) else null;
     defer if (builder_opt) |*b| b.deinit();
 
     const better = higherIsBetter(cfg.objective);
@@ -667,6 +827,9 @@ pub fn train(
             .num_class = k,
             .softmax_hessian = cfg.softmax_hessian,
             .weights = ds.weights,
+            .quantile_alpha = cfg.quantile_alpha,
+            .huber_slope = cfg.huber_slope,
+            .poisson_max_delta_step = cfg.poisson_max_delta_step,
         };
         const t_g = prof.start();
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
@@ -694,6 +857,13 @@ pub fn train(
                 const builder = &builder_opt.?;
                 var t = try builder.growRows(grads, subset);
                 errdefer t.deinit(gpa);
+                if (cfg.objective.renewsLeaves()) {
+                    // Each leaf's value from its rows' residuals, before the tree is applied.
+                    const spans = span_buf[0..builder.leafSpans().len];
+                    @memcpy(spans, builder.leafSpans());
+                    try renewLeaves(gpa, &t, spans, builder.rows, raw, ds, if (cfg.objective == .quantile) cfg.quantile_alpha else 0.5, cfg.tree.learning_rate);
+                    builder.setLeafSpans(spans);
+                }
                 try model.trees.append(gpa, t);
 
                 // Spans cover only rows the tree saw (all rows only without sampling).
@@ -748,7 +918,7 @@ pub fn train(
             }
 
             const t_vm = prof.start();
-            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, k, v.weights);
+            const score = try evaluate(gpa, cfg, valid_raw, v.labels, k, v.weights);
             prof.stop(.valid_metric, t_vm);
             const improved = if (better) score > best_score else score < best_score;
             if (improved) {

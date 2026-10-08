@@ -268,6 +268,7 @@ pub const Linear = struct {
                 for (0..ds.n_rows) |r| booster.softmaxRow(out[r * k ..][0..k]);
             },
             .squared_error => {},
+            else => unreachable, // Refused by `Config.validate`: boosting only for now.
         }
     }
 
@@ -382,7 +383,7 @@ pub fn train(
                 break :blk @log(q / (1 - q));
             },
             .squared_error => mean,
-            .softmax => unreachable,
+            else => unreachable,
         };
     }
 
@@ -452,10 +453,12 @@ pub fn train(
             .logistic => try metric.aucW(gpa, pred, v.labels, v.weights),
             .squared_error => metric.rmseW(pred, v.labels, v.weights),
             .softmax => metric.mloglossProbW(pred, v.labels, k, v.weights),
+            else => unreachable,
         } else switch (cfg.objective) {
             .logistic => try metric.auc(gpa, pred, v.labels),
             .squared_error => metric.rmse(pred, v.labels),
             .softmax => metric.mloglossProb(pred, v.labels, k),
+            else => unreachable,
         };
         valid_ns = prof.now() - wall0;
     }

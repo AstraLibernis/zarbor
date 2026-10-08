@@ -2421,6 +2421,6 @@ fn derivatives(objective: Objective, raw: f64, y: f32, scale_pos_weight: f32) De
             break :blk .{ .g = w * (p - y), .h = w * @max(p * (1 - p), 1e-6) };
         },
         .squared_error => .{ .g = raw - y, .h = 1 },
-        .softmax => unreachable, // Refused by `booster.Params.validate` for symmetric trees.
+        else => unreachable, // Refused by `booster.Params.validate` for symmetric trees.
     };
 }

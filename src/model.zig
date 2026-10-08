@@ -39,7 +39,8 @@ pub const magic = "ZMDL";
 /// have one class.
 /// 7 added each node's training statistics (gain, hessian, rows) after each tree,
 /// for importance and SHAP. Older files load without them.
-pub const format_version: u32 = 7;
+/// 8 added the loss's parameters (quantile alpha, Huber slope) after the class scores.
+pub const format_version: u32 = 8;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -58,6 +59,8 @@ pub const Bundle = struct {
     /// Softmax: classes and each one's starting score (owned); tree `i` is class `i % num_class`.
     num_class: u32 = 1,
     class_base: []f32 = &.{},
+    quantile_alpha: f32 = 0.5,
+    huber_slope: f32 = 1.0,
     trees: []tree.Tree = &.{},
     lin: ?linear.Linear = null,
     /// Target column the model was trained on. Empty when unknown.
@@ -172,8 +175,14 @@ const TreeCtx = struct {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
         switch (b.kind) {
-            .gbdt => if (b.objective == .logistic and self.link) {
-                for (out) |*o| o.* = booster.sigmoid(o.*);
+            .gbdt => if (self.link) switch (b.objective) {
+                .logistic => for (out) |*o| {
+                    o.* = booster.sigmoid(o.*);
+                },
+                .poisson => for (out) |*o| {
+                    o.* = @exp(o.*);
+                },
+                else => {},
             },
             .forest => for (out) |*o| {
                 o.* *= inv;
@@ -574,6 +583,8 @@ pub fn serialise(gpa: std.mem.Allocator, b: *const Bundle) ![]u8 {
     try putF32(gpa, &buf, b.base_score);
     try putU32(gpa, &buf, b.num_class);
     for (b.class_base) |v| try putF32(gpa, &buf, v);
+    try putF32(gpa, &buf, b.quantile_alpha);
+    try putF32(gpa, &buf, b.huber_slope);
     try putBytes(gpa, &buf, b.label);
     try putU32(gpa, &buf, @intCast(b.classes.len));
     for (b.classes) |c| try putBytes(gpa, &buf, c);
@@ -628,6 +639,12 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
             for (class_base) |*v| v.* = try r.f32v();
         }
     } else if (obj == .softmax) return error.BadModelFile;
+    var quantile_alpha: f32 = 0.5;
+    var huber_slope: f32 = 1.0;
+    if (ver >= 8) {
+        quantile_alpha = try r.f32v();
+        huber_slope = try r.f32v();
+    }
 
     var label: []u8 = &.{};
     errdefer if (label.len != 0) gpa.free(label);
@@ -657,6 +674,8 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
         .base_score = base,
         .num_class = num_class,
         .class_base = class_base,
+        .quantile_alpha = quantile_alpha,
+        .huber_slope = huber_slope,
         .label = label,
         .classes = classes,
     };
@@ -791,6 +810,8 @@ pub fn fromBooster(gpa: std.mem.Allocator, m: *const booster.Model, schema: data
         .base_score = m.base_score,
         .num_class = m.num_class,
         .class_base = class_base,
+        .quantile_alpha = m.quantile_alpha,
+        .huber_slope = m.huber_slope,
         .trees = try dupeTrees(gpa, m.trees.items),
     };
 }

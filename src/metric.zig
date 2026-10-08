@@ -238,3 +238,54 @@ pub fn accuracyW(scores: []const f32, labels: []const f32, k: usize, weights: []
     }
     return hit / weightSum(weights);
 }
+
+// ------------------------------------------------------- regression losses
+
+/// Weight of row `r`: 1 when there are none.
+inline fn wOf(weights: []const f32, r: usize) f64 {
+    return if (weights.len != 0) weights[r] else 1;
+}
+
+fn total(weights: []const f32, n: usize) f64 {
+    return if (weights.len != 0) weightSum(weights) else @floatFromInt(n);
+}
+
+/// (Weighted) mean absolute error.
+pub fn mae(pred: []const f32, labels: []const f32, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (pred, labels, 0..) |p, y, r| acc += wOf(weights, r) * @abs(@as(f64, p) - y);
+    return acc / total(weights, labels.len);
+}
+
+/// (Weighted) mean pinball loss at `alpha`: `alpha * (y - p)` above the prediction,
+/// `(1 - alpha) * (p - y)` below. 0.5 is half the absolute error.
+pub fn pinball(pred: []const f32, labels: []const f32, weights: []const f32, alpha: f64) f64 {
+    var acc: f64 = 0;
+    for (pred, labels, 0..) |p, y, r| {
+        const d = @as(f64, y) - p;
+        acc += wOf(weights, r) * (if (d >= 0) alpha * d else (alpha - 1) * d);
+    }
+    return acc / total(weights, labels.len);
+}
+
+/// (Weighted) mean pseudo-Huber error with `slope`, XGBoost's `mphe`:
+/// `slope^2 (sqrt(1 + (r / slope)^2) - 1)`.
+pub fn mphe(pred: []const f32, labels: []const f32, weights: []const f32, slope: f64) f64 {
+    var acc: f64 = 0;
+    for (pred, labels, 0..) |p, y, r| {
+        const z = (@as(f64, p) - y) / slope;
+        acc += wOf(weights, r) * slope * slope * (@sqrt(1 + z * z) - 1);
+    }
+    return acc / total(weights, labels.len);
+}
+
+/// (Weighted) mean Poisson negative log-likelihood of predicted means `mu` (natural scale),
+/// XGBoost's `poisson-nloglik`: `mu - y log(mu) + lgamma(y + 1)`, with `mu` floored at 1e-16.
+pub fn poissonNloglik(mu: []const f32, labels: []const f32, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (mu, labels, 0..) |m, y, r| {
+        const p = @max(@as(f64, m), 1e-16);
+        acc += wOf(weights, r) * (p - @as(f64, y) * @log(p) + std.math.lgamma(f64, @as(f64, y) + 1));
+    }
+    return acc / total(weights, labels.len);
+}

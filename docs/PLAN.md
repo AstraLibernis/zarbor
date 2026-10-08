@@ -158,6 +158,13 @@ byte-identical models to no weight column; weight 0 is identical to dropping the
 
 ## 4. More losses, and the early-stopping metric
 
+**Progress.** Losses done 2026-10-08 (model format 8): `absolute_error` and `quantile` follow
+LightGBM rather than XGBoost (both re-fit leaves to a residual percentile; LightGBM's weighted
+percentile is the one with a written rule), `pseudo_huber` and `poisson` follow XGBoost; exact
+parity for all four. Flags as built: `--quantile_alpha`, `--huber_slope`. Each loss reports and
+early-stops on its own metric. Not yet: the linear model's huber and poisson, and these losses
+under symmetric trees (refused). Next: `--eval_metric`.
+
 **Goal.** Losses for the common regression cases, and early stopping on the metric the task
 is scored by.
 

@@ -385,4 +385,6 @@ pub const LeafSpan = struct {
     start: usize,
     end: usize,
     weight: f32,
+    /// The leaf's node in the tree being built.
+    node: u32 = 0,
 };
