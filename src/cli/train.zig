@@ -30,6 +30,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var split_seed: u64 = 1;
     var max_bytes: usize = 1 << 31;
     var split_col: ?[]const u8 = null;
+    var extra_path: ?[]const u8 = null;
+    var extra_weight: f32 = 1;
     var weight_col: ?[]const u8 = null;
     var init_col: ?[]const u8 = null;
     var init_model: ?[]const u8 = null;
@@ -76,6 +78,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             prof.enabled = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
         } else if (std.mem.eql(u8, key, "split-col")) {
             split_col = val;
+        } else if (std.mem.eql(u8, key, "extra-train")) {
+            extra_path = val;
+        } else if (std.mem.eql(u8, key, "extra-weight")) {
+            extra_weight = try std.fmt.parseFloat(f32, val);
         } else if (std.mem.eql(u8, key, "weight-col")) {
             weight_col = val;
         } else if (std.mem.eql(u8, key, "init-col")) {
@@ -129,6 +135,16 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
     try common.checkDrops(out, &frame, drops.items);
+    // `--extra-train`: rows appended after the file's own; they join the training side of the
+    // split and are never validated on.
+    var n_main = frame.n_rows;
+    if (extra_path) |ep| {
+        var may_lack: std.ArrayList([]const u8) = .empty;
+        defer may_lack.deinit(gpa);
+        try may_lack.appendSlice(gpa, drops.items);
+        if (split_col) |sc| try may_lack.append(gpa, sc);
+        n_main = try common.appendExtra(gpa, io, pool, out, &frame, ep, max_bytes, may_lack.items);
+    }
 
     // An explicit split column assigns rows to train/validation by value
     // instead of by a random draw. It exists so an external tool can hand this
@@ -180,9 +196,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         // Train rows first, validation rows after, so the same `subset` calls
         // below work unchanged. A value >= 0.5 means validation; below, or
         // NaN, means training.
-        const col = frame.values[sc];
+        const col = frame.values[sc][0..n_main];
         var head: usize = 0;
-        var tail: usize = frame.n_rows;
+        var tail: usize = n_main;
         for (col, 0..) |v, i| {
             if (v >= 0.5) {
                 tail -= 1;
@@ -193,17 +209,17 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             }
         }
         n_train = head;
-        n_valid = frame.n_rows - head;
+        n_valid = n_main - head;
         if (n_train == 0) return error.SplitColumnLeftNoTrainingRows;
     } else {
-        for (perm, 0..) |*p, i| p.* = @intCast(i);
-        n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(frame.n_rows)) * valid_frac));
-        n_train = frame.n_rows - n_valid;
+        for (perm[0..n_main], 0..) |*p, i| p.* = @intCast(i);
+        n_valid = @intFromFloat(@round(@as(f32, @floatFromInt(n_main)) * valid_frac));
+        n_train = n_main - n_valid;
         // With nothing to hold out, the shuffle and the sort back to file order cancel out.
         if (n_valid != 0) {
             var prng: std.Random.DefaultPrng = .init(split_seed);
             const r = prng.random();
-            var i: usize = frame.n_rows;
+            var i: usize = n_main;
             while (i > 1) {
                 i -= 1;
                 const j = r.uintLessThan(usize, i + 1);
@@ -214,7 +230,14 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         // is the time order that ordered target statistics read (`--cat_split=ctr`, CatBoost's
         // `has_time`), so a shuffled training set would change what each row may see.
         std.sort.pdq(u32, perm[0..n_train], {}, std.sort.asc(u32));
-        std.sort.pdq(u32, perm[n_train..], {}, std.sort.asc(u32));
+        std.sort.pdq(u32, perm[n_train..n_main], {}, std.sort.asc(u32));
+    }
+    // The extra rows go after the file's training rows, in their own order; validation moves up.
+    if (n_main < frame.n_rows) {
+        const n_extra = frame.n_rows - n_main;
+        @memmove(perm[n_train + n_extra ..], perm[n_train..n_main]);
+        for (perm[n_train..][0..n_extra], n_main..) |*p, i| p.* = @intCast(i);
+        n_train += n_extra;
     }
 
     // `--init-model`: keep boosting a saved model. Its schema bins this file, so old and new trees
@@ -261,6 +284,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         full.init = raw;
         try out.print("init    continuing {s}: {d} trees\n", .{ init_model.?, p.trees.len });
     }
+    if (extra_weight != 1 and extra_path == null) return error.ExtraWeightNeedsExtraTrain;
+    try full.weighRowsFrom(n_main, extra_weight);
     enc.validate(full.labels, cfg.objective()) catch |err| {
         try explainLabel(out, err, target);
         return err;

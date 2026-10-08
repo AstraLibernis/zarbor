@@ -294,6 +294,9 @@ pub fn better(m: metric.Metric, a: f64, b: f64) bool {
 
 /// Cross-validate one config over an already-binned dataset. Data and folds
 /// are inputs so a search binds them once and pays only for fitting.
+///
+/// `fold_of` may be shorter than the data: rows past its end (`--extra-train`) are in every
+/// fold's training rows, never scored, and never in the early-stopping slice.
 pub fn crossValidate(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -305,6 +308,8 @@ pub fn crossValidate(
     opts: Opts,
 ) !Outcome {
     try cfg.validate();
+    if (fold_of.len > full.n_rows) return error.FoldsLongerThanData;
+    const n_scored = fold_of.len;
     const run_folds = if (opts.use_folds == 0) n_folds else @min(opts.use_folds, n_folds);
     const cols = cfg.width();
 
@@ -315,7 +320,7 @@ pub fn crossValidate(
     // the rows it is scored on, which would let the score pick its own stopping point.
     const stop_early = cfg.algo == .gbdt and cfg.gbdt.early_stopping_rounds != 0;
     const es_of: ?[]u32 = if (stop_early)
-        try assignEarlyStop(gpa, full.labels, opts.groups, opts.early_stop_seed, cfg.classifies())
+        try assignEarlyStop(gpa, full.labels[0..n_scored], opts.groups, opts.early_stop_seed, cfg.classifies())
     else
         null;
     defer if (es_of) |e| gpa.free(e);
@@ -343,6 +348,10 @@ pub fn crossValidate(
                 head += 1;
             }
         }
+        for (n_scored..full.n_rows) |i| {
+            perm[head] = @intCast(i);
+            head += 1;
+        }
         std.mem.reverse(u32, perm[head..]);
         if (head == 0) return error.FoldLeftNoTrainingRows;
 
@@ -351,12 +360,12 @@ pub fn crossValidate(
         var n_fit: usize = head;
         if (es_of) |e| {
             n_fit = 0;
-            for (perm[0..head]) |row| if (e[row] != 0) {
+            for (perm[0..head]) |row| if (row >= n_scored or e[row] != 0) {
                 fit_rows[n_fit] = row;
                 n_fit += 1;
             };
             var at = n_fit;
-            for (perm[0..head]) |row| if (e[row] == 0) {
+            for (perm[0..head]) |row| if (row < n_scored and e[row] == 0) {
                 fit_rows[at] = row;
                 at += 1;
             };

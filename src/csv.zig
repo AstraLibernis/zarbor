@@ -362,6 +362,97 @@ pub fn checkShape(f: *const Frame, out: *std.Io.Writer) !void {
     return error.RaggedRows;
 }
 
+/// Append `extra`'s rows to `main`, matching columns by name: the result is what reading the two
+/// files concatenated would give (categorical ids keep `main`'s, and a level only `extra` has
+/// takes the next id, in `extra`'s order). Read `extra` with `main`'s kinds as hints so the two
+/// agree. A column of `main` that `extra` lacks is refused unless named in `may_lack` (it is
+/// then missing on the appended rows); a column only `extra` has is refused. On error `main` is
+/// unchanged.
+pub fn appendFrame(gpa: std.mem.Allocator, main: *Frame, extra: *const Frame, may_lack: []const []const u8) !void {
+    for (extra.names) |n| if (main.columnIndex(n) == null) return error.ExtraColumnNotInMain;
+    const n_cols = main.names.len;
+    const src = try gpa.alloc(?usize, n_cols);
+    defer gpa.free(src);
+    for (main.names, main.kinds, src) |n, kind, *s| {
+        s.* = extra.columnIndex(n);
+        if (s.*) |e| {
+            if (extra.kinds[e] != kind) return error.ExtraColumnKindDiffers;
+        } else {
+            var ok = false;
+            for (may_lack) |m| ok = ok or std.mem.eql(u8, m, n);
+            if (!ok) return error.ExtraColumnMissing;
+        }
+    }
+
+    const n_total = main.n_rows + extra.n_rows;
+    // Built in full before anything of `main` changes, so a failure leaves it as it was.
+    const new_values = try gpa.alloc([]f32, n_cols);
+    @memset(new_values, &.{});
+    defer gpa.free(new_values);
+    errdefer for (new_values) |v| gpa.free(v);
+    const new_levels = try gpa.alloc([][]u8, n_cols);
+    @memset(new_levels, &.{});
+    defer gpa.free(new_levels);
+    // Only the levels added here are owned by `new_levels` until commit; `main`'s are borrowed.
+    errdefer for (new_levels, main.levels) |nl, ml| {
+        for (nl[@min(ml.len, nl.len)..]) |l| gpa.free(l);
+        gpa.free(nl);
+    };
+
+    for (0..n_cols) |c| {
+        const v = try gpa.alloc(f32, n_total);
+        new_values[c] = v;
+        @memcpy(v[0..main.n_rows], main.values[c]);
+        const tail = v[main.n_rows..];
+        const e = src[c] orelse {
+            @memset(tail, std.math.nan(f32));
+            continue;
+        };
+        if (main.kinds[c] == .numeric) {
+            @memcpy(tail, extra.values[e]);
+            continue;
+        }
+        // Categorical: map each of `extra`'s level ids to `main`'s, adding new levels in order.
+        var ids: std.StringHashMapUnmanaged(u32) = .empty;
+        defer ids.deinit(gpa);
+        for (main.levels[c], 0..) |l, i| try ids.put(gpa, l, @intCast(i));
+        var levels: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (levels.items[@min(main.levels[c].len, levels.items.len)..]) |l| gpa.free(l);
+            levels.deinit(gpa);
+        }
+        try levels.appendSlice(gpa, main.levels[c]);
+        const map = try gpa.alloc(f32, extra.levels[e].len);
+        defer gpa.free(map);
+        for (extra.levels[e], map) |l, *m| {
+            if (ids.get(l)) |id| {
+                m.* = @floatFromInt(id);
+            } else {
+                const own = try gpa.dupe(u8, l);
+                levels.append(gpa, own) catch |err| {
+                    gpa.free(own);
+                    return err;
+                };
+                try ids.put(gpa, own, @intCast(levels.items.len - 1));
+                m.* = @floatFromInt(levels.items.len - 1);
+            }
+        }
+        for (tail, extra.values[e]) |*t, x| t.* = if (std.math.isNan(x)) x else map[@intFromFloat(x)];
+        new_levels[c] = try levels.toOwnedSlice(gpa);
+    }
+
+    // Commit: nothing below fails.
+    for (0..n_cols) |c| {
+        gpa.free(main.values[c]);
+        main.values[c] = new_values[c];
+        if (main.kinds[c] == .categorical and src[c] != null) {
+            gpa.free(main.levels[c]); // the outer slice only: its strings live on in `new_levels`
+            main.levels[c] = new_levels[c];
+        }
+    }
+    main.n_rows = n_total;
+}
+
 /// Concatenate column `c` of every range into `out`; categorical local ids are
 /// renumbered in range order (first appearance in file). Returns owned levels.
 fn mergeColumn(gpa: std.mem.Allocator, sinks: []RangeSink, c: usize, out: []f32) ![][]u8 {

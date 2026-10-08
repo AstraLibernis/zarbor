@@ -31,6 +31,9 @@ pub const usage =
     \\  --max-bytes=N       CSV size cap in bytes (default 1<<31)
     \\  --split-col=NAME    column assigning rows to train(<0.5)/valid(>=0.5);
     \\                      overrides --valid-frac, and is dropped as a feature
+    \\  --extra-train=FILE  more labelled rows (e.g. a competition's original
+    \\                      dataset), added to training only, never validated on
+    \\  --extra-weight=W    weight of each --extra-train row (default 1)
     \\  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
     \\  --init-col=NAME     per-row starting raw score (one per class under softmax,
     \\                      comma-separated); dropped as a feature; pass it to

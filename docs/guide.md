@@ -377,6 +377,17 @@ its own training rows (stratified, and grouped when `--group-col` is given) and 
 It never stops on the rows it is scored on, which would let the score pick its own stopping
 point. `cv` reports the mean rounds kept: use that as `--n_rounds` for the final `train`.
 
+**Extra training rows** (`--extra-train=FILE`, in `cv` and `train`): labelled rows from
+another file, such as a Playground competition's original dataset. They are binned with the
+main file and train every fold (and the final model), but are never scored, never in the
+early-stopping slice, and never in `train`'s validation split, because the leaderboard scores
+only rows like the main file's. Folds are dealt over the main file's rows alone, so a run with
+and without the extra rows uses the same folds and compares fold for fold. The file needs the
+main file's columns, in any order; dropped columns may be absent. `--extra-weight=W` makes
+each extra row weigh W, for data drawn a little differently from the main file's. Whether it
+helps is an empirical question: on one competition the plain addition cost 0.0002 AUC and no
+weight beat leaving it out.
+
 ## 11. Hyperparameter search
 
 `--search` picks the strategy:

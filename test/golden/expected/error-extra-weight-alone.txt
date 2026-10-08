@@ -1,0 +1,6 @@
+$ zarbor cv titanic3.csv --label=survived --extra-weight=0.3 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 1
+--- stdout
+--- stderr
+error: ExtraWeightNeedsExtraTrain
+--- files

@@ -39,6 +39,10 @@ const usage =
     \\  --pos-label=NAME    class of a string target to encode as 1
     \\  --drop=NAME         exclude a column; repeatable
     \\  --oof=FILE          write the out-of-fold predictions as CSV
+    \\  --extra-train=FILE  more labelled rows (e.g. a competition's original
+    \\                      dataset) that train in every fold and are never
+    \\                      scored; same columns, dropped ones may be absent
+    \\  --extra-weight=W    weight of each --extra-train row (default 1)
     \\  --max-bytes=N       CSV size cap in bytes (default 1<<31)
     \\  --quiet=1           print only the summary line
     \\
@@ -70,6 +74,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var group_col: ?[]const u8 = null;
     var weight_col: ?[]const u8 = null;
     var init_col: ?[]const u8 = null;
+    var extra_path: ?[]const u8 = null;
+    var extra_weight: f32 = 1;
     var quiet = false;
 
     var drops: std.ArrayList([]const u8) = .empty;
@@ -109,6 +115,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             weight_col = val;
         } else if (std.mem.eql(u8, key, "init-col")) {
             init_col = val;
+        } else if (std.mem.eql(u8, key, "extra-train")) {
+            extra_path = val;
+        } else if (std.mem.eql(u8, key, "extra-weight")) {
+            extra_weight = try std.fmt.parseFloat(f32, val);
         } else if (std.mem.eql(u8, key, "oof")) {
             oof_path = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
@@ -161,6 +171,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
     try common.checkDrops(out, &frame, drops.items);
+    // `--extra-train`: rows appended after the file's own, which train in every fold and are
+    // never scored. Folds are dealt over the file's rows alone, so they match a run without it.
+    var n_scored = frame.n_rows;
+    if (extra_path) |ep| {
+        if (group_col != null) return error.ExtraTrainWithGroups;
+        n_scored = try common.appendExtra(gpa, io, pool, out, &frame, ep, max_bytes, drops.items);
+    }
 
     // The grouping column is a label on the rows, never a feature: leaving a
     // ZIP or subject id in the matrix invites the model to memorise it.
@@ -206,6 +223,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         return err;
     };
     defer full.deinit();
+    if (extra_weight != 1 and extra_path == null) return error.ExtraWeightNeedsExtraTrain;
+    try full.weighRowsFrom(n_scored, extra_weight);
     try enc.validate(full.labels, cfg.objective());
     cfg.applyForestFeatureDefault(full.n_features, explicit.items);
 
@@ -265,7 +284,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         const fold_of = if (groups) |g|
             try assignGroupFolds(gpa, g, n_folds, seed)
         else
-            try assignFolds(gpa, full.labels, n_folds, seed, cfg.classifies());
+            try assignFolds(gpa, full.labels[0..n_scored], n_folds, seed, cfg.classifies());
         var keep_this = false;
         defer if (!keep_this) gpa.free(fold_of);
 
@@ -340,7 +359,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             try buf.appendSlice(gpa, "\n");
         }
         if (repeats > 1) try out.writeAll("note    --oof is the first repeat only\n");
-        for (full.labels, fold_of, 0..) |y, k, row| {
+        for (full.labels[0..fold_of.len], fold_of, 0..) |y, k, row| {
             try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{d},{d}", .{ k, y }));
             for (oof_w[row * width ..][0..width]) |p| try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, ",{d:.8}", .{p}));
             try buf.appendSlice(gpa, "\n");

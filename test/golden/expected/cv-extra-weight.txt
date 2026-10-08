@@ -1,0 +1,19 @@
+$ zarbor cv titanic3.csv --label=survived --folds=3 --n_rounds=60 --extra-train=titanic3.csv --extra-weight=0.3 --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+extra   titanic3.csv  1309 rows, training only
+data    titanic3.csv
+rows    2618
+feats   8  (label "survived")
+folds   3  (seed 1, stratified)
+threads 4
+prep # ms  (read + bin, paid once for all folds)
+
+fold 0  2181 train / 437 valid   auc=0.890774
+fold 1  2182 train / 436 valid   auc=0.901954
+fold 2  2182 train / 436 valid   auc=0.903726
+
+oof     0.897670   mean 0.898818   sd 0.005734 # ms
+--- stderr
+--- files

@@ -60,3 +60,43 @@ pub fn checkDrops(out: *std.Io.Writer, frame: *const zarbor.data.Frame, drops: [
         return error.DropColumnNotFound;
     };
 }
+
+/// `--extra-train=FILE`: read FILE with `frame`'s column kinds and append its rows to `frame`.
+/// The caller keeps those rows in training only. Returns how many rows `frame` had before, the
+/// first extra row. `may_lack` names columns FILE need not have (dropped ones, a split column).
+pub fn appendExtra(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    pool: *zarbor.pool.Pool,
+    out: *std.Io.Writer,
+    frame: *zarbor.data.Frame,
+    path: []const u8,
+    max_bytes: usize,
+    may_lack: []const []const u8,
+) !usize {
+    var extra = try zarbor.csv.readCsvHinted(gpa, io, pool, path, max_bytes, .{ .names = frame.names, .kinds = frame.kinds });
+    defer extra.deinit();
+    try zarbor.csv.checkShape(&extra, out);
+    var unparsed: u64 = 0;
+    for (extra.unparsed) |u| unparsed += u;
+    if (unparsed != 0) try out.print("note: {d} field(s) of {s} did not parse as numbers in numeric columns; read as missing\n", .{ unparsed, path });
+    // Named here, so the message can say which column; `appendFrame` refuses the same cases.
+    for (extra.names) |n| if (frame.columnIndex(n) == null) {
+        try out.print("error: {s} has a column \"{s}\" the training file does not\n", .{ path, n });
+        try out.flush();
+        return error.ExtraColumnNotInMain;
+    };
+    for (frame.names) |n| if (extra.columnIndex(n) == null) {
+        var ok = false;
+        for (may_lack) |m| ok = ok or std.mem.eql(u8, m, n);
+        if (!ok) {
+            try out.print("error: {s} lacks the column \"{s}\"; only dropped columns may be absent\n", .{ path, n });
+            try out.flush();
+            return error.ExtraColumnMissing;
+        }
+    };
+    const n_main = frame.n_rows;
+    try zarbor.csv.appendFrame(gpa, frame, &extra, may_lack);
+    try out.print("extra   {s}  {d} rows, training only\n", .{ path, extra.n_rows });
+    return n_main;
+}

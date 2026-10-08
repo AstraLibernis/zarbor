@@ -23,6 +23,10 @@ usage: zarbor cv <train.csv> --label=<column> [options]
   --pos-label=NAME    class of a string target to encode as 1
   --drop=NAME         exclude a column; repeatable
   --oof=FILE          write the out-of-fold predictions as CSV
+  --extra-train=FILE  more labelled rows (e.g. a competition's original
+                      dataset) that train in every fold and are never
+                      scored; same columns, dropped ones may be absent
+  --extra-weight=W    weight of each --extra-train row (default 1)
   --max-bytes=N       CSV size cap in bytes (default 1<<31)
   --quiet=1           print only the summary line
 

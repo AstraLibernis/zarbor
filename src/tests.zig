@@ -11,6 +11,7 @@ test {
     _ = @import("test/booster_test.zig");
     _ = @import("test/csv_test.zig");
     _ = @import("test/explain_test.zig");
+    _ = @import("test/extra_train_test.zig");
     _ = @import("test/cv_test.zig");
     _ = @import("test/linear_test.zig");
     _ = @import("test/losses_test.zig");

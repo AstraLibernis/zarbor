@@ -155,6 +155,18 @@ pub const Dataset = struct {
         d.* = undefined;
     }
 
+    /// `--extra-weight=W`: rows from `first` on weigh W, times any weight they have; earlier rows
+    /// keep theirs. W = 1 changes nothing and leaves an unweighted dataset unweighted.
+    pub fn weighRowsFrom(d: *Dataset, first: usize, w: f32) !void {
+        if (!(w >= 0 and w < std.math.inf(f32))) return error.BadExtraWeight;
+        if (w == 1 or first >= d.n_rows) return;
+        if (d.weights.len == 0) {
+            d.weights = try d.gpa.alloc(f32, d.n_rows);
+            @memset(d.weights, 1);
+        }
+        for (d.weights[first..]) |*x| x.* *= w;
+    }
+
     /// True when feature `f`'s bins do not fit in a byte.
     pub inline fn isWide(d: *const Dataset, f: usize) bool {
         return d.wide_cols[f].len != 0;
