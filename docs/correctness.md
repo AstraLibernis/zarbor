@@ -48,7 +48,9 @@ steps 6.4e-7, ordered boosting 6.5e-7, target statistics with combinations 6.6e-
 scales `l2_leaf_reg` by the mean weight, per prefix body under ordered boosting, and its
 target statistics ignore weights). Balanced class weights against scikit-learn's
 `LogisticRegression(class_weight="balanced")`, with and without `sample_weight`, binary and
-multinomial: penalised objectives equal at the optimum to 1.0e-9 .. 8.2e-9. Multinomial logistic
+multinomial: penalised objectives equal at the optimum to 1.0e-9 .. 8.2e-9. Starting scores:
+XGBoost `base_margin` (100 trees 6.6e-7; 4-class softmax with four margin columns 6.4e-7),
+LightGBM `init_score` (6.2e-7), CatBoost `baseline` (6.5e-7). Multinomial logistic
 regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows, 8 integer
 columns so the binned design holds the raw values, standardisation off on both sides): the
 penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`

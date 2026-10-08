@@ -81,10 +81,10 @@ MEAN = y.mean()
 BASE_MARGIN = float(np.log(MEAN / (1 - MEAN)))
 
 
-def zarbor(csv, label, flags, cols=1):
+def zarbor(csv, label, flags, cols=1, predict_flags=()):
     model, out = WORK / "z.zm", WORK / "z.csv"
     for cmd in ([Z, str(WORK / csv), f"--label={label}", "--valid-frac=0", "--verbose_eval=0", f"--save={model}", *flags],
-                [Z, "predict", str(WORK / csv), f"--model={model}", f"--out={out}"]):
+                [Z, "predict", str(WORK / csv), f"--model={model}", f"--out={out}", *predict_flags]):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd[:3])} failed:\n{r.stdout[-600:]}{r.stderr[-600:]}")
@@ -341,6 +341,54 @@ def cat_weights():
     report("catboost weighted, target statistics cx 4, 50 trees", z,
            cat_pred_w(XC, ycat, iterations=50, learning_rate=0.1, one_hot_max_size=2, max_ctr_complexity=4,
                       cat_features=["c2", "c3", "c40"]))
+
+
+# ---- starting scores: XGBoost base_margin, LightGBM init_score, CatBoost baseline -------------
+M = (0.3 * (X.r2 - 2.5) + 0.2 * np.random.default_rng(7).normal(size=N)).to_numpy()
+M4 = np.stack([0.2 * (X.r2 - 2.5), -0.1 * X.r6, 0.15 * (X.r10 - 2), np.zeros(N)], axis=1)
+pd.concat([X, pd.Series(M, name="m"), pd.Series(y, name="y")], axis=1).to_csv(WORK / "mdisc.csv", index=False)
+pd.concat([X, pd.DataFrame(M4, columns=["m0", "m1", "m2", "m3"]), pd.Series(ymc, name="ymc")], axis=1).to_csv(
+    WORK / "mmulti.csv", index=False)
+
+
+@case
+def xgb_margin():
+    z = zarbor("mdisc.csv", "y", XZ + ["--init-col=m", "--n_rounds=100", "--max_depth=6", "--learning_rate=0.1"],
+               predict_flags=["--init-col=m"])
+    p = dict(objective="binary:logistic", tree_method="hist", max_bin=256, nthread=16, seed=0, eta=0.1, max_depth=6)
+    ref = xgb.train(p, xgb.DMatrix(X, y, base_margin=M), 100).predict(xgb.DMatrix(X, base_margin=M))
+    report("xgb base_margin, 100 trees", z, ref)
+    z = zarbor("mmulti.csv", "ymc", XZ + ["--init-col=m0,m1,m2,m3", "--objective=softmax", "--n_rounds=40",
+                                         "--max_depth=6", "--learning_rate=0.1"], cols=4,
+               predict_flags=["--init-col=m0,m1,m2,m3"])
+    p = dict(objective="multi:softprob", num_class=4, tree_method="hist", max_bin=256, nthread=16, seed=0, eta=0.1,
+             max_depth=6)
+    ref = xgb.train(p, xgb.DMatrix(X, ymc, base_margin=M4), 40).predict(xgb.DMatrix(X, base_margin=M4))
+    report("xgb base_margin multiclass, 40 rounds", z.ravel(), ref.ravel())
+
+
+@case
+def lgb_init_score():
+    z = zarbor("mdisc.csv", "y", LZ + ["--init-col=m", "--n_rounds=30", "--learning_rate=0.1"],
+               predict_flags=["--init-col=m"])
+    p = dict(objective="binary", max_bin=255, num_threads=16, seed=0, verbose=-1, max_depth=-1, num_leaves=31,
+             min_data_in_leaf=0, min_sum_hessian_in_leaf=1.0, lambda_l2=1.0, learning_rate=0.1)
+    b = lgb.train(p, lgb.Dataset(X, y, init_score=M), 30)
+    ref = 1 / (1 + np.exp(-(b.predict(X, raw_score=True) + M)))
+    report("lgb init_score, 30 trees", z, ref)
+
+
+@case
+def cat_baseline():
+    z = zarbor("mdisc.csv", "y", CZ + ["--init-col=m", "--n_rounds=50", "--learning_rate=0.1"],
+               predict_flags=["--init-col=m"])
+    p = dict(depth=6, l2_leaf_reg=3, boosting_type="Plain", bootstrap_type="No", random_strength=0,
+             leaf_estimation_method="Newton", leaf_estimation_iterations=1, leaf_estimation_backtracking="No",
+             border_count=254, feature_border_type="GreedyLogSum", thread_count=16, verbose=0,
+             allow_writing_files=False, has_time=True, iterations=50, learning_rate=0.1)
+    m = catboost.CatBoostClassifier(**p).fit(catboost.Pool(X, y, baseline=M))
+    ref = 1 / (1 + np.exp(-(m.predict(catboost.Pool(X), prediction_type="RawFormulaVal") + M)))
+    report("catboost baseline, 50 trees", z, ref)
 
 
 # ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------

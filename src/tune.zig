@@ -281,6 +281,7 @@ pub const Binner = struct {
     frame: *data.Frame,
     label_col: usize,
     weight_col: ?usize = null,
+    init_cols: []const usize = &.{},
     enc: *data.LabelEncoder,
     drops: []const []const u8,
     ds: data.Dataset,
@@ -295,7 +296,7 @@ pub const Binner = struct {
                 b.pool,
                 b.frame,
                 cfg.bin,
-                .{ .col = b.label_col, .enc = b.enc, .weight_col = b.weight_col },
+                .{ .col = b.label_col, .enc = b.enc, .weight_col = b.weight_col, .init_cols = b.init_cols },
                 b.drops,
             );
             b.ds.deinit();

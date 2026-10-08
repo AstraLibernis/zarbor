@@ -41,6 +41,8 @@ pub const Fitted = union(config.Algo) {
         cfg: config.Config,
         log: ?*std.Io.Writer,
     ) !Result {
+        // Only boosting adds trees to a starting score.
+        if (ds.init.len != 0 and cfg.algo != .gbdt) return error.InitScoreNeedsGbdt;
         if (cfg.class_weight != .none) {
             // Train on a view of `ds` whose weights also carry each row's class weight.
             const w = try classWeights(gpa, ds, cfg);

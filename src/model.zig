@@ -151,7 +151,8 @@ const TreeCtx = struct {
         if (k > 1) {
             // Softmax: each tree adds to its class's column, as `booster.Model` predicts.
             const out = self.out[begin * k .. end * k];
-            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], b.class_base);
+            const init = self.ds.init;
+            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], if (init.len != 0) init[r * k ..][0..k] else b.class_base);
             for (b.trees, 0..) |t, i| {
                 const c = i % k;
                 for (begin..end) |r| out[(r - begin) * k + c] += t.predictBinned(self.ds, r);
@@ -165,7 +166,8 @@ const TreeCtx = struct {
         // out of the hot loop entirely. Bit-exact with the row-major order:
         // every `out[r]` accumulates the same trees in the same sequence,
         // rounding to f32 at each step exactly as a register accumulator did.
-        @memset(out, if (b.kind == .gbdt) b.base_score else 0);
+        // A boosted model adds each row's own starting score when the rows carry one.
+        if (b.kind == .gbdt and self.ds.init.len != 0) @memcpy(out, self.ds.init[begin..end]) else @memset(out, if (b.kind == .gbdt) b.base_score else 0);
         for (b.trees) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }

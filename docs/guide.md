@@ -33,6 +33,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
 | `--weight-col` | task | rows of unequal importance: survey or exposure weights, recent data, deduplicated rows |
 | `--class_weight=balanced` | task | a rare class that the metric cares about; AUC rarely needs it |
+| `--init-col` | task | an offset the model should not learn (exposure), or stacking on another model's raw score |
 | `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
 | `--has_time` | task | rows are in time order and the model must not peek ahead (CatBoost style) |
 | `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
@@ -144,6 +145,15 @@ are weight sums, as scikit-learn 1.9 counts them. Only training is weighted: val
 scores are not. Useful when a rare class matters to the metric (recall, F1, log loss on a
 balanced test); AUC rarely needs it. CatBoost's `auto_class_weights=Balanced` differs by a
 constant factor, which CatBoost-style trees ignore.
+
+**Starting scores** (`--init-col=NAME`, gbdt only; one column per class under softmax,
+comma-separated): each row's starting raw score (log-odds, value, class scores), XGBoost's
+`base_margin`, LightGBM's `init_score`, CatBoost's `baseline`. The trees fit what the starting
+scores leave, and the saved model's base score is 0: pass the same columns to `predict
+--init-col` and each row's own score is added back (rows without them get the trees alone).
+Uses: an exposure offset (`log(exposure)` under a log link), or boosting on top of another
+model's raw output. The validation set needs them too; the forest and the linear model refuse
+them.
 
 **Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per

@@ -32,6 +32,9 @@ pub const usage =
     \\  --split-col=NAME    column assigning rows to train(<0.5)/valid(>=0.5);
     \\                      overrides --valid-frac, and is dropped as a feature
     \\  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
+    \\  --init-col=NAME     per-row starting raw score (one per class under softmax,
+    \\                      comma-separated); dropped as a feature; pass it to
+    \\                      predict too
     \\  --save=FILE         write the trained model to FILE
     \\
     \\other commands:

@@ -31,6 +31,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var max_bytes: usize = 1 << 31;
     var split_col: ?[]const u8 = null;
     var weight_col: ?[]const u8 = null;
+    var init_col: ?[]const u8 = null;
     var save_path: ?[]const u8 = null;
     var pos_label: ?[]const u8 = null;
 
@@ -76,6 +77,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             split_col = val;
         } else if (std.mem.eql(u8, key, "weight-col")) {
             weight_col = val;
+        } else if (std.mem.eql(u8, key, "init-col")) {
+            init_col = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
         } else if (try config.applyFlag(&cfg, key, val)) {
@@ -133,6 +136,16 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     if (weight_col) |name| {
         weight_idx = frame.columnIndex(name) orelse return error.WeightColumnNotFound;
         try drops.append(gpa, name);
+    }
+    // Starting-score columns (one, or one per class) are read with the label, never features.
+    var init_idx: std.ArrayList(usize) = .empty;
+    defer init_idx.deinit(gpa);
+    if (init_col) |names| {
+        var it_names = std.mem.splitScalar(u8, names, ',');
+        while (it_names.next()) |name| {
+            try init_idx.append(gpa, frame.columnIndex(name) orelse return error.InitColumnNotFound);
+            try drops.append(gpa, name);
+        }
     }
     var split_idx: ?usize = null;
     if (split_col) |name| {
@@ -204,13 +217,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // score below stays a hold-out score.
     if (cfg.bin.bin_policy == .auto) {
         var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
-        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items, null, perm[0..n_train], &scores);
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx, .init_cols = init_idx.items }, drops.items, null, perm[0..n_train], &scores);
         try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
     }
 
     // `bin` times binning alone: the split above and any `auto` choice are not binning.
     const t_bin0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items) catch |err| {
+    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx, .init_cols = init_idx.items }, drops.items) catch |err| {
         if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
         return err;

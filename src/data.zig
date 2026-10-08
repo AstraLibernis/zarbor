@@ -125,6 +125,10 @@ pub const Dataset = struct {
     labels: []f32,
     /// Per-row weights (`--weight-col`); empty means every row weighs 1.
     weights: []f32 = &.{},
+    /// Per-row starting raw scores (`--init-col`), row-major with one per model output
+    /// (`init[r * width + c]`); empty means the model's own base score. A boosted model starts
+    /// training from them and adds them back whenever it predicts rows that carry them.
+    init: []f32 = &.{},
 
     pub fn deinit(d: *Dataset) void {
         const gpa = d.gpa;
@@ -147,6 +151,7 @@ pub const Dataset = struct {
         gpa.free(d.levels);
         if (d.labels.len != 0) gpa.free(d.labels);
         if (d.weights.len != 0) gpa.free(d.weights);
+        if (d.init.len != 0) gpa.free(d.init);
         d.* = undefined;
     }
 
@@ -349,6 +354,11 @@ pub fn quantise(
     if (label) |ls| if (ls.weight_col) |wc| {
         weights = try readWeights(gpa, src, wc);
     };
+    var init: []f32 = &.{};
+    errdefer if (init.len != 0) gpa.free(init);
+    if (label) |ls| if (ls.init_cols.len != 0) {
+        init = try readInit(gpa, src, ls.init_cols);
+    };
 
     return .{
         .gpa = gpa,
@@ -365,7 +375,24 @@ pub fn quantise(
         .levels = levels,
         .labels = labels,
         .weights = weights,
+        .init = init,
     };
+}
+
+/// Starting-score columns, interleaved row-major (`[r * cols.len + c]`). Numeric and finite: a
+/// missing starting score has no neutral value to stand in for it.
+pub fn readInit(gpa: std.mem.Allocator, src: *const Frame, cols: []const usize) ![]f32 {
+    const k = cols.len;
+    const out = try gpa.alloc(f32, src.n_rows * k);
+    errdefer gpa.free(out);
+    for (cols, 0..) |col, c| {
+        if (src.kinds[col] != .numeric) return error.InitColumnNotNumeric;
+        for (src.values[col], 0..) |v, r| {
+            if (!std.math.isFinite(v)) return error.MissingInitScore;
+            out[r * k + c] = v;
+        }
+    }
+    return out;
 }
 
 /// A weight column: numeric, every value finite and at least 0, and not all 0. A missing or
@@ -467,6 +494,13 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         weights = try gpa.alloc(f32, n);
         for (rows, weights) |r, *w| w.* = ds.weights[r];
     }
+    errdefer if (weights.len != 0) gpa.free(weights);
+    var init: []f32 = &.{};
+    if (ds.init.len != 0) {
+        const k = ds.init.len / ds.n_rows;
+        init = try gpa.alloc(f32, n * k);
+        for (rows, 0..) |r, i| @memcpy(init[i * k ..][0..k], ds.init[r * k ..][0..k]);
+    }
 
     return .{
         .gpa = gpa,
@@ -483,5 +517,6 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .levels = levels,
         .labels = labels,
         .weights = weights,
+        .init = init,
     };
 }

@@ -28,6 +28,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
     var id_col: ?[]const u8 = null;
     var label: ?[]const u8 = null;
     var pred_col: []const u8 = "prediction";
+    var init_col: ?[]const u8 = null;
     var n_threads: u32 = 0;
     var max_bytes: usize = 1 << 31;
 
@@ -52,6 +53,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
             id_col = val;
         } else if (std.mem.eql(u8, key, "pred-col")) {
             pred_col = val;
+        } else if (std.mem.eql(u8, key, "init-col")) {
+            init_col = val;
         } else if (std.mem.eql(u8, key, "label")) {
             label = val;
         } else if (std.mem.eql(u8, key, "n_threads")) {
@@ -142,6 +145,15 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
         return err;
     };
     defer ds.deinit();
+    // A model trained from starting scores adds each row's own back: read them here.
+    if (init_col) |init_names| {
+        var cols: std.ArrayList(usize) = .empty;
+        defer cols.deinit(gpa);
+        var it_names = std.mem.splitScalar(u8, init_names, ',');
+        while (it_names.next()) |name| try cols.append(gpa, frame.columnIndex(name) orelse return error.InitColumnNotFound);
+        if (cols.items.len != bundles.items[0].width()) return error.InitWidthMismatch;
+        ds.init = try data.readInit(gpa, &frame, cols.items);
+    }
     const t_bin = std.Io.Timestamp.now(io, .awake).toNanoseconds();
 
     // Blending models trained on different schemas would silently score the

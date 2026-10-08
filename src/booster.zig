@@ -159,9 +159,10 @@ const PredictCtx = struct {
         const self: *PredictCtx = @ptrCast(@alignCast(ctx));
         const m = self.m;
         const k = m.width();
+        const init = self.ds.init;
         if (k > 1) {
             const out = self.out[begin * k .. end * k];
-            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], m.class_base);
+            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], if (init.len != 0) init[r * k ..][0..k] else m.class_base);
             for (m.trees.items, 0..) |t, i| {
                 const c = i % k;
                 for (begin..end) |r| out[(r - begin) * k + c] += t.predictBinned(self.ds, r);
@@ -172,7 +173,7 @@ const PredictCtx = struct {
         const out = self.out[begin..end];
         // Trees outer, rows inner; see the note in `model.zig`'s TreeCtx.
         // Bit-exact: same trees, same order, same f32 rounding per row.
-        @memset(out, m.base_score);
+        if (init.len != 0) @memcpy(out, init[begin..end]) else @memset(out, m.base_score);
         for (m.trees.items) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
@@ -508,8 +509,9 @@ pub fn softmaxBaseW(labels: []const f32, weights: []const f32, out: []f32) void 
     for (out) |*v| v.* -= mean;
 }
 
-/// Every row's starting scores.
-fn fillBase(raw: []f32, m: *const Model) void {
+/// Every row's starting scores: its own (`--init-col`) when it has them, else the model's base.
+fn fillBase(raw: []f32, m: *const Model, init: []const f32) void {
+    if (init.len != 0) return @memcpy(raw, init);
     if (m.class_base.len == 0) return @memset(raw, m.base_score);
     const k = m.class_base.len;
     for (0..raw.len / k) |r| @memcpy(raw[r * k ..][0..k], m.class_base);
@@ -544,7 +546,20 @@ pub fn train(
 
     // --- base score ---
     const k: usize = cfg.objective.width(cfg.num_class);
-    if (k > 1) {
+    // Starting scores replace the base score: the model starts at 0 and the rows' own scores
+    // are added wherever it predicts (XGBoost's `base_margin`, LightGBM's `init_score`).
+    const has_init = ds.init.len != 0;
+    if (has_init) {
+        if (ds.init.len != ds.n_rows * k) return error.InitWidthMismatch;
+        if (valid) |v| if (v.init.len != v.n_rows * k) return error.InitScoreMissingOnValidation;
+    }
+    if (has_init) {
+        if (k > 1) {
+            model.num_class = cfg.num_class;
+            model.class_base = try gpa.alloc(f32, k);
+            @memset(model.class_base, 0);
+        }
+    } else if (k > 1) {
         model.num_class = cfg.num_class;
         model.class_base = try gpa.alloc(f32, k);
         if (cfg.base_score) |b| @memset(model.class_base, b) else softmaxBaseW(ds.labels, ds.weights, model.class_base);
@@ -572,7 +587,7 @@ pub fn train(
     // class's tree reads one contiguous slice.
     const raw = try gpa.alloc(f32, ds.n_rows * k);
     defer gpa.free(raw);
-    fillBase(raw, &model);
+    fillBase(raw, &model, ds.init);
 
     const grads_all = try gpa.alloc(hist.GradPair, ds.n_rows * k);
     defer gpa.free(grads_all);
@@ -580,7 +595,7 @@ pub fn train(
     var valid_raw: []f32 = &.{};
     if (valid) |v| {
         valid_raw = try gpa.alloc(f32, v.n_rows * k);
-        fillBase(valid_raw, &model);
+        fillBase(valid_raw, &model, v.init);
     }
     defer if (valid_raw.len != 0) gpa.free(valid_raw);
 

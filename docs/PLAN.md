@@ -124,7 +124,8 @@ much each feature moved that row's prediction.
 **Progress.** Sample weights done 2026-10-08 for every model: exact XGBoost, LightGBM and
 CatBoost parity (CatBoost plain, ordered and with target statistics), scikit-learn's linear
 objectives. Balanced class weights done the same day (scikit-learn's definition, weighted
-counts as in 1.9). Next: starting scores, continued training.
+counts as in 1.9). Starting scores (`--init-col`, boosting only) done the same day, exact
+against all three libraries. Next: continued training.
 
 **Goal.** `--weight-col=NAME`: a column giving each row's weight (dropped as a feature, like
 `--split-col`). `--class_weight=balanced` (or explicit per-class weights). `--init-col=NAME`:

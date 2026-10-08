@@ -205,4 +205,6 @@ pub const LabelSpec = struct {
     enc: *const LabelEncoder,
     /// A column of per-row weights (`--weight-col`), read with the labels.
     weight_col: ?usize = null,
+    /// Columns of per-row starting raw scores (`--init-col`): one, or one per class.
+    init_cols: []const usize = &.{},
 };

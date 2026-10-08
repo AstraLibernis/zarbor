@@ -373,3 +373,84 @@ test "balanced classes of equal size weigh exactly 1: the unweighted model, to t
     }
     try testing.expect(md > mc + 0.1 * n_rows);
 }
+
+const booster = @import("../booster.zig");
+
+test "a constant starting score is a base score, and each row's own is added back when predicting" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var score: [n_rows]f32 = undefined;
+    var ds = try fixture(gpa, 12, &score);
+    defer ds.deinit();
+    inline for (.{ .depthwise, .lossguide, .symmetric }) |gp| {
+        const p = config.Config.from(.{ .grow_policy = gp, .n_rounds = 10, .max_depth = 4, .max_leaves = 12, .verbose_eval = 0 }).gbdt;
+        // Every row starting at -0.7 is the base score -0.7, to the bit.
+        var with_init = try data.subset(gpa, &ds, &iota);
+        defer with_init.deinit();
+        with_init.init = try gpa.alloc(f32, n_rows);
+        @memset(with_init.init, -0.7);
+        var a = try booster.train(gpa, pool, &with_init, null, p, null);
+        defer a.model.deinit();
+        var pb = p;
+        pb.base_score = -0.7;
+        var b = try booster.train(gpa, pool, &ds, null, pb, null);
+        defer b.model.deinit();
+        var ra: [n_rows]f32 = undefined;
+        var rb: [n_rows]f32 = undefined;
+        a.model.predictRaw(pool, &with_init, &ra);
+        b.model.predictRaw(pool, &ds, &rb);
+        try testing.expectEqualSlices(f32, &rb, &ra);
+        try testing.expectEqual(@as(f32, 0), a.model.base_score);
+
+        // Row-varying starting scores: the trees fit what is left, and a prediction is the row's
+        // own score plus the trees (rows without one get the trees alone).
+        var prng: std.Random.DefaultPrng = .init(13);
+        for (with_init.init) |*v| v.* = prng.random().floatNorm(f32);
+        var c = try booster.train(gpa, pool, &with_init, null, p, null);
+        defer c.model.deinit();
+        var rc: [n_rows]f32 = undefined;
+        var rt: [n_rows]f32 = undefined;
+        c.model.predictRaw(pool, &with_init, &rc);
+        c.model.predictRaw(pool, &ds, &rt);
+        for (rc, rt, with_init.init) |x, t, m| try testing.expectApproxEqAbs(x, t + m, 1e-5);
+
+        // A saved model adds them back the same way.
+        var bundle = try model_mod.fromBooster(gpa, &c.model, try data.Schema.fromDataset(gpa, &ds));
+        defer bundle.deinit();
+        var rs: [n_rows]f32 = undefined;
+        bundle.predictRaw(pool, &with_init, &rs);
+        try testing.expectEqualSlices(f32, &rc, &rs);
+    }
+}
+
+const model_mod = @import("../model.zig");
+
+test "starting scores: subsets keep them, and a mismatch is refused, not guessed" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var score: [n_rows]f32 = undefined;
+    var ds = try fixture(gpa, 14, &score);
+    defer ds.deinit();
+    ds.init = try gpa.alloc(f32, n_rows);
+    for (ds.init, 0..) |*v, i| v.* = @floatFromInt(i);
+    const rows = [_]u32{ 4, 900, 4 };
+    var sub = try data.subset(gpa, &ds, &rows);
+    defer sub.deinit();
+    try testing.expectEqualSlices(f32, &.{ 4, 900, 4 }, sub.init);
+
+    const p = config.Config.from(.{ .n_rounds = 3, .verbose_eval = 0 }).gbdt;
+    // Validation rows must carry starting scores too: the model's base is 0.
+    var valid = try data.subset(gpa, &ds, &rows);
+    defer valid.deinit();
+    gpa.free(valid.init);
+    valid.init = &.{};
+    try testing.expectError(error.InitScoreMissingOnValidation, booster.train(gpa, pool, &ds, &valid, p, null));
+    // One starting score per class under softmax.
+    var soft = config.Config.from(.{ .objective = .softmax, .n_rounds = 3, .verbose_eval = 0 }).gbdt;
+    soft.num_class = 2;
+    try testing.expectError(error.InitWidthMismatch, booster.train(gpa, pool, &ds, null, soft, null));
+    // The forest and the linear model start nowhere but their own fit.
+    try testing.expectError(error.InitScoreNeedsGbdt, Fitted.train(gpa, pool, &ds, null, config.Config.from(.{ .algo = .random_forest, .verbose_eval = 0 }), null));
+}
