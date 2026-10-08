@@ -37,6 +37,8 @@ const EvalCtx = struct {
     /// Softmax classes; `z` and `resid` are then class-major (`[class * n + row]`) and `rsum`
     /// holds `k` sums per chunk.
     k: usize = 1,
+    /// Per-row weights on each loss and residual; empty for none.
+    weights: []const f32 = &.{},
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -52,10 +54,11 @@ const EvalCtx = struct {
             while (i < hi) : (i += 1) {
                 const y: f64 = self.labels[i];
                 const zi: f64 = self.z[i];
+                const rw: f64 = if (self.weights.len != 0) self.weights[i] else 1;
                 var r: f64 = undefined;
                 switch (self.objective) {
                     .logistic => {
-                        const wt: f64 = if (y > 0.5) self.scale_pos_weight else 1.0;
+                        const wt: f64 = rw * @as(f64, if (y > 0.5) self.scale_pos_weight else 1.0);
                         r = wt * (1.0 / (1.0 + @exp(-zi)) - y);
                         if (self.want_loss) {
                             // log(1+e^z) - y*z, pivoted on sign(z) so no exp overflows.
@@ -68,7 +71,8 @@ const EvalCtx = struct {
                     },
                     .squared_error => {
                         r = zi - y;
-                        if (self.want_loss) l += 0.5 * r * r;
+                        if (self.want_loss) l += 0.5 * rw * r * r;
+                        r *= rw;
                     },
                     .softmax => unreachable, // `multinomial`
                 }
@@ -94,6 +98,7 @@ const EvalCtx = struct {
             @memset(rs, 0);
             for (lo..hi) |i| {
                 const y: usize = @intFromFloat(self.labels[i]);
+                const rw: f64 = if (self.weights.len != 0) self.weights[i] else 1;
                 var top: f64 = self.z[i];
                 for (1..k) |cls| top = @max(top, @as(f64, self.z[cls * n + i]));
                 var sum: f64 = 0;
@@ -101,11 +106,11 @@ const EvalCtx = struct {
                 for (0..k) |cls| {
                     const zc: f64 = self.z[cls * n + i];
                     const pc = @exp(zc - top) / sum;
-                    const r = pc - @as(f64, if (cls == y) 1 else 0);
+                    const r = rw * (pc - @as(f64, if (cls == y) 1 else 0));
                     self.resid[cls * n + i] = @floatCast(r);
                     rs[cls] += r;
                 }
-                if (self.want_loss) l += top + @log(sum) - @as(f64, self.z[y * n + i]);
+                if (self.want_loss) l += rw * (top + @log(sum) - @as(f64, self.z[y * n + i]));
             }
             self.loss[c] = l;
         }
@@ -237,6 +242,7 @@ pub const Problem = struct {
             .size = pr.size,
             .n = pr.ds.n_rows,
             .k = pr.k,
+            .weights = pr.ds.weights,
         };
         pr.pool.parallelFor(pr.chunks, &ectx, EvalCtx.run, 1);
 

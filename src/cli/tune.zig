@@ -40,6 +40,7 @@ const usage =
     \\                      --algo is used.
     \\  --folds=N           folds per evaluation (default 5)
     \\  --fold-seed=N       seed for the fold assignment (default 1)
+    \\  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
     \\  --group-col=NAME    keep rows sharing this column's value in the
     \\                      same fold, and drop it as a feature. Required
     \\                      whenever a unit appears more than once (a panel,
@@ -80,6 +81,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var n_folds: u32 = 5;
     var fold_seed: u64 = 1;
     var group_col: ?[]const u8 = null;
+    var weight_col: ?[]const u8 = null;
     var seed: u64 = 1;
     var grid_steps: usize = 5;
     var warmup: usize = 12;
@@ -131,6 +133,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             fold_seed = try std.fmt.parseInt(u64, val, 10);
         } else if (std.mem.eql(u8, key, "group-col")) {
             group_col = val;
+        } else if (std.mem.eql(u8, key, "weight-col")) {
+            weight_col = val;
         } else if (std.mem.eql(u8, key, "seed")) {
             seed = try std.fmt.parseInt(u64, val, 10);
         } else if (std.mem.eql(u8, key, "grid-steps")) {
@@ -219,6 +223,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     defer frame.deinit();
     try data.checkShape(&frame, out);
     const label_col = frame.columnIndex(target) orelse return error.LabelColumnNotFound;
+    // A weight column is read with the label and is never a feature.
+    var weight_idx: ?usize = null;
+    if (weight_col) |name| {
+        weight_idx = frame.columnIndex(name) orelse return error.WeightColumnNotFound;
+        try drops.append(gpa, name);
+    }
     var group_idx: ?usize = null;
     if (group_col) |name| {
         group_idx = frame.columnIndex(name) orelse return error.GroupColumnNotFound;
@@ -231,7 +241,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
     if (cfg.bin.bin_policy == .auto) {
         var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
-        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items, if (group_idx) |gi| frame.values[gi] else null, null, &scores);
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items, if (group_idx) |gi| frame.values[gi] else null, null, &scores);
         try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
     }
 
@@ -246,9 +256,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         .pool = pool,
         .frame = &frame,
         .label_col = label_col,
+        .weight_col = weight_idx,
         .enc = &enc,
         .drops = drops.items,
-        .ds = try data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items),
+        .ds = try data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items),
         // The matrix was binned under `cfg.bin`; recording anything else made
         // the first trial re-bin to an identical matrix.
         .bin = cfg.bin,

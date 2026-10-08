@@ -22,6 +22,7 @@ test {
     _ = @import("test/symmetric_test.zig");
     _ = @import("test/sweep_test.zig");
     _ = @import("test/tune_test.zig");
+    _ = @import("test/weights_test.zig");
 
     // Compile coverage: every module, so none escapes the test build.
     // Add a new module here as well as in root.zig. The CLI (src/cli/) is

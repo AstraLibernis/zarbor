@@ -146,7 +146,12 @@ pub fn train(
     // Constant across every tree: each one fits the raw target, not a residual.
     const grads = try gpa.alloc(hist.GradPair, ds.n_rows);
     defer gpa.free(grads);
-    for (ds.labels, 0..) |y, i| grads[i] = .{ .g = -y, .h = 1.0 };
+    // A row's weight multiplies both, so each leaf holds the weighted label mean, as
+    // scikit-learn's `sample_weight` makes it (and a bootstrap repeat counts it again).
+    for (ds.labels, 0..) |y, i| {
+        const w: f32 = if (ds.weights.len != 0) ds.weights[i] else 1;
+        grads[i] = .{ .g = -y * w, .h = w };
+    }
 
     var valid_sum: []f32 = &.{};
     var valid_scratch: []f32 = &.{};
@@ -193,7 +198,7 @@ pub fn train(
             const t_vm = prof.start();
             const inv: f32 = 1.0 / @as(f32, @floatFromInt(model.trees.items.len));
             for (valid_scratch, valid_sum) |*dst, s| dst.* = s * inv;
-            score = try evaluate(gpa, cfg.objective, valid_scratch, v.labels);
+            score = try evaluate(gpa, cfg.objective, valid_scratch, v.labels, v.weights);
             prof.stop(.valid_metric, t_vm);
             valid_ns += prof.now() - wall0;
 
@@ -227,7 +232,13 @@ fn evaluate(
     obj: Objective,
     pred: []f32,
     labels: []const f32,
+    weights: []const f32,
 ) !f64 {
+    if (weights.len != 0) return switch (obj) {
+        .logistic => try metric.aucW(gpa, pred, labels, weights),
+        .squared_error => metric.rmseW(pred, labels, weights),
+        .softmax => unreachable, // Refused by `Config.validate`.
+    };
     return switch (obj) {
         .logistic => try metric.auc(gpa, pred, labels),
         .squared_error => metric.rmse(pred, labels),

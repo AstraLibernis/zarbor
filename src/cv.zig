@@ -278,7 +278,12 @@ pub fn writePolicyScores(out: *std.Io.Writer, scores: []const PolicyScore, chose
 
 /// A holdout's score from natural-scale predictions (`width` per row): AUC, RMSE or multiclass
 /// log loss.
-pub fn holdoutScore(gpa: std.mem.Allocator, cfg: config.Config, pred: []const f32, labels: []const f32) !f64 {
+pub fn holdoutScore(gpa: std.mem.Allocator, cfg: config.Config, pred: []const f32, labels: []const f32, weights: []const f32) !f64 {
+    if (weights.len != 0) return switch (cfg.objective()) {
+        .logistic => try metric.aucW(gpa, pred, labels, weights),
+        .squared_error => metric.rmseW(pred, labels, weights),
+        .softmax => metric.mloglossProbW(pred, labels, cfg.width(), weights),
+    };
     return switch (cfg.objective()) {
         .logistic => try metric.auc(gpa, pred, labels),
         .squared_error => metric.rmse(pred, labels),
@@ -387,7 +392,7 @@ pub fn crossValidate(
         };
         try scored.appendSlice(gpa, perm[head..]);
 
-        per_fold[k] = try holdoutScore(gpa, cfg, scores, valid_ds.labels);
+        per_fold[k] = try holdoutScore(gpa, cfg, scores, valid_ds.labels, valid_ds.weights);
         if (opts.progress) |w| {
             try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}", .{
                 k,               n_fit,
@@ -417,11 +422,14 @@ pub fn crossValidate(
     const ys = try gpa.alloc(f32, scored.items.len);
     defer gpa.free(ys);
     const src = opts.oof orelse return error.PooledScoreNeedsOofBuffer;
+    const ws = try gpa.alloc(f32, if (full.weights.len != 0) scored.items.len else 0);
+    defer gpa.free(ws);
     for (scored.items, 0..) |row, i| {
         @memcpy(ps[i * cols ..][0..cols], src[row * cols ..][0..cols]);
         ys[i] = full.labels[row];
+        if (ws.len != 0) ws[i] = full.weights[row];
     }
-    const pooled = try holdoutScore(gpa, cfg, ps, ys);
+    const pooled = try holdoutScore(gpa, cfg, ps, ys, ws);
 
     return .{
         .pooled = pooled,

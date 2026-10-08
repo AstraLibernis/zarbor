@@ -123,6 +123,8 @@ pub const Dataset = struct {
     levels: [][][]u8,
     /// Empty when the frame carried no target column.
     labels: []f32,
+    /// Per-row weights (`--weight-col`); empty means every row weighs 1.
+    weights: []f32 = &.{},
 
     pub fn deinit(d: *Dataset) void {
         const gpa = d.gpa;
@@ -144,6 +146,7 @@ pub const Dataset = struct {
         }
         gpa.free(d.levels);
         if (d.labels.len != 0) gpa.free(d.labels);
+        if (d.weights.len != 0) gpa.free(d.weights);
         d.* = undefined;
     }
 
@@ -341,6 +344,11 @@ pub fn quantise(
     var labels: []f32 = &.{};
     errdefer if (labels.len != 0) gpa.free(labels);
     if (label) |ls| labels = try ls.enc.encode(gpa, src, ls.col);
+    var weights: []f32 = &.{};
+    errdefer if (weights.len != 0) gpa.free(weights);
+    if (label) |ls| if (ls.weight_col) |wc| {
+        weights = try readWeights(gpa, src, wc);
+    };
 
     return .{
         .gpa = gpa,
@@ -356,7 +364,24 @@ pub fn quantise(
         .names = names,
         .levels = levels,
         .labels = labels,
+        .weights = weights,
     };
+}
+
+/// A weight column: numeric, every value finite and at least 0, and not all 0. A missing or
+/// negative weight has no meaning a model could act on, so it is refused, not read as 0.
+pub fn readWeights(gpa: std.mem.Allocator, src: *const Frame, col: usize) ![]f32 {
+    if (src.kinds[col] != .numeric) return error.WeightColumnNotNumeric;
+    const w = try gpa.dupe(f32, src.values[col]);
+    errdefer gpa.free(w);
+    var sum: f64 = 0;
+    for (w) |v| {
+        if (!std.math.isFinite(v)) return error.MissingWeight;
+        if (v < 0) return error.NegativeWeight;
+        sum += v;
+    }
+    if (sum <= 0) return error.WeightsSumToZero;
+    return w;
 }
 
 /// A dataset of only `rows`, sharing the source's edges. For train/validation
@@ -436,6 +461,12 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         labels = try gpa.alloc(f32, n);
         for (rows, labels) |r, *l| l.* = ds.labels[r];
     }
+    errdefer if (labels.len != 0) gpa.free(labels);
+    var weights: []f32 = &.{};
+    if (ds.weights.len != 0) {
+        weights = try gpa.alloc(f32, n);
+        for (rows, weights) |r, *w| w.* = ds.weights[r];
+    }
 
     return .{
         .gpa = gpa,
@@ -451,5 +482,6 @@ pub fn subset(gpa: std.mem.Allocator, ds: *const Dataset, rows: []const u32) !Da
         .names = names,
         .levels = levels,
         .labels = labels,
+        .weights = weights,
     };
 }

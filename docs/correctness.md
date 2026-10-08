@@ -39,7 +39,11 @@ trees: XGBoost `pred_contribs` (100 trees, hessian cover) within 1.4e-6, inside 
 f32 error (its values miss its own margin by up to 3.8e-6); LightGBM `pred_contrib` (30 trees,
 row-count cover) 3.4e-7; CatBoost `ShapValues` (50 symmetric trees, row-count cover) 3.4e-7,
 once zarbor walks a symmetric tree's levels in CatBoost's order (last split at the root;
-path-dependent SHAP depends on the order, the sum does not). Multinomial logistic
+path-dependent SHAP depends on the order, the sum does not). Sample weights
+(`--weight-col`, gamma-distributed with 5% zeros): XGBoost weighted 100 trees 7.1e-7 and
+weighted 4-class softmax 7.7e-7, LightGBM weighted 30 trees 6.2e-7; the weighted linear
+objectives equal scikit-learn's `sample_weight` fits at the optimum (logistic 1.8e-9,
+multinomial 5.2e-10, ridge 1.1e-9). Multinomial logistic
 regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows, 8 integer
 columns so the binned design holds the raw values, standardisation off on both sides): the
 penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`

@@ -31,6 +31,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--label`, `--objective` | task | always: `logistic` for a yes/no target, `softmax` for three or more classes, `squared_error` for a number |
 | `--pos-label` | task | when the sorted class order guesses wrong ("abnormal" < "normal") |
 | `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
+| `--weight-col` | task | rows of unequal importance: survey or exposure weights, recent data, deduplicated rows |
 | `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
 | `--has_time` | task | rows are in time order and the model must not peek ahead (CatBoost style) |
 | `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
@@ -122,6 +123,15 @@ by sorted class order, as in scikit-learn's `LabelEncoder`, so `No < Yes` makes 
 positive class; `--pos-label` overrides. Refused with a reason: more than two classes under
 logistic, a single class, missing target values, and numeric values outside [0, 1] under
 logistic. `--scale_pos_weight` weights the positives.
+
+**Sample weights** (`--weight-col=NAME`, in `train`, `cv` and `tune`): a numeric column of
+per-row weights, at least 0, none missing; it is never a feature. A row's weight multiplies its
+gradient and hessian, as XGBoost and LightGBM apply one, so splits, leaf values and
+`min_child_weight` follow it, while `min_child_samples` still counts rows. The starting score is
+the weighted label mean; the forest's leaves hold weighted means (scikit-learn's
+`sample_weight`); the linear model weights each row's loss. Validation, `cv` and `tune` scores
+are weighted too. A weight of 0 acts as a dropped row and 2 as a duplicated one. Not yet with
+CatBoost-style trees.
 
 **Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per

@@ -73,6 +73,10 @@ pd.concat([X, pd.Series(yreg, name="yreg")], axis=1).to_csv(WORK / "reg.csv", in
 XC = pd.concat([X.iloc[:, :4], CATS], axis=1)
 pd.concat([XC, pd.Series(ycat, name="y")], axis=1).to_csv(WORK / "cat.csv", index=False)
 pd.concat([X, pd.Series(ymc, name="ymc")], axis=1).to_csv(WORK / "multi.csv", index=False)
+# Row weights from 0.1 to 5, some exactly 0, for the weighted cases.
+W = np.where(np.random.default_rng(5).random(N) < 0.05, 0.0, np.random.default_rng(6).gamma(2.0, 0.6, N).clip(0.1, 5))
+pd.concat([X, pd.Series(W, name="w"), pd.Series(y, name="y")], axis=1).to_csv(WORK / "wdisc.csv", index=False)
+pd.concat([X, pd.Series(W, name="w"), pd.Series(ymc, name="ymc")], axis=1).to_csv(WORK / "wmulti.csv", index=False)
 MEAN = y.mean()
 BASE_MARGIN = float(np.log(MEAN / (1 - MEAN)))
 
@@ -270,6 +274,38 @@ def cat_ctr():
         report(f"catboost target statistics, complexity {cx}, 50 trees", z,
                cat_pred(XC, ycat, iterations=50, learning_rate=0.1, one_hot_max_size=2, max_ctr_complexity=cx,
                         cat_features=["c2", "c3", "c40"]))
+
+
+# ---- sample weights: each row's gradient and hessian times its weight -------------------------
+WMEAN = float(np.sum(W * y) / np.sum(W))
+
+
+@case
+def xgb_weights():
+    z = zarbor("wdisc.csv", "y", XZ + ["--weight-col=w", "--n_rounds=100", "--max_depth=6", "--learning_rate=0.1"])
+    p = dict(objective="binary:logistic", tree_method="hist", max_bin=256, nthread=16, seed=0, base_score=WMEAN,
+             eta=0.1, max_depth=6)
+    ref = xgb.train(p, xgb.DMatrix(X, y, weight=W), 100).predict(xgb.DMatrix(X))
+    report("xgb weighted, 100 trees", z, ref)
+
+
+@case
+def xgb_weights_multiclass():
+    z = zarbor("wmulti.csv", "ymc", XZ + ["--weight-col=w", "--objective=softmax", "--n_rounds=40", "--max_depth=6",
+                                         "--learning_rate=0.1"], cols=4)
+    p = dict(objective="multi:softprob", num_class=4, tree_method="hist", max_bin=256, nthread=16, seed=0, eta=0.1,
+             max_depth=6)
+    ref = xgb.train(p, xgb.DMatrix(X, ymc, weight=W), 40).predict(xgb.DMatrix(X))
+    report("xgb weighted multiclass, 40 rounds", z.ravel(), ref.ravel())
+
+
+@case
+def lgb_weights():
+    z = zarbor("wdisc.csv", "y", LZ + ["--weight-col=w", "--n_rounds=30", "--learning_rate=0.1"])
+    p = dict(objective="binary", max_bin=255, num_threads=16, seed=0, verbose=-1, max_depth=-1, num_leaves=31,
+             min_data_in_leaf=0, min_sum_hessian_in_leaf=1.0, lambda_l2=1.0, learning_rate=0.1)
+    ref = lgb.train(p, lgb.Dataset(X, y, weight=W), 30).predict(X)
+    report("lgb weighted, 30 trees", z, ref)
 
 
 # ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------

@@ -127,3 +127,114 @@ pub fn accuracy(scores: []const f32, labels: []const f32, k: usize) f64 {
     }
     return @as(f64, @floatFromInt(hit)) / @as(f64, @floatFromInt(n));
 }
+
+// ------------------------------------------------------------ weighted
+
+/// Weighted ROC AUC (scikit-learn's `sample_weight`, XGBoost's weighted `auc`): each positive's
+/// weight times the negative weight scored below it, a tie counting half, over the product of
+/// the two classes' total weights. Rows sort by score through their index, so each keeps its
+/// weight; ties are blocks of one score.
+pub fn aucW(gpa: std.mem.Allocator, scores: []const f32, labels: []const f32, weights: []const f32) !f64 {
+    std.debug.assert(scores.len == labels.len and weights.len == labels.len);
+    const n = scores.len;
+    if (n == 0) return 0.5;
+    const buf = try gpa.alloc(u64, 2 * n);
+    defer gpa.free(buf);
+    for (buf[0..n], scores, 0..) |*v, x, i| v.* = @as(u64, radix.f32Key(x)) << 32 | @as(u32, @intCast(i));
+    const src = radix.sortHigh32(buf[0..n], buf[n..]);
+
+    var below: f64 = 0; // negative weight scored strictly lower
+    var pos: f64 = 0;
+    var neg: f64 = 0;
+    var area: f64 = 0;
+    var i: usize = 0;
+    while (i < n) {
+        const key = src[i] >> 32;
+        var j = i;
+        var p: f64 = 0;
+        var q: f64 = 0;
+        while (j < n and src[j] >> 32 == key) : (j += 1) {
+            const r: usize = @intCast(src[j] & 0xFFFF_FFFF);
+            if (labels[r] > 0.5) p += weights[r] else q += weights[r];
+        }
+        area += p * (below + 0.5 * q);
+        below += q;
+        pos += p;
+        neg += q;
+        i = j;
+    }
+    if (pos == 0 or neg == 0) return 0.5;
+    return area / (pos * neg);
+}
+
+fn weightSum(weights: []const f32) f64 {
+    var s: f64 = 0;
+    for (weights) |w| s += w;
+    return s;
+}
+
+/// Weighted mean binary cross-entropy from raw log-odds.
+pub fn loglossW(raw: []const f32, labels: []const f32, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (raw, labels, weights) |r, y, w| {
+        const z: f64 = r;
+        const softplus = if (z > 0) z + @log(1 + @exp(-z)) else @log(1 + @exp(z));
+        acc += w * (softplus - @as(f64, y) * z);
+    }
+    return acc / weightSum(weights);
+}
+
+/// Weighted mean binary cross-entropy from probabilities, clamped as `loglossProb`.
+pub fn loglossProbW(prob: []const f32, labels: []const f32, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (prob, labels, weights) |pr, y, w| {
+        const q = std.math.clamp(@as(f64, pr), 1e-7, 1 - 1e-7);
+        acc += w * -(@as(f64, y) * @log(q) + (1 - @as(f64, y)) * @log(1 - q));
+    }
+    return acc / weightSum(weights);
+}
+
+/// Weighted root mean squared error.
+pub fn rmseW(pred: []const f32, labels: []const f32, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (pred, labels, weights) |p, y, w| {
+        const d: f64 = @as(f64, p) - @as(f64, y);
+        acc += w * d * d;
+    }
+    return @sqrt(acc / weightSum(weights));
+}
+
+/// Weighted multiclass cross-entropy from raw scores (`mlogloss`'s layout).
+pub fn mloglossW(raw: []const f32, labels: []const f32, k: usize, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (labels, weights, 0..) |y, w, r| {
+        const row = raw[r * k ..][0..k];
+        var top: f64 = row[0];
+        for (row[1..]) |v| top = @max(top, @as(f64, v));
+        var sum: f64 = 0;
+        for (row) |v| sum += @exp(@as(f64, v) - top);
+        acc += w * (top + @log(sum) - @as(f64, row[@intFromFloat(y)]));
+    }
+    return acc / weightSum(weights);
+}
+
+/// Weighted multiclass cross-entropy from probabilities, clamped as `mloglossProb`.
+pub fn mloglossProbW(prob: []const f32, labels: []const f32, k: usize, weights: []const f32) f64 {
+    var acc: f64 = 0;
+    for (labels, weights, 0..) |y, w, r| acc -= w * @log(@max(@as(f64, prob[r * k + @as(usize, @intFromFloat(y))]), 1e-15));
+    return acc / weightSum(weights);
+}
+
+/// Weighted share of rows whose highest score is their class.
+pub fn accuracyW(scores: []const f32, labels: []const f32, k: usize, weights: []const f32) f64 {
+    var hit: f64 = 0;
+    for (labels, weights, 0..) |y, w, r| {
+        const row = scores[r * k ..][0..k];
+        var best: usize = 0;
+        for (row, 0..) |v, c| if (v > row[best]) {
+            best = c;
+        };
+        if (@as(f32, @floatFromInt(best)) == y) hit += w;
+    }
+    return hit / weightSum(weights);
+}

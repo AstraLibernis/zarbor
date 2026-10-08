@@ -31,6 +31,7 @@ pub const usage =
     \\  --max-bytes=N       CSV size cap in bytes (default 1<<31)
     \\  --split-col=NAME    column assigning rows to train(<0.5)/valid(>=0.5);
     \\                      overrides --valid-frac, and is dropped as a feature
+    \\  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
     \\  --save=FILE         write the trained model to FILE
     \\
     \\other commands:

@@ -30,6 +30,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var split_seed: u64 = 1;
     var max_bytes: usize = 1 << 31;
     var split_col: ?[]const u8 = null;
+    var weight_col: ?[]const u8 = null;
     var save_path: ?[]const u8 = null;
     var pos_label: ?[]const u8 = null;
 
@@ -73,6 +74,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             prof.enabled = std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
         } else if (std.mem.eql(u8, key, "split-col")) {
             split_col = val;
+        } else if (std.mem.eql(u8, key, "weight-col")) {
+            weight_col = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
         } else if (try config.applyFlag(&cfg, key, val)) {
@@ -125,6 +128,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // program exactly the same partition it used itself, which is the only way
     // to compare against another implementation without the split being a
     // confound. It is a label, never a feature.
+    // A weight column is read with the label and is never a feature.
+    var weight_idx: ?usize = null;
+    if (weight_col) |name| {
+        weight_idx = frame.columnIndex(name) orelse return error.WeightColumnNotFound;
+        try drops.append(gpa, name);
+    }
     var split_idx: ?usize = null;
     if (split_col) |name| {
         split_idx = frame.columnIndex(name) orelse return error.SplitColumnNotFound;
@@ -195,13 +204,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // score below stays a hold-out score.
     if (cfg.bin.bin_policy == .auto) {
         var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
-        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc }, drops.items, null, perm[0..n_train], &scores);
+        cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items, null, perm[0..n_train], &scores);
         try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
     }
 
     // `bin` times binning alone: the split above and any `auto` choice are not binning.
     const t_bin0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc }, drops.items) catch |err| {
+    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx }, drops.items) catch |err| {
         if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
         return err;
@@ -283,7 +292,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         const scores = try gpa.alloc(f32, v.n_rows * cfg.width());
         defer gpa.free(scores);
         const scale = res.model.predictForReport(pool, v, scores);
-        try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width());
+        try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width(), v.weights);
     }
     try prof.report(out);
     try out.flush();
@@ -328,7 +337,29 @@ fn report(
     labels: []const f32,
     scale: Scale,
     width: usize,
+    weights: []const f32,
 ) !void {
+    if (weights.len != 0) {
+        // Weighted holdout: the same metrics, each row counted by its weight.
+        switch (obj) {
+            .logistic => try out.print("valid   auc={d:.6}  logloss={d:.6}  (weighted)\n", .{
+                try metric.aucW(gpa, pred, labels, weights),
+                switch (scale) {
+                    .raw => metric.loglossW(pred, labels, weights),
+                    .natural => metric.loglossProbW(pred, labels, weights),
+                },
+            }),
+            .squared_error => try out.print("valid   rmse={d:.6}  (weighted)\n", .{metric.rmseW(pred, labels, weights)}),
+            .softmax => try out.print("valid   mlogloss={d:.6}  accuracy={d:.6}  (weighted)\n", .{
+                switch (scale) {
+                    .raw => metric.mloglossW(pred, labels, width, weights),
+                    .natural => metric.mloglossProbW(pred, labels, width, weights),
+                },
+                metric.accuracyW(pred, labels, width, weights),
+            }),
+        }
+        return;
+    }
     switch (obj) {
         .logistic => {
             const a = try metric.auc(gpa, pred, labels);

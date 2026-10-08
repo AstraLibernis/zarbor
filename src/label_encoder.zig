@@ -203,4 +203,6 @@ pub const LabelEncoder = struct {
 pub const LabelSpec = struct {
     col: usize,
     enc: *const LabelEncoder,
+    /// A column of per-row weights (`--weight-col`), read with the labels.
+    weight_col: ?usize = null,
 };

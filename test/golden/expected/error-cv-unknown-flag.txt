@@ -11,6 +11,7 @@ usage: zarbor cv <train.csv> --label=<column> [options]
                       the spread (default 1). One fold assignment on a
                       small table is mostly noise; this is how you find
                       out whether a difference survives it.
+  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
   --group-col=NAME    keep rows sharing this column's value in the
                       same fold, and drop it as a feature. Required
                       whenever a unit appears more than once (a panel,

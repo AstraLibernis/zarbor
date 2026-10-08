@@ -365,12 +365,17 @@ pub fn train(
     if (k > 1) {
         const priors = try gpa.alloc(f32, k);
         defer gpa.free(priors);
-        booster.softmaxBase(ds.labels, priors[0..k]);
+        booster.softmaxBaseW(ds.labels, ds.weights, priors[0..k]);
         for (0..k) |cls| theta[cls * (p + 1) + p] = priors[cls];
     } else {
         var sum: f64 = 0;
-        for (ds.labels) |y| sum += y;
-        const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
+        var wsum: f64 = 0;
+        for (ds.labels, 0..) |y, r| {
+            const w: f64 = if (ds.weights.len != 0) ds.weights[r] else 1;
+            sum += w * y;
+            wsum += w;
+        }
+        const mean = sum / wsum;
         theta[p] = switch (cfg.objective) {
             .logistic => blk: {
                 const q = std.math.clamp(mean, 1e-6, 1 - 1e-6);
@@ -443,7 +448,11 @@ pub fn train(
         const pred = try gpa.alloc(f32, v.n_rows * k);
         defer gpa.free(pred);
         model.predict(pool, v, pred);
-        score = switch (cfg.objective) {
+        score = if (v.weights.len != 0) switch (cfg.objective) {
+            .logistic => try metric.aucW(gpa, pred, v.labels, v.weights),
+            .squared_error => metric.rmseW(pred, v.labels, v.weights),
+            .softmax => metric.mloglossProbW(pred, v.labels, k, v.weights),
+        } else switch (cfg.objective) {
             .logistic => try metric.auc(gpa, pred, v.labels),
             .squared_error => metric.rmse(pred, v.labels),
             .softmax => metric.mloglossProb(pred, v.labels, k),

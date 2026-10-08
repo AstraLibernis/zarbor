@@ -16,6 +16,7 @@ usage: zarbor tune <train.csv> --label=<column> [options]
                       --algo is used.
   --folds=N           folds per evaluation (default 5)
   --fold-seed=N       seed for the fold assignment (default 1)
+  --weight-col=NAME   per-row weights (numeric, >= 0); dropped as a feature
   --group-col=NAME    keep rows sharing this column's value in the
                       same fold, and drop it as a feature. Required
                       whenever a unit appears more than once (a panel,

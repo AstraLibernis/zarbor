@@ -244,6 +244,8 @@ const GradCtx = struct {
     grads: []hist.GradPair,
     scale_pos_weight: f32,
     objective: Objective,
+    /// Per-row weights multiplying each gradient and hessian; empty for none.
+    weights: []const f32 = &.{},
     /// Softmax: classes, and the hessian form. `grads` is then class-major, `grads[c * n + r]`.
     num_class: usize = 1,
     softmax_hessian: SoftmaxHessian = .xgboost,
@@ -258,6 +260,11 @@ const GradCtx = struct {
 
     fn runFor(self: *GradCtx, comptime obj: Objective, begin: usize, end: usize) void {
         if (obj == .softmax) return self.softmaxRows(begin, end);
+        defer if (self.weights.len != 0) for (self.grads[begin..end], self.weights[begin..end]) |*gp, w| {
+            // As XGBoost and LightGBM weight a row: both derivatives, after the hessian floor.
+            gp.g *= w;
+            gp.h *= w;
+        };
         var i = begin;
         if (obj == .logistic) {
             const one: F8 = @splat(1.0);
@@ -305,6 +312,7 @@ const GradCtx = struct {
         for (begin..end) |r| {
             const row = self.raw[r * k ..][0..k];
             const y: usize = @intFromFloat(self.labels[r]);
+            const wt: f32 = if (self.weights.len != 0) self.weights[r] else 1;
             switch (self.softmax_hessian) {
                 .xgboost => {
                     var wmax: f32 = std.math.floatMin(f32);
@@ -313,8 +321,9 @@ const GradCtx = struct {
                     for (row) |v| wsum += @exp(v - wmax);
                     for (row, 0..) |v, c| {
                         const p: f32 = @exp(v - wmax) / @as(f32, @floatCast(wsum));
-                        const h = @max(2.0 * p * (1.0 - p), 1e-16);
-                        self.grads[c * n + r] = .{ .g = if (c == y) p - 1.0 else p, .h = h };
+                        // XGBoost weights inside its floor: `fmax(2 p (1 - p) wt, eps)`.
+                        const h = @max(2.0 * p * (1.0 - p) * wt, 1e-16);
+                        self.grads[c * n + r] = .{ .g = (if (c == y) p - 1.0 else p) * wt, .h = h };
                     }
                 },
                 .lightgbm => {
@@ -326,8 +335,8 @@ const GradCtx = struct {
                     for (row, 0..) |v, c| {
                         const p = @exp(@as(f64, v) - wmax) / wsum;
                         self.grads[c * n + r] = .{
-                            .g = @floatCast(if (c == y) p - 1.0 else p),
-                            .h = @floatCast(factor * p * (1.0 - p)),
+                            .g = @floatCast((if (c == y) p - 1.0 else p) * wt),
+                            .h = @floatCast(factor * p * (1.0 - p) * wt),
                         };
                     }
                 },
@@ -457,7 +466,13 @@ fn evaluate(
     raw: []const f32,
     labels: []const f32,
     num_class: usize,
+    weights: []const f32,
 ) !f64 {
+    if (weights.len != 0) return switch (obj) {
+        .logistic => try metric.aucW(gpa, raw, labels, weights),
+        .squared_error => metric.rmseW(raw, labels, weights),
+        .softmax => metric.mloglossW(raw, labels, num_class, weights),
+    };
     return switch (obj) {
         .logistic => blk: {
             // AUC is rank-based: log-odds rank like probabilities, skip the sigmoid.
@@ -472,9 +487,18 @@ fn evaluate(
 /// (XGBoost's `InitEstimation`; LightGBM omits the centring, which shifts every class equally and
 /// so changes no probability, gradient or tree). A class with no rows gets XGBoost's floor.
 pub fn softmaxBase(labels: []const f32, out: []f32) void {
+    softmaxBaseW(labels, &.{}, out);
+}
+
+/// `softmaxBase` with each row counted by its weight (none: 1).
+pub fn softmaxBaseW(labels: []const f32, weights: []const f32, out: []f32) void {
     @memset(out, 0);
-    for (labels) |y| out[@intFromFloat(y)] += 1;
-    const n: f32 = @floatFromInt(labels.len);
+    var n: f32 = 0;
+    for (labels, 0..) |y, r| {
+        const w: f32 = if (weights.len != 0) weights[r] else 1;
+        out[@intFromFloat(y)] += w;
+        n += w;
+    }
     var mean: f32 = 0;
     for (out) |*v| {
         v.* = @log(@max(v.* / n, 1e-6));
@@ -508,6 +532,8 @@ pub fn train(
 ) !TrainResult {
     try cfg.validate();
     if (ds.labels.len == 0) return error.NoLabels;
+    // CatBoost weights its target statistics and leaf estimates too; not built yet (PLAN 3).
+    if (ds.weights.len != 0 and cfg.tree.grow_policy == .symmetric) return error.WeightsSymmetricUnsupported;
 
     var model = Model{
         .gpa = gpa,
@@ -523,11 +549,17 @@ pub fn train(
     if (k > 1) {
         model.num_class = cfg.num_class;
         model.class_base = try gpa.alloc(f32, k);
-        if (cfg.base_score) |b| @memset(model.class_base, b) else softmaxBase(ds.labels, model.class_base);
+        if (cfg.base_score) |b| @memset(model.class_base, b) else softmaxBaseW(ds.labels, ds.weights, model.class_base);
     } else model.base_score = if (cfg.base_score) |b| b else blk: {
+        // The (weighted) label mean, as XGBoost and LightGBM start a weighted fit.
         var sum: f64 = 0;
-        for (ds.labels) |y| sum += y;
-        const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
+        var wsum: f64 = 0;
+        for (ds.labels, 0..) |y, r| {
+            const w: f64 = if (ds.weights.len != 0) ds.weights[r] else 1;
+            sum += w * y;
+            wsum += w;
+        }
+        const mean = sum / wsum;
         break :blk switch (cfg.objective) {
             .logistic => b: {
                 const p = std.math.clamp(mean, 1e-6, 1 - 1e-6);
@@ -621,6 +653,7 @@ pub fn train(
             .objective = cfg.objective,
             .num_class = k,
             .softmax_hessian = cfg.softmax_hessian,
+            .weights = ds.weights,
         };
         const t_g = prof.start();
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
@@ -702,7 +735,7 @@ pub fn train(
             }
 
             const t_vm = prof.start();
-            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, k);
+            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, k, v.weights);
             prof.stop(.valid_metric, t_vm);
             const improved = if (better) score > best_score else score < best_score;
             if (improved) {
