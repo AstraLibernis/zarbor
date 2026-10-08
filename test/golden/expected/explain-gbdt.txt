@@ -1,0 +1,24 @@
+$ zarbor explain titanic3.csv --model=g.zm --shap=s.csv --id-col=name --top=5
+exit 0
+--- stdout
+model   g.zm  (gbdt, logistic, 8 features)
+
+importance (summed over 500 trees; cover = hessian)
+  feature                                  gain   gain%        cover  splits
+  sex                                 1738.4884  30.81%      22880.7     239
+  fare                                1326.4804  23.51%     108433.4    2631
+  age                                 1288.9116  22.84%      76372.8    2438
+  cabin                                527.8730   9.35%      65311.3    1020
+  pclass                               416.7690   7.39%       7054.5     210
+
+mean |SHAP| over 1309 rows
+  sex                                  1.658969
+  fare                                 0.840418
+  age                                  0.813900
+  pclass                               0.686695
+  cabin                                0.497297
+check   values + bias = raw score, largest relative difference 1.32e-6
+wrote   s.csv
+--- stderr
+--- files
+s.csv  173764 bytes  sha256 70040fb1fe977e6052ae5fbc04850372a33a613d062deeaef5e12d3a3a9f8e98

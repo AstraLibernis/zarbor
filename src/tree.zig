@@ -317,8 +317,19 @@ pub const LinTerm = extern struct {
     center: f32,
 };
 
+/// What training saw at a node, for importance and SHAP: the split's gain (XGBoost's `loss_chg`,
+/// before `min_split_gain` is taken off; 0 at a leaf), and the hessian sum and row count that
+/// reached it (XGBoost's and LightGBM's "cover", respectively).
+pub const NodeStat = extern struct {
+    gain: f32 = 0,
+    hess: f32 = 0,
+    count: f32 = 0,
+};
+
 pub const Tree = struct {
     nodes: []Node,
+    /// One per node, or empty for a model saved before format 7.
+    stats: []NodeStat = &.{},
     /// Flat store of sorted categorical level ids (`Node.cat_ofs`, `n_cat`). Empty with no categorical
     /// split, i.e. always under `cat_split = ordinal`.
     cat_ids: []data.BinIdx = &.{},
@@ -329,6 +340,7 @@ pub const Tree = struct {
 
     pub fn deinit(t: *Tree, gpa: std.mem.Allocator) void {
         gpa.free(t.nodes);
+        if (t.stats.len != 0) gpa.free(t.stats);
         if (t.cat_ids.len != 0) gpa.free(t.cat_ids);
         if (t.lin.len != 0) gpa.free(t.lin);
         for (t.combos) |*c| c.deinit(gpa);

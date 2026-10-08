@@ -37,7 +37,9 @@ pub const magic = "ZMDL";
 /// the list form, so a model saved before this change scores identically.
 /// 6 added the class count and each class's starting score (softmax). Older files
 /// have one class.
-pub const format_version: u32 = 6;
+/// 7 added each node's training statistics (gain, hessian, rows) after each tree,
+/// for importance and SHAP. Older files load without them.
+pub const format_version: u32 = 7;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -112,13 +114,23 @@ pub const Bundle = struct {
 
     /// Predictions on the objective's natural scale.
     pub fn predict(b: *const Bundle, pool: *Pool, ds: *const data.Dataset, out: []f32) void {
+        b.predictLinked(pool, ds, out, true);
+    }
+
+    /// Scores before the link (log-odds, class scores; a forest's mean, a regression's value):
+    /// what SHAP values sum to.
+    pub fn predictRaw(b: *const Bundle, pool: *Pool, ds: *const data.Dataset, out: []f32) void {
+        b.predictLinked(pool, ds, out, false);
+    }
+
+    fn predictLinked(b: *const Bundle, pool: *Pool, ds: *const data.Dataset, out: []f32, link: bool) void {
         std.debug.assert(out.len == ds.n_rows * b.width());
         switch (b.kind) {
             .gbdt, .forest => {
-                var ctx = TreeCtx{ .b = b, .ds = ds, .out = out };
+                var ctx = TreeCtx{ .b = b, .ds = ds, .out = out, .link = link };
                 pool.parallelFor(ds.n_rows, &ctx, TreeCtx.run, 2048);
             },
-            .linear => b.lin.?.predict(pool, ds, out),
+            .linear => if (link) b.lin.?.predict(pool, ds, out) else b.lin.?.predictRaw(pool, ds, out),
         }
     }
 };
@@ -127,6 +139,8 @@ const TreeCtx = struct {
     b: *const Bundle,
     ds: *const data.Dataset,
     out: []f32,
+    /// Apply the objective's link (sigmoid, softmax); off for raw scores.
+    link: bool = true,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -142,7 +156,7 @@ const TreeCtx = struct {
                 const c = i % k;
                 for (begin..end) |r| out[(r - begin) * k + c] += t.predictBinned(self.ds, r);
             }
-            for (begin..end) |r| booster.softmaxRow(out[(r - begin) * k ..][0..k]);
+            if (self.link) for (begin..end) |r| booster.softmaxRow(out[(r - begin) * k ..][0..k]);
             return;
         }
         const out = self.out[begin..end];
@@ -156,7 +170,7 @@ const TreeCtx = struct {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
         switch (b.kind) {
-            .gbdt => if (b.objective == .logistic) {
+            .gbdt => if (b.objective == .logistic and self.link) {
                 for (out) |*o| o.* = booster.sigmoid(o.*);
             },
             .forest => for (out) |*o| {
@@ -319,6 +333,13 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putF32(gpa, b, term.coef);
             try putF32(gpa, b, term.center);
         }
+        // Version 7: one statistics record per node, or none.
+        try putU32(gpa, b, @intCast(t.stats.len));
+        for (t.stats) |st| {
+            try putF32(gpa, b, st.gain);
+            try putF32(gpa, b, st.hess);
+            try putF32(gpa, b, st.count);
+        }
         // Version 5: the combination statistics `combo` nodes index.
         try putU32(gpa, b, @intCast(t.combos.len));
         for (t.combos) |c| {
@@ -474,6 +495,20 @@ fn readTrees(gpa: std.mem.Allocator, r: *Reader, ver: u32, n_features: usize) ![
             for (nodes) |n| {
                 if (n.is_cat and n.cat_ofs + n.n_cat > n_ids) return error.BadModelFile;
                 if (n.n_lin != 0 and n.lin_ofs + n.n_lin > nl) return error.BadModelFile;
+            }
+        }
+        if (ver >= 7) {
+            const ns = try r.count(12);
+            if (ns != 0 and ns != nn) return error.BadModelFile;
+            if (ns != 0) {
+                const stats = try gpa.alloc(tree.NodeStat, ns);
+                trees[made - 1].stats = stats;
+                for (stats) |*st| {
+                    const gain = try r.f32v();
+                    const hess = try r.f32v();
+                    const count = try r.f32v();
+                    st.* = .{ .gain = gain, .hess = hess, .count = count };
+                }
             }
         }
         if (ver >= 5) try readCombos(gpa, r, n_features, &trees[made - 1]);
@@ -780,6 +815,8 @@ fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
         // Owned before the second allocation, so a failure there frees the
         // nodes rather than leaking them.
         made += 1;
+        if (src[made - 1].stats.len != 0)
+            out[made - 1].stats = try gpa.dupe(tree.NodeStat, src[made - 1].stats);
         if (src[made - 1].cat_ids.len != 0)
             out[made - 1].cat_ids = try gpa.dupe(data.BinIdx, src[made - 1].cat_ids);
         if (src[made - 1].lin.len != 0)

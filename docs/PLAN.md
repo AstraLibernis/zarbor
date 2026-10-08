@@ -94,6 +94,10 @@ symmetric trees and the forest.
 
 ## 2. Feature importance and SHAP
 
+**Progress.** Done 2026-10-08 (model format 7, `zarbor explain`): every "Done when" item below
+holds, plus a brute-force Shapley check (all feature subsets) in the unit tests. Not covered:
+linear leaves and CatBoost combinations (refused with a reason).
+
 **Goal.** `zarbor explain` reports, per feature, how much the model uses it, and per row, how
 much each feature moved that row's prediction.
 

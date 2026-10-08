@@ -34,7 +34,12 @@ at 31 leaves and 50 at 15, CatBoost to 300 trees, with ordered boosting and targ
 and multiclass: 4 classes against XGBoost `multi:softprob` (100 rounds, 400 trees, max
 difference 7.1e-7; and 40 rounds with L1, L2, gamma and `min_child_weight`) and LightGBM
 `multiclass` (10 rounds with `--softmax_hessian=lightgbm`, 6.0e-7). Using the wrong hessian
-form against XGBoost misses by 0.32, so the cases do discriminate. Multinomial logistic
+form against XGBoost misses by 0.32, so the cases do discriminate. SHAP values on the same
+trees: XGBoost `pred_contribs` (100 trees, hessian cover) within 1.4e-6, inside XGBoost's own
+f32 error (its values miss its own margin by up to 3.8e-6); LightGBM `pred_contrib` (30 trees,
+row-count cover) 3.4e-7; CatBoost `ShapValues` (50 symmetric trees, row-count cover) 3.4e-7,
+once zarbor walks a symmetric tree's levels in CatBoost's order (last split at the root;
+path-dependent SHAP depends on the order, the sum does not). Multinomial logistic
 regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows, 8 integer
 columns so the binned design holds the raw values, standardisation off on both sides): the
 penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`

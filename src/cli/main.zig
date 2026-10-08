@@ -16,6 +16,7 @@ const info = @import("info.zig");
 const profile = @import("profile.zig");
 const cv = @import("cv.zig");
 const tune = @import("tune.zig");
+const explain = @import("explain.zig");
 
 pub const usage =
     \\usage: zarbor <train.csv> --label=<column> [options]
@@ -39,6 +40,7 @@ pub const usage =
     \\  zarbor profile <data.csv>   what is in the file, before any model
     \\  zarbor cv      <train.csv> --label=<column> [--folds=5]
     \\  zarbor tune    <train.csv> --label=<column> [--search=random]
+    \\  zarbor explain [data.csv] --model=M.zm   importance and SHAP values
     \\
     \\predict and blend bin the new data with the schema stored in the model,
     \\so categorical levels map to the same bins they did in training. Pass
@@ -78,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, first, "profile")) return profile.run(init, gpa, out);
         if (std.mem.eql(u8, first, "cv")) return cv.run(init, gpa, out);
         if (std.mem.eql(u8, first, "tune")) return tune.run(init, gpa, out);
+        if (std.mem.eql(u8, first, "explain")) return explain.run(init, gpa, out);
     }
     return train.run(init, gpa, out);
 }

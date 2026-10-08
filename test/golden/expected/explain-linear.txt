@@ -1,0 +1,12 @@
+$ zarbor explain titanic3.csv --model=l.zm --top=3
+exit 0
+--- stdout
+model   l.zm  (linear, logistic, 8 features)
+
+mean |SHAP| over 1309 rows
+  sex                                  1.196651
+  cabin                                0.976847
+  pclass                               0.495281
+check   values + bias = raw score, largest relative difference 7.88e-7
+--- stderr
+--- files

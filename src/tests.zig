@@ -10,6 +10,7 @@ test {
     _ = @import("test/bin_test.zig");
     _ = @import("test/booster_test.zig");
     _ = @import("test/csv_test.zig");
+    _ = @import("test/explain_test.zig");
     _ = @import("test/cv_test.zig");
     _ = @import("test/linear_test.zig");
     _ = @import("test/metric_test.zig");
@@ -32,6 +33,7 @@ test {
     std.testing.refAllDecls(@import("csv.zig"));
     std.testing.refAllDecls(@import("csv_profile.zig"));
     std.testing.refAllDecls(@import("cv.zig"));
+    std.testing.refAllDecls(@import("explain.zig"));
     std.testing.refAllDecls(@import("data.zig"));
     std.testing.refAllDecls(@import("label_encoder.zig"));
     std.testing.refAllDecls(@import("goss.zig"));

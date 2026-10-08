@@ -24,4 +24,4 @@ saved   f.zm
 valid   auc=0.889589  logloss=0.396358
 --- stderr
 --- files
-f.zm  261440 bytes  sha256 89906c24fb626d51a3255411a926e70fbf023a9f29dbfb4243c64e0adb8b7ed0
+f.zm  358416 bytes  sha256 722f1f6917a64aec0d29d00a3b100ad526ad0e808dd7aa4d9261423bb5c76098

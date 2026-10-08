@@ -1,0 +1,12 @@
+$ zarbor explain --model=g.zm --top=3
+exit 0
+--- stdout
+model   g.zm  (gbdt, logistic, 8 features)
+
+importance (summed over 500 trees; cover = hessian)
+  feature                                  gain   gain%        cover  splits
+  sex                                 1738.4884  30.81%      22880.7     239
+  fare                                1326.4804  23.51%     108433.4    2631
+  age                                 1288.9116  22.84%      76372.8    2438
+--- stderr
+--- files

@@ -56,6 +56,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--lin_solver`, `--lin_epochs`, `--lin_lr`, `--lin_tol`, `--lin_standardize` | plumbing | the defaults converge; `tune` covers the linear penalties |
 | `--seed` | plumbing | change it to see how much a result is luck |
 | `--n_threads`, `--histogram_pool_size`, `--ordered_bank_limit`, `--max-bytes`, `--verbose_eval` | plumbing | machine limits and logging |
+| `explain --cover` | plumbing | `hessian` or `count`; matters only to match one library's SHAP exactly |
 
 Settings added later (docs/PLAN.md) are classified here as they land.
 
@@ -68,6 +69,8 @@ Settings added later (docs/PLAN.md) are classified here as they land.
     zarbor tune    <train.csv> --label=y [--search=random|grid|bayes|bandit] [--trials=40]
     zarbor profile <data.csv>                          what is in the file, before any model
     zarbor info    --model=m.zm                        what is in a model
+    zarbor explain [data.csv] --model=m.zm [--shap=s.csv] [--cover=hessian|count]
+                                                       importance; SHAP values with data
 
 `train` holds out `--valid-frac` (0.2) of the rows, or the rows where `--split-col` is at
 least 0.5, and prints the hold-out score. Build with `zig build -Doptimize=ReleaseFast`. Plain
@@ -354,6 +357,22 @@ model's own class order. `blend` averages several models' predictions, with opti
 weights. Blending zarbor with an independent library (such as LightGBM) is where zarbor has
 earned its keep: on House Prices, a zarbor + LightGBM blend beat either alone in 20 of 20
 fold seeds. A blend of two zarbor configurations gained nothing.
+
+**Explaining a model** (`zarbor explain`). Without data it prints feature importance from the
+trees: each feature's summed split gain (XGBoost's `total_gain`), cover and split count. With
+a data file it computes SHAP values for every row: exact TreeSHAP for trees (the same values as
+XGBoost's `pred_contribs`, LightGBM's `pred_contrib` and CatBoost's `ShapValues` on the same
+trees), and coefficient times distance from the training mean for the linear model. It prints
+each feature's mean |SHAP| and checks that every row's values plus the bias add up to the
+model's raw score (log-odds, class score, or value). `--shap=FILE` writes the values, one
+`shap_<feature>` column per feature and `shap_bias`, per class under softmax. Rank features by
+mean |SHAP| rather than gain: gain favours numeric columns with many cut points (on Titanic's
+forest, `fare` and `age` rank second and third by gain but fifth and sixth by SHAP).
+`--cover` picks what weights the paths a row does not take: `hessian` (XGBoost's convention,
+the default) or `count` (LightGBM's and CatBoost's). Needs a model saved by this version
+(format 7, which keeps each node's training statistics). Not available: linear leaves,
+CatBoost-style combinations (`--max_ctr_complexity=1` avoids them), and a linear model trained
+with `--lin_standardize=false`.
 
 ## 13. Flag reference
 

@@ -1,0 +1,28 @@
+$ zarbor explain titanic3.csv --model=f.zm --cover=count --top=0
+exit 0
+--- stdout
+model   f.zm  (forest, logistic, 8 features)
+
+importance (summed over 40 trees; cover = count)
+  feature                                  gain   gain%        cover  splits
+  sex                                 2180.6825  33.72%      36031.0     240
+  fare                                1177.8455  18.21%      66470.0     957
+  age                                 1072.2639  16.58%      62718.0     961
+  cabin                                742.8576  11.49%      42163.0     471
+  pclass                               445.2228   6.89%      30425.0     268
+  sibsp                                328.0368   5.07%      32542.0     440
+  parch                                318.1744   4.92%      29487.0     335
+  embarked                             201.4747   3.12%      29997.0     342
+
+mean |SHAP| over 1309 rows
+  sex                                  0.188282
+  cabin                                0.053315
+  pclass                               0.049133
+  fare                                 0.040524
+  age                                  0.036156
+  parch                                0.025572
+  sibsp                                0.019455
+  embarked                             0.018795
+check   values + bias = raw score, largest relative difference 1.43e-7
+--- stderr
+--- files

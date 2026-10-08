@@ -12,6 +12,7 @@ process.
     ./zig-out/bin/zarbor cv   train.csv --label=y --folds=5
     ./zig-out/bin/zarbor tune train.csv --label=y --trials=60 --confirm=3
     ./zig-out/bin/zarbor profile train.csv                     # what is in the file
+    ./zig-out/bin/zarbor explain test.csv --model=m.zm --shap=s.csv   # importance, SHAP values
 
 ## What it does
 

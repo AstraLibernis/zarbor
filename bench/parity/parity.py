@@ -91,9 +91,9 @@ def zarbor(csv, label, flags, cols=1):
 FAILED = []
 
 
-def report(name, z, ref):
+def report(name, z, ref, tol=TOL):
     d = np.abs(z - ref)
-    ok = (d <= TOL * np.maximum(1.0, np.abs(ref))).all()
+    ok = (d <= tol * np.maximum(1.0, np.abs(ref))).all()
     if not ok:
         FAILED.append(name)
     print(f"{'pass' if ok else 'FAIL'}  {name:<44} max|diff| {d.max():.1e}  rows within 6e-7 {(d <= 6e-7).mean() * 100:6.2f}%",
@@ -270,6 +270,52 @@ def cat_ctr():
         report(f"catboost target statistics, complexity {cx}, 50 trees", z,
                cat_pred(XC, ycat, iterations=50, learning_rate=0.1, one_hot_max_size=2, max_ctr_complexity=cx,
                         cat_features=["c2", "c3", "c40"]))
+
+
+# ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------
+def zarbor_shap(csv, label, flags, cover):
+    """Train like `zarbor`, then `zarbor explain --shap`: one column per feature, then the bias."""
+    model, out = WORK / "s.zm", WORK / "s.csv"
+    for cmd in ([Z, str(WORK / csv), f"--label={label}", "--valid-frac=0", "--verbose_eval=0", f"--save={model}", *flags],
+                [Z, "explain", str(WORK / csv), f"--model={model}", f"--shap={out}", f"--cover={cover}"]):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"{' '.join(cmd[:3])} failed:\n{r.stdout[-600:]}{r.stderr[-600:]}")
+    return pd.read_csv(out).to_numpy()
+
+
+@case
+def xgb_shap():
+    z = zarbor_shap("disc.csv", "y", XZ + ["--n_rounds=100", "--max_depth=6", "--learning_rate=0.1"], "hessian")
+    p = dict(objective="binary:logistic", tree_method="hist", max_bin=256, nthread=16, seed=0, base_score=MEAN,
+             eta=0.1, max_depth=6)
+    b = xgb.train(p, xgb.DMatrix(X, y), 100)
+    ref = b.predict(xgb.DMatrix(X), pred_contribs=True)
+    # XGBoost sums SHAP in f32: its own values miss its own margin by up to ~4e-6 here, so that,
+    # not the print rounding, is the tolerance (zarbor's sums match the margin to 1e-6).
+    own = np.abs(ref.sum(axis=1) - b.predict(xgb.DMatrix(X), output_margin=True)).max()
+    report(f"SHAP vs xgb pred_contribs, 100 trees (xgb self-error {own:.1e})", z.ravel(), ref.ravel(), tol=max(TOL, own))
+
+
+@case
+def lgb_shap():
+    z = zarbor_shap("disc.csv", "y", LZ + ["--n_rounds=30", "--learning_rate=0.1"], "count")
+    p = dict(objective="binary", max_bin=255, num_threads=16, seed=0, verbose=-1, max_depth=-1, num_leaves=31,
+             min_data_in_leaf=0, min_sum_hessian_in_leaf=1.0, lambda_l2=1.0, learning_rate=0.1)
+    ref = lgb.train(p, lgb.Dataset(X, y), 30).predict(X, pred_contrib=True)
+    report("SHAP vs lgb pred_contrib, 30 trees", z.ravel(), ref.ravel())
+
+
+@case
+def cat_shap():
+    z = zarbor_shap("disc.csv", "y", CZ + ["--n_rounds=50", "--learning_rate=0.1"], "count")
+    p = dict(depth=6, l2_leaf_reg=3, boosting_type="Plain", bootstrap_type="No", random_strength=0,
+             leaf_estimation_method="Newton", leaf_estimation_iterations=1, leaf_estimation_backtracking="No",
+             border_count=254, feature_border_type="GreedyLogSum", thread_count=16, verbose=0,
+             allow_writing_files=False, has_time=True, iterations=50, learning_rate=0.1)
+    m = catboost.CatBoostClassifier(**p).fit(X, y)
+    ref = m.get_feature_importance(catboost.Pool(X, y), type="ShapValues")
+    report("SHAP vs catboost ShapValues, 50 trees", z.ravel(), ref.ravel())
 
 
 for name in sys.argv[1:] or CASES:

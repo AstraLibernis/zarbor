@@ -295,6 +295,11 @@ pub const Builder = struct {
     static_max_uniq: u32 = 0,
     /// Leaf values of the last grown tree, already scaled by the learning rate.
     values: []f64,
+    /// Gradient sum, hessian sum and row count of each leaf of the last grown tree (its first
+    /// Newton step's), for the tree's node statistics.
+    leaf_g: []f64 = &.{},
+    leaf_h: []f64 = &.{},
+    leaf_n: []f64 = &.{},
     /// Bootstrap weight per row for the tree being grown; empty without bootstrap.
     weights: []f32,
     /// MVS scratch: one candidate per row, each block sorting its own slice.
@@ -385,6 +390,12 @@ pub const Builder = struct {
         errdefer gpa.free(best);
         const values = try gpa.alloc(f64, @as(usize, 1) << @intCast(s.depth));
         errdefer gpa.free(values);
+        const leaf_g = try gpa.alloc(f64, values.len);
+        errdefer gpa.free(leaf_g);
+        const leaf_h = try gpa.alloc(f64, values.len);
+        errdefer gpa.free(leaf_h);
+        const leaf_n = try gpa.alloc(f64, values.len);
+        errdefer gpa.free(leaf_n);
         const weights = try gpa.alloc(f32, if (s.bootstrap == .none) 0 else ds.n_rows);
         errdefer gpa.free(weights);
         const mvs_scratch = try gpa.alloc(f64, if (s.bootstrap == .mvs) ds.n_rows else 0);
@@ -453,6 +464,9 @@ pub const Builder = struct {
             .has_missing = has_missing,
             .best = best,
             .values = values,
+            .leaf_g = leaf_g,
+            .leaf_h = leaf_h,
+            .leaf_n = leaf_n,
             .weights = weights,
             .mvs_scratch = mvs_scratch,
             .leaf_model = leaf,
@@ -495,6 +509,9 @@ pub const Builder = struct {
         b.gpa.free(b.has_missing);
         b.gpa.free(b.best);
         b.gpa.free(b.values);
+        b.gpa.free(b.leaf_g);
+        b.gpa.free(b.leaf_h);
+        b.gpa.free(b.leaf_n);
         b.gpa.free(b.weights);
         b.gpa.free(b.mvs_scratch);
         if (b.bts.len != 0) {
@@ -1044,10 +1061,15 @@ pub const Builder = struct {
             @memset(g, 0);
             @memset(h, 0);
             if (it == 0) {
+                const cnt = b.leaf_n[0..n_leaves];
+                @memset(cnt, 0);
                 for (leaf, grads) |l, gp| {
                     g[l] += gp.g;
                     h[l] += gp.h;
+                    cnt[l] += 1;
                 }
+                @memcpy(b.leaf_g[0..n_leaves], g);
+                @memcpy(b.leaf_h[0..n_leaves], h);
             } else {
                 for (leaf, raw, labels) |l, r0, y| {
                     const d = derivatives(objective, @as(f64, r0) + delta[l], y, scale_pos_weight);
@@ -1072,6 +1094,10 @@ pub const Builder = struct {
         const n_nodes = (@as(usize, 1) << @intCast(d + 1)) - 1;
         const nodes = try b.gpa.alloc(tree.Node, n_nodes);
         errdefer b.gpa.free(nodes);
+        const stats = try b.gpa.alloc(tree.NodeStat, n_nodes);
+        errdefer b.gpa.free(stats);
+        const stat_g = try b.gpa.alloc(f64, n_nodes);
+        defer b.gpa.free(stat_g);
         var ids: std.ArrayList(data.BinIdx) = .empty;
         defer ids.deinit(b.gpa);
 
@@ -1144,14 +1170,32 @@ pub const Builder = struct {
                     if (went_right != inverted[k]) idx |= @as(usize, 1) << @intCast(k);
                 }
                 nd.* = .{ .weight = @floatCast(b.values[idx]), .is_leaf = true };
+                stat_g[i] = b.leaf_g[idx];
+                stats[i] = .{ .hess = @floatCast(b.leaf_h[idx]), .count = @floatCast(b.leaf_n[idx]) };
             }
+        }
+        // Internal nodes, children first: sums of their two children, and the Newton gain of the
+        // split between them (zarbor's measure here; CatBoost scores splits by cosine).
+        var i = n_nodes - (@as(usize, 1) << @intCast(d));
+        while (i > 0) {
+            i -= 1;
+            const l = stats[2 * i + 1];
+            const r = stats[2 * i + 2];
+            const gl = stat_g[2 * i + 1];
+            const gr = stat_g[2 * i + 2];
+            stat_g[i] = gl + gr;
+            const hl: f64 = l.hess;
+            const hr: f64 = r.hess;
+            const lam = b.s.lambda;
+            const gain = gl * gl / (hl + lam) + gr * gr / (hr + lam) - (gl + gr) * (gl + gr) / (hl + hr + lam);
+            stats[i] = .{ .gain = @floatCast(gain), .hess = l.hess + r.hess, .count = l.count + r.count };
         }
         // Combinations chosen but removed by the redundancy rule were never moved out.
         for (b.tree_combos.items) |*x| if (x.parts.len != 0) x.deinit(b.gpa);
         b.tree_combos.clearRetainingCapacity();
         const cat_ids = try ids.toOwnedSlice(b.gpa);
         errdefer b.gpa.free(cat_ids);
-        return .{ .nodes = nodes, .cat_ids = cat_ids, .combos = try combos.toOwnedSlice(b.gpa) };
+        return .{ .nodes = nodes, .stats = stats, .cat_ids = cat_ids, .combos = try combos.toOwnedSlice(b.gpa) };
     }
 };
 

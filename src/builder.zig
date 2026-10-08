@@ -198,6 +198,8 @@ pub const Builder = struct {
     sample_at: []usize,
 
     nodes: std.ArrayList(Node),
+    /// `stats.items[i]` describes `nodes.items[i]`; appended in step with it.
+    stats: std.ArrayList(tree.NodeStat),
     cat_ids: std.ArrayList(data.BinIdx),
     lin: std.ArrayList(LinTerm),
     queue: std.ArrayList(Work),
@@ -306,6 +308,7 @@ pub const Builder = struct {
             .row_counts = row_counts,
             .sample_at = sample_at,
             .nodes = .empty,
+            .stats = .empty,
             .cat_ids = .empty,
             .lin = .empty,
             .queue = .empty,
@@ -347,6 +350,7 @@ pub const Builder = struct {
         gpa.free(b.row_counts);
         gpa.free(b.sample_at);
         b.nodes.deinit(gpa);
+        b.stats.deinit(gpa);
         b.cat_ids.deinit(gpa);
         b.lin.deinit(gpa);
         b.queue.deinit(gpa);
@@ -486,6 +490,7 @@ pub const Builder = struct {
             .n_lin = n_lin,
             .lin_ofs = lin_ofs,
         };
+        b.stats.items[w.node] = .{ .hess = @floatCast(w.total.h), .count = @floatCast(w.total.n) };
         try b.leaves.append(b.gpa, .{ .start = w.start, .end = w.end, .weight = weight });
         b.giveSlot(w.slot);
     }
@@ -622,6 +627,7 @@ pub const Builder = struct {
         subset: ?[]const u32,
     ) !Tree {
         b.nodes.clearRetainingCapacity();
+        b.stats.clearRetainingCapacity();
         b.cat_ids.clearRetainingCapacity();
         b.lin.clearRetainingCapacity();
         b.queue.clearRetainingCapacity();
@@ -647,6 +653,7 @@ pub const Builder = struct {
 
         // --- root ---
         try b.nodes.append(b.gpa, .{});
+        try b.stats.append(b.gpa, .{});
         const root_slot = b.takeSlot();
         const root_total = b.totalOf(b.rows[0..b.n_active]);
         const tree_feats = b.treeFeatures();
@@ -760,6 +767,8 @@ pub const Builder = struct {
 
         const nodes = try b.gpa.dupe(Node, b.nodes.items);
         errdefer b.gpa.free(nodes);
+        const stats = try b.gpa.dupe(tree.NodeStat, b.stats.items);
+        errdefer b.gpa.free(stats);
         const ids: []data.BinIdx = if (b.cat_ids.items.len == 0)
             &.{}
         else
@@ -769,7 +778,7 @@ pub const Builder = struct {
             &.{}
         else
             try b.gpa.dupe(LinTerm, b.lin.items);
-        return .{ .nodes = nodes, .cat_ids = ids, .lin = lin };
+        return .{ .nodes = nodes, .stats = stats, .cat_ids = ids, .lin = lin };
     }
 
     /// Whether a popped node splits, leaf budget aside (the caller checks that against its count).
@@ -784,6 +793,13 @@ pub const Builder = struct {
         try b.nodes.append(b.gpa, .{});
         const ri: u32 = @intCast(b.nodes.items.len);
         try b.nodes.append(b.gpa, .{});
+        try b.stats.appendNTimes(b.gpa, .{}, 2);
+        b.stats.items[w.node] = .{
+            // The split's own improvement: `Split.gain` has `min_split_gain` taken off.
+            .gain = @floatCast(w.split.gain + b.cfg.min_split_gain),
+            .hess = @floatCast(w.total.h),
+            .count = @floatCast(w.total.n),
+        };
         var cat_ofs: u32 = 0;
         if (w.split.is_cat) {
             cat_ofs = @intCast(b.cat_ids.items.len);
