@@ -471,7 +471,7 @@ fn evaluate(
 /// Each class's starting score: the log of its share of the rows, less the mean of those logs
 /// (XGBoost's `InitEstimation`; LightGBM omits the centring, which shifts every class equally and
 /// so changes no probability, gradient or tree). A class with no rows gets XGBoost's floor.
-fn softmaxBase(labels: []const f32, out: []f32) void {
+pub fn softmaxBase(labels: []const f32, out: []f32) void {
     @memset(out, 0);
     for (labels) |y| out[@intFromFloat(y)] += 1;
     const n: f32 = @floatFromInt(labels.len);

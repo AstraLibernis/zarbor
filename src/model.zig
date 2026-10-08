@@ -547,6 +547,8 @@ pub fn serialise(gpa: std.mem.Allocator, b: *const Bundle) ![]u8 {
         .linear => {
             const l = &b.lin.?;
             try putF32(gpa, &buf, l.intercept);
+            // Softmax: each class's intercept; `w` then holds one block per class.
+            for (l.intercepts) |v| try putF32(gpa, &buf, v);
             try putU32(gpa, &buf, @intCast(l.w.len));
             for (l.w) |c| try putF32(gpa, &buf, c);
             try putU32(gpa, &buf, @intCast(l.design.cols.len));
@@ -581,7 +583,9 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     if (ver >= 6) {
         num_class = try r.u32v();
         if ((obj == .softmax) != (num_class >= 2) or num_class == 0) return error.BadModelFile;
-        if (num_class > 1) {
+        // Boosted trees start each class from a stored score; the linear model keeps its
+        // intercepts with its coefficients.
+        if (num_class > 1 and kind == .gbdt) {
             if (num_class > r.buf.len) return error.BadModelFile;
             class_base = try gpa.alloc(f32, num_class);
             for (class_base) |*v| v.* = try r.f32v();
@@ -628,13 +632,16 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
         },
         .linear => {
             const intercept = try r.f32v();
+            const intercepts = try gpa.alloc(f32, if (num_class > 1) num_class else 0);
+            errdefer gpa.free(intercepts);
+            for (intercepts) |*v| v.* = try r.f32v();
             const nw = try r.count(4);
             const w = try gpa.alloc(f32, nw);
             errdefer gpa.free(w);
             for (w) |*x| x.* = try r.f32v();
 
             const nc = try r.count(4 + 2 + 4 + 4);
-            if (nc != nw) return error.BadModelFile;
+            if (nc * num_class != nw) return error.BadModelFile;
             const cols = try gpa.alloc(linear.Col, nc);
             errdefer gpa.free(cols);
             for (cols) |*c| c.* = .{
@@ -672,6 +679,8 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
                 .intercept = intercept,
                 .objective = obj,
                 .n_features = b.schema.n_features,
+                .num_class = num_class,
+                .intercepts = intercepts,
             };
         },
     }

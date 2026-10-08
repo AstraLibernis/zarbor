@@ -116,6 +116,7 @@ pub const Fitted = union(config.Algo) {
                 .kind = .linear,
                 .schema = schema,
                 .objective = x.objective,
+                .num_class = x.num_class,
                 .lin = x,
             },
         };

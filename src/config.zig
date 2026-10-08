@@ -116,7 +116,17 @@ pub const Config = struct {
 
     /// Scores per row the model predicts: the class count under softmax, else 1.
     pub fn width(c: Config) usize {
-        return if (c.algo == .gbdt) c.gbdt.objective.width(c.gbdt.num_class) else 1;
+        return switch (c.algo) {
+            .gbdt => c.gbdt.objective.width(c.gbdt.num_class),
+            .linear => c.linear.objective.width(c.linear.num_class),
+            .random_forest => 1,
+        };
+    }
+
+    /// The label's class count, for every model that takes one.
+    pub fn setNumClass(c: *Config, k: u32) void {
+        c.gbdt.num_class = k;
+        c.linear.num_class = k;
     }
 
     /// Whether the target is classes, which folds are stratified on.
@@ -161,8 +171,14 @@ pub const Config = struct {
                     "linear regression (L2 / ridge)"
                 else
                     "linear regression (ordinary least squares)",
-                // Refused by `validate` until multinomial logistic regression exists.
-                .softmax => "multinomial logistic regression (not available yet)",
+                .softmax => if (l.alpha > 0 and l.lambda > 0)
+                    "multinomial logistic regression (elastic net)"
+                else if (l.alpha > 0)
+                    "multinomial logistic regression (L1 / lasso)"
+                else if (l.lambda > 0)
+                    "multinomial logistic regression (L2 / ridge)"
+                else
+                    "multinomial logistic regression (unpenalised)",
             },
         };
     }
@@ -188,8 +204,8 @@ pub const Config = struct {
     /// Binning plus the chosen model's own checks.
     pub fn validate(c: Config) !void {
         try c.bin.validate();
-        // Multiclass is boosting-only for now (docs/PLAN.md milestone 1, stages 1b and 1c).
-        if (c.algo != .gbdt and c.objective() == .softmax) return error.SoftmaxNeedsGbdt;
+        // Not yet for the forest (docs/PLAN.md milestone 1, stage 1c).
+        if (c.algo == .random_forest and c.objective() == .softmax) return error.SoftmaxForestUnsupported;
         switch (c.algo) {
             .gbdt => try c.gbdt.validate(),
             .random_forest => try c.random_forest.validate(),

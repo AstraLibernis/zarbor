@@ -120,16 +120,18 @@ positive class; `--pos-label` overrides. Refused with a reason: more than two cl
 logistic, a single class, missing target values, and numeric values outside [0, 1] under
 logistic. `--scale_pos_weight` weights the positives.
 
-**Multiclass** (`--objective=softmax`, gbdt only for now): every distinct label is a class,
+**Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per
 class, as XGBoost's `multi:softprob` and LightGBM's `multiclass` do, and each class starts from
 the log of its share of the training rows. `--softmax_hessian` picks the second derivative:
 `xgboost` (default, `2 p (1 - p)`) or `lightgbm` (`K / (K - 1) p (1 - p)`); they agree at two
 classes and give different trees above, and each matches its library exactly. `predict` writes
 one probability column per class (`prediction_<class>`); validation, `cv` and `tune` score by
-multiclass log loss and report accuracy. Folds are stratified on the class. Not yet with
-softmax: CatBoost-style trees, GOSS, linear leaves, target statistics, the forest and the
-linear model (docs/PLAN.md, milestone 1).
+multiclass log loss and report accuracy. Folds are stratified on the class. With
+`--algo=linear` it is multinomial logistic regression: one coefficient block and intercept per
+class, the full form scikit-learn fits, with the same `lambda`/`alpha` penalties. Not yet with
+softmax: CatBoost-style trees, GOSS, linear leaves, target statistics and the forest
+(docs/PLAN.md, milestone 1).
 
 ## 4. Models
 

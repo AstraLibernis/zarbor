@@ -162,7 +162,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var enc = try data.LabelEncoder.forObjective(gpa, &frame, label_col, pos_label, cfg.objective());
     defer enc.deinit();
     // Softmax: the label's classes are the model's, fixed before any fold or split can miss one.
-    if (cfg.objective() == .softmax) cfg.gbdt.num_class = @intCast(enc.classes.len);
+    if (cfg.objective() == .softmax) cfg.setNumClass(@intCast(enc.classes.len));
 
     // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
     if (cfg.bin.bin_policy == .auto) {

@@ -20,6 +20,7 @@ const Dataset = data.Dataset;
 const prof = @import("prof.zig");
 const metric = @import("metric.zig");
 const Objective = @import("objective.zig").Objective;
+const booster = @import("booster.zig");
 const lin_solve = @import("lin_solve.zig");
 pub const Fit = lin_solve.Fit;
 const reduce_chunks = lin_solve.reduce_chunks;
@@ -45,6 +46,9 @@ pub const Params = struct {
     objective: Objective = .logistic,
     /// Multiplier on positive-class gradients; >1 upweights an imbalanced minority.
     scale_pos_weight: f32 = 1.0,
+    /// Classes under `objective = softmax` (multinomial logistic regression); set from the
+    /// label's classes, not by hand.
+    num_class: u32 = 0,
     /// L2 penalty on the coefficients (ridge). The intercept is unpenalised.
     lambda: f32 = 1.0,
     /// L1 penalty on the coefficients (lasso). The intercept is unpenalised.
@@ -69,6 +73,10 @@ pub const Params = struct {
         if (p.lin_epochs == 0) return error.NoEpochs;
         if (p.lin_lr <= 0) return error.BadLinearLr;
         if (p.lambda < 0 or p.alpha < 0) return error.NegativeRegularisation;
+        if (p.objective == .softmax) {
+            if (p.num_class < 2) return error.SoftmaxNeedsClasses;
+            if (p.scale_pos_weight != 1) return error.ScalePosWeightNeedsBinary;
+        }
     }
 };
 
@@ -140,7 +148,7 @@ pub const Design = struct {
     }
 };
 
-fn buildDesign(
+pub fn buildDesign(
     gpa: std.mem.Allocator,
     ds: *const Dataset,
     standardize: bool,
@@ -220,30 +228,47 @@ fn buildDesign(
 pub const Linear = struct {
     gpa: std.mem.Allocator,
     design: Design,
+    /// Coefficients; under softmax `num_class` blocks of one per design column, class-major.
     w: []f32,
     intercept: f32,
     objective: Objective,
     n_features: usize,
+    /// Softmax: classes and each class's intercept (owned; `intercept` is then unused).
+    num_class: u32 = 1,
+    intercepts: []f32 = &.{},
 
     pub fn deinit(m: *Linear) void {
         m.design.deinit();
         m.gpa.free(m.w);
+        if (m.intercepts.len != 0) m.gpa.free(m.intercepts);
         m.* = undefined;
     }
 
-    /// Linear predictor before the link function.
+    /// Scores per row: the class count under softmax, else 1. Row-major.
+    pub fn width(m: *const Linear) usize {
+        return m.objective.width(m.num_class);
+    }
+
+    /// Linear predictor before the link function (one per class under softmax).
     pub fn predictRaw(m: *const Linear, pool: *Pool, ds: *const Dataset, out: []f32) void {
-        std.debug.assert(out.len == ds.n_rows);
+        std.debug.assert(out.len == ds.n_rows * m.width());
         var ctx = ScoreCtx{ .m = m, .ds = ds, .out = out };
         pool.parallelFor(ds.n_rows, &ctx, ScoreCtx.run, 1024);
     }
 
-    /// Probabilities for logistic, values for regression.
+    /// Probabilities for logistic and softmax, values for regression.
     pub fn predict(m: *const Linear, pool: *Pool, ds: *const Dataset, out: []f32) void {
         m.predictRaw(pool, ds, out);
-        if (m.objective == .logistic) for (out) |*v| {
-            v.* = 1.0 / (1.0 + @exp(-v.*));
-        };
+        switch (m.objective) {
+            .logistic => for (out) |*v| {
+                v.* = 1.0 / (1.0 + @exp(-v.*));
+            },
+            .softmax => {
+                const k = m.width();
+                for (0..ds.n_rows) |r| booster.softmaxRow(out[r * k ..][0..k]);
+            },
+            .squared_error => {},
+        }
     }
 
     /// Number of coefficients exactly zero: those L1 drove there, plus those of
@@ -266,6 +291,18 @@ const ScoreCtx = struct {
         _ = worker;
         const self: *ScoreCtx = @ptrCast(@alignCast(ctx));
         const d = &self.m.design;
+        const k = self.m.width();
+        if (k > 1) {
+            const p = d.cols.len;
+            for (begin..end) |r| for (0..k) |cls| {
+                var acc: f32 = self.m.intercepts[cls];
+                for (d.cols, self.m.w[cls * p ..][0..p]) |c, coef| {
+                    if (coef != 0) acc += coef * d.value(c, self.ds, r);
+                }
+                self.out[r * k + cls] = acc;
+            };
+            return;
+        }
         var r = begin;
         while (r < end) : (r += 1) {
             var acc: f32 = self.m.intercept;
@@ -304,34 +341,45 @@ pub fn train(
     var design = try buildDesign(gpa, ds, cfg.lin_standardize);
     errdefer design.deinit();
     const p = design.cols.len;
+    // Softmax fits one block of coefficients and an intercept per class (the full,
+    // over-parameterised multinomial form scikit-learn fits; the penalty makes it unique).
+    const k = cfg.objective.width(cfg.num_class);
 
-    const theta = try gpa.alloc(f64, p + 1);
+    const theta = try gpa.alloc(f64, (p + 1) * k);
     defer gpa.free(theta);
     @memset(theta, 0);
 
-    const wf = try gpa.alloc(f32, p);
+    const wf = try gpa.alloc(f32, p * k);
     defer gpa.free(wf);
-    const z = try gpa.alloc(f32, ds.n_rows);
+    const z = try gpa.alloc(f32, ds.n_rows * k);
     defer gpa.free(z);
-    const resid = try gpa.alloc(f32, ds.n_rows);
+    const resid = try gpa.alloc(f32, ds.n_rows * k);
     defer gpa.free(resid);
     const loss_part = try gpa.alloc(f64, reduce_chunks);
     defer gpa.free(loss_part);
-    const rsum_part = try gpa.alloc(f64, reduce_chunks);
+    const rsum_part = try gpa.alloc(f64, reduce_chunks * k);
     defer gpa.free(rsum_part);
 
-    // Intercept starts at the base rate (logistic: log-odds of the label mean).
-    var sum: f64 = 0;
-    for (ds.labels) |y| sum += y;
-    const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
-    theta[p] = switch (cfg.objective) {
-        .logistic => blk: {
-            const q = std.math.clamp(mean, 1e-6, 1 - 1e-6);
-            break :blk @log(q / (1 - q));
-        },
-        .squared_error => mean,
-        .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
-    };
+    // Intercepts start at the base rate: log-odds of the label mean, the mean, or under softmax
+    // each class's centred log share (as the boosted model starts).
+    if (k > 1) {
+        const priors = try gpa.alloc(f32, k);
+        defer gpa.free(priors);
+        booster.softmaxBase(ds.labels, priors[0..k]);
+        for (0..k) |cls| theta[cls * (p + 1) + p] = priors[cls];
+    } else {
+        var sum: f64 = 0;
+        for (ds.labels) |y| sum += y;
+        const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
+        theta[p] = switch (cfg.objective) {
+            .logistic => blk: {
+                const q = std.math.clamp(mean, 1e-6, 1 - 1e-6);
+                break :blk @log(q / (1 - q));
+            },
+            .squared_error => mean,
+            .softmax => unreachable,
+        };
+    }
 
     const n_f: f64 = @floatFromInt(ds.n_rows);
     const chunks: usize = if (ds.n_rows >= reduce_parallel_min) reduce_chunks else 1;
@@ -348,6 +396,7 @@ pub fn train(
         .l2 = @as(f64, cfg.lambda) / n_f,
         .l1 = @as(f64, cfg.alpha) / n_f,
         .theta = theta,
+        .k = k,
         .wf = wf,
         .z = z,
         .resid = resid,
@@ -366,17 +415,24 @@ pub fn train(
     };
     const epochs = fit.iters;
 
-    const w = try gpa.alloc(f32, p);
+    const w = try gpa.alloc(f32, p * k);
     errdefer gpa.free(w);
-    for (w, theta[0..p]) |*d, s| d.* = @floatCast(s);
+    for (0..k) |cls| {
+        for (w[cls * p ..][0..p], theta[cls * (p + 1) ..][0..p]) |*d, s| d.* = @floatCast(s);
+    }
+    const intercepts = try gpa.alloc(f32, if (k > 1) k else 0);
+    errdefer gpa.free(intercepts);
+    for (intercepts, 0..) |*b, cls| b.* = @floatCast(theta[cls * (p + 1) + p]);
 
     var model = Linear{
         .gpa = gpa,
         .design = design,
         .w = w,
-        .intercept = @floatCast(theta[p]),
+        .intercept = if (k > 1) 0 else @floatCast(theta[p]),
         .objective = cfg.objective,
         .n_features = ds.n_features,
+        .num_class = if (k > 1) cfg.num_class else 1,
+        .intercepts = intercepts,
     };
     errdefer model.deinit();
 
@@ -384,13 +440,13 @@ pub fn train(
     var valid_ns: u64 = 0;
     if (valid) |v| {
         const wall0 = prof.now();
-        const pred = try gpa.alloc(f32, v.n_rows);
+        const pred = try gpa.alloc(f32, v.n_rows * k);
         defer gpa.free(pred);
         model.predict(pool, v, pred);
         score = switch (cfg.objective) {
             .logistic => try metric.auc(gpa, pred, v.labels),
             .squared_error => metric.rmse(pred, v.labels),
-            .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
+            .softmax => metric.mloglossProb(pred, v.labels, k),
         };
         valid_ns = prof.now() - wall0;
     }

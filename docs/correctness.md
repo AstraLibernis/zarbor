@@ -34,7 +34,12 @@ at 31 leaves and 50 at 15, CatBoost to 300 trees, with ordered boosting and targ
 and multiclass: 4 classes against XGBoost `multi:softprob` (100 rounds, 400 trees, max
 difference 7.1e-7; and 40 rounds with L1, L2, gamma and `min_child_weight`) and LightGBM
 `multiclass` (10 rounds with `--softmax_hessian=lightgbm`, 6.0e-7). Using the wrong hessian
-form against XGBoost misses by 0.32, so the cases do discriminate.
+form against XGBoost misses by 0.32, so the cases do discriminate. Multinomial logistic
+regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows, 8 integer
+columns so the binned design holds the raw values, standardisation off on both sides): the
+penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`
+100), and to 1.8e-8 with L1 (`alpha` 50, against SAGA); probabilities within 1.1e-4 (L2) and
+3.6e-4 (L1), the f32 flat-direction differences the binary model shows too.
 The tables below come from the original harness on competition data.
 
 **Method.** Compare predictions row for row on data where binning cannot differ: 100,000

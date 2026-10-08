@@ -224,11 +224,13 @@ test "softmax is refused where it is not built yet" {
     p = ok;
     p.scale_pos_weight = 2;
     try testing.expectError(error.ScalePosWeightNeedsBinary, p.validate());
-    for ([_]config.Algo{ .random_forest, .linear }) |algo| {
-        var c = config.Config.from(.{ .algo = algo, .objective = .softmax });
-        c.gbdt.num_class = 3;
-        try testing.expectError(error.SoftmaxNeedsGbdt, c.validate());
-    }
+    var c = config.Config.from(.{ .algo = .random_forest, .objective = .softmax });
+    c.setNumClass(3);
+    try testing.expectError(error.SoftmaxForestUnsupported, c.validate());
+    c = config.Config.from(.{ .algo = .linear, .objective = .softmax });
+    try testing.expectError(error.SoftmaxNeedsClasses, c.validate());
+    c.setNumClass(3);
+    try c.validate();
 }
 
 /// A frame of one label column: numbers, or strings when `levels` is given (values are ids).
@@ -321,4 +323,136 @@ test "multiclass metrics: log loss from scores and from probabilities agree; acc
     // Rows 0 and 1 are right; row 2's best is class 1, its label: 3 of 3. A tie takes the first.
     try testing.expectEqual(@as(f64, 1), metric.accuracy(&raw, &y, 3));
     try testing.expectEqual(@as(f64, 0), metric.accuracy(&.{ 1, 1 }, &.{1}, 2));
+}
+
+const linear = @import("../linear.zig");
+
+fn linParams(opts: anytype) linear.Params {
+    var cfg = config.Config.from(.{ .algo = .linear, .objective = .softmax, .verbose_eval = 0, .lin_tol = 1e-12, .lin_epochs = 3000 }).linear;
+    cfg.num_class = n_class;
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| @field(cfg, f.name) = @field(opts, f.name);
+    return cfg;
+}
+
+test "multinomial logistic: two classes with penalty lambda are binary logistic with lambda / 2" {
+    // With one coefficient block per class, the optimum puts w1 = -w0 = beta / 2, whose penalty
+    // lambda * |beta|^2 / 4 is binary logistic's at lambda / 2. This pins the loss, its gradient
+    // and the penalty together.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 8);
+    defer ds.deinit();
+    for (ds.labels) |*y| y.* = if (y.* >= 2) 1 else 0;
+
+    var soft = try linear.train(gpa, pool, &ds, null, linParams(.{ .num_class = 2, .lambda = 8 }), null);
+    defer soft.model.deinit();
+    var bin = try linear.train(gpa, pool, &ds, null, linParams(.{ .objective = .logistic, .lambda = 4 }), null);
+    defer bin.model.deinit();
+    try testing.expect(!soft.fit.stalled());
+    try testing.expect(!bin.fit.stalled());
+
+    var ps: [n_rows * 2]f32 = undefined;
+    soft.model.predict(pool, &ds, &ps);
+    var pb: [n_rows]f32 = undefined;
+    bin.model.predict(pool, &ds, &pb);
+    for (0..n_rows) |r| {
+        try testing.expectApproxEqAbs(pb[r], ps[r * 2 + 1], 2e-5);
+        try testing.expectApproxEqAbs(@as(f32, 1), ps[r * 2] + ps[r * 2 + 1], 1e-6);
+    }
+}
+
+test "multinomial logistic: the same model to the bit at 1, 3 and 16 threads, and after saving" {
+    const gpa = testing.allocator;
+    var ds = try fixture(gpa, 9);
+    defer ds.deinit();
+    var want: [n_rows * n_class]f32 = undefined;
+    for ([_]u32{ 1, 3, 16 }) |threads| {
+        const pool = try Pool.init(gpa, threads);
+        defer pool.deinit();
+        var res = try linear.train(gpa, pool, &ds, null, linParams(.{ .lambda = 2, .alpha = 0.5, .lin_epochs = 200 }), null);
+        defer res.model.deinit();
+        var got: [n_rows * n_class]f32 = undefined;
+        res.model.predict(pool, &ds, &got);
+        if (threads == 1) want = got else try testing.expectEqualSlices(f32, &want, &got);
+
+        if (threads != 3) continue;
+        // Save and load through the bundle: same probabilities to the bit.
+        var schema = try data.Schema.fromDataset(gpa, &ds);
+        defer schema.deinit();
+        var b = model_mod.Bundle{ .gpa = gpa, .kind = .linear, .schema = schema, .objective = .softmax, .num_class = n_class, .lin = res.model };
+        const bytes = try model_mod.serialise(gpa, &b);
+        defer gpa.free(bytes);
+        var loaded = try model_mod.deserialise(gpa, bytes);
+        defer loaded.deinit();
+        var after: [n_rows * n_class]f32 = undefined;
+        loaded.predict(pool, &ds, &after);
+        try testing.expectEqualSlices(f32, &got, &after);
+    }
+}
+
+const lin_solve = @import("../lin_solve.zig");
+
+test "multinomial objective: the gradient is the objective's derivative (central differences)" {
+    // A value that disagrees with its gradient still converges somewhere, since L-BFGS steps by
+    // the gradient, but its line search accepts steps by the value: test the pair directly,
+    // every block's coefficients and intercept, with both penalties' smooth part (L2) on.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 10);
+    defer ds.deinit();
+    var design = try linear.buildDesign(gpa, &ds, true);
+    defer design.deinit();
+    const tables = try design.valueTables(gpa, &ds);
+    defer linear.Design.freeTables(gpa, tables);
+    const p = design.cols.len;
+    const k = n_class;
+    const theta = try gpa.alloc(f64, (p + 1) * k);
+    defer gpa.free(theta);
+    var prng: std.Random.DefaultPrng = .init(3);
+    for (theta) |*t| t.* = prng.random().floatNorm(f64) * 0.3;
+    const wf = try gpa.alloc(f32, p * k);
+    defer gpa.free(wf);
+    const z = try gpa.alloc(f32, n_rows * k);
+    defer gpa.free(z);
+    const resid = try gpa.alloc(f32, n_rows * k);
+    defer gpa.free(resid);
+    var loss_part: [1]f64 = undefined;
+    var rsum_part: [k]f64 = undefined;
+    var pr = lin_solve.Problem{
+        .pool = pool,
+        .design = &design,
+        .tables = tables,
+        .ds = &ds,
+        .objective = .softmax,
+        .scale_pos_weight = 1,
+        .l2 = 0.05,
+        .l1 = 0,
+        .theta = theta,
+        .k = k,
+        .wf = wf,
+        .z = z,
+        .resid = resid,
+        .loss_part = &loss_part,
+        .rsum_part = &rsum_part,
+        .chunks = 1,
+        .size = n_rows,
+    };
+    const g = try gpa.alloc(f64, theta.len);
+    defer gpa.free(g);
+    _ = pr.value(theta, true);
+    pr.grad(theta, g);
+    const probe = try gpa.dupe(f64, theta);
+    defer gpa.free(probe);
+    // Scores are f32, so the step is large enough that rounding stays far below the slope.
+    const h = 1e-3;
+    for (0..theta.len) |i| {
+        probe[i] = theta[i] + h;
+        const up = pr.value(probe, true);
+        probe[i] = theta[i] - h;
+        const down = pr.value(probe, true);
+        probe[i] = theta[i];
+        try testing.expectApproxEqAbs((up - down) / (2 * h), g[i], 2e-4);
+    }
 }

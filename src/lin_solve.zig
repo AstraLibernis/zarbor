@@ -34,10 +34,14 @@ const EvalCtx = struct {
     want_loss: bool,
     size: usize,
     n: usize,
+    /// Softmax classes; `z` and `resid` are then class-major (`[class * n + row]`) and `rsum`
+    /// holds `k` sums per chunk.
+    k: usize = 1,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *EvalCtx = @ptrCast(@alignCast(ctx));
+        if (self.objective == .softmax) return self.multinomial(begin, end);
         var c = begin;
         while (c < end) : (c += 1) {
             const lo = @min(c * self.size, self.n);
@@ -66,13 +70,44 @@ const EvalCtx = struct {
                         r = zi - y;
                         if (self.want_loss) l += 0.5 * r * r;
                     },
-                    .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
+                    .softmax => unreachable, // `multinomial`
                 }
                 self.resid[i] = @floatCast(r);
                 rs += r;
             }
             self.loss[c] = l;
             self.rsum[c] = rs;
+        }
+    }
+
+    /// Softmax cross-entropy: per row, the log-sum-exp of its class scores (shifted by the
+    /// largest) less its own class's, and `p_c - [y = c]` as each class's residual.
+    fn multinomial(self: *EvalCtx, begin: usize, end: usize) void {
+        const k = self.k;
+        const n = self.n;
+        var c = begin;
+        while (c < end) : (c += 1) {
+            const lo = @min(c * self.size, n);
+            const hi = @min(lo + self.size, n);
+            var l: f64 = 0;
+            const rs = self.rsum[c * k ..][0..k];
+            @memset(rs, 0);
+            for (lo..hi) |i| {
+                const y: usize = @intFromFloat(self.labels[i]);
+                var top: f64 = self.z[i];
+                for (1..k) |cls| top = @max(top, @as(f64, self.z[cls * n + i]));
+                var sum: f64 = 0;
+                for (0..k) |cls| sum += @exp(@as(f64, self.z[cls * n + i]) - top);
+                for (0..k) |cls| {
+                    const zc: f64 = self.z[cls * n + i];
+                    const pc = @exp(zc - top) / sum;
+                    const r = pc - @as(f64, if (cls == y) 1 else 0);
+                    self.resid[cls * n + i] = @floatCast(r);
+                    rs[cls] += r;
+                }
+                if (self.want_loss) l += top + @log(sum) - @as(f64, self.z[y * n + i]);
+            }
+            self.loss[c] = l;
         }
     }
 };
@@ -147,8 +182,11 @@ pub const Problem = struct {
     scale_pos_weight: f32,
     l2: f64,
     l1: f64,
-    /// `p` coefficients, then the intercept.
+    /// `p` coefficients, then the intercept; under softmax `k` such blocks, one per class.
     theta: []f64,
+    /// Softmax classes, else 1. `z` and `resid` hold `k` class-major columns, `wf` `k` blocks of
+    /// `p`, and `rsum_part` `k` sums per chunk.
+    k: usize = 1,
     /// f32 mirror of `theta[0..p]`, which is what the scoring kernel reads.
     wf: []f32,
     z: []f32,
@@ -159,24 +197,33 @@ pub const Problem = struct {
     size: usize,
 
     inline fn p(pr: *const Problem) usize {
-        return pr.theta.len - 1;
+        return pr.theta.len / pr.k - 1;
+    }
+
+    /// Parameters per class block: the coefficients and the intercept that ends it.
+    inline fn stride(pr: *const Problem) usize {
+        return pr.theta.len / pr.k;
     }
 
     /// Smooth part of the objective at `th`. Leaves `resid` and the intercept's
     /// gradient share behind, so a following `grad` costs only the column pass.
-    fn value(pr: *Problem, th: []const f64, want_loss: bool) f64 {
+    pub fn value(pr: *Problem, th: []const f64, want_loss: bool) f64 {
         const np = pr.p();
-        for (pr.wf, th[0..np]) |*d, s| d.* = @floatCast(s);
-
-        var sctx = ScoreAllCtx{
-            .design = pr.design,
-            .tables = pr.tables,
-            .ds = pr.ds,
-            .w = pr.wf,
-            .intercept = @floatCast(th[np]),
-            .z = pr.z,
-        };
-        pr.pool.parallelFor(pr.ds.n_rows, &sctx, ScoreAllCtx.run, 1024);
+        const st = pr.stride();
+        const n = pr.ds.n_rows;
+        for (0..pr.k) |cls| {
+            const w = pr.wf[cls * np ..][0..np];
+            for (w, th[cls * st ..][0..np]) |*d, s| d.* = @floatCast(s);
+            var sctx = ScoreAllCtx{
+                .design = pr.design,
+                .tables = pr.tables,
+                .ds = pr.ds,
+                .w = w,
+                .intercept = @floatCast(th[cls * st + np]),
+                .z = pr.z[cls * n ..][0..n],
+            };
+            pr.pool.parallelFor(n, &sctx, ScoreAllCtx.run, 1024);
+        }
 
         var ectx = EvalCtx{
             .z = pr.z,
@@ -189,6 +236,7 @@ pub const Problem = struct {
             .want_loss = want_loss,
             .size = pr.size,
             .n = pr.ds.n_rows,
+            .k = pr.k,
         };
         pr.pool.parallelFor(pr.chunks, &ectx, EvalCtx.run, 1);
 
@@ -197,28 +245,36 @@ pub const Problem = struct {
         for (pr.loss_part[0..pr.chunks]) |x| l += x;
         l /= @floatFromInt(pr.ds.n_rows);
         var sq: f64 = 0;
-        for (th[0..np]) |c| sq += c * c;
+        for (0..pr.k) |cls| {
+            for (th[cls * st ..][0..np]) |c| sq += c * c;
+        }
         return l + 0.5 * pr.l2 * sq;
     }
 
     /// Gradient of the smooth part. Reads the `resid` the last `value` call
     /// left behind, so the two must be called in that order on the same point.
-    fn grad(pr: *Problem, th: []const f64, out: []f64) void {
+    pub fn grad(pr: *Problem, th: []const f64, out: []f64) void {
         const np = pr.p();
-        var gctx = GradCtx{ .design = pr.design, .tables = pr.tables, .ds = pr.ds, .resid = pr.resid, .grad = out[0..np] };
-        pr.pool.parallelFor(np, &gctx, GradCtx.run, 1);
-
-        const n: f64 = @floatFromInt(pr.ds.n_rows);
-        for (out[0..np], th[0..np]) |*d, c| d.* = d.* / n + pr.l2 * c;
-        var rs: f64 = 0;
-        for (pr.rsum_part[0..pr.chunks]) |x| rs += x;
-        out[np] = rs / n;
+        const st = pr.stride();
+        const rows = pr.ds.n_rows;
+        const n: f64 = @floatFromInt(rows);
+        for (0..pr.k) |cls| {
+            const g = out[cls * st ..][0..st];
+            var gctx = GradCtx{ .design = pr.design, .tables = pr.tables, .ds = pr.ds, .resid = pr.resid[cls * rows ..][0..rows], .grad = g[0..np] };
+            pr.pool.parallelFor(np, &gctx, GradCtx.run, 1);
+            for (g[0..np], th[cls * st ..][0..np]) |*d, c| d.* = d.* / n + pr.l2 * c;
+            var rs: f64 = 0;
+            for (0..pr.chunks) |ch| rs += pr.rsum_part[ch * pr.k + cls];
+            g[np] = rs / n;
+        }
     }
 
     fn l1norm(pr: *const Problem, th: []const f64) f64 {
         if (pr.l1 == 0) return 0;
         var s: f64 = 0;
-        for (th[0..pr.p()]) |c| s += @abs(c);
+        for (0..pr.k) |cls| {
+            for (th[cls * pr.stride() ..][0..pr.p()]) |c| s += @abs(c);
+        }
         return pr.l1 * s;
     }
 };
@@ -254,8 +310,13 @@ pub fn pseudoGrad(pr: *const Problem, g: []const f64, out: []f64) void {
         @memcpy(out, g);
         return;
     }
-    const np = pr.p();
-    for (out[0..np], g[0..np], pr.theta[0..np]) |*o, gv, c| {
+    const st = pr.stride();
+    for (out, g, pr.theta, 0..) |*o, gv, c, i| {
+        // Each block's last slot is its intercept, which is unpenalised.
+        if (i % st == st - 1) {
+            o.* = gv;
+            continue;
+        }
         o.* = if (c > 0)
             gv + pr.l1
         else if (c < 0)
@@ -267,14 +328,14 @@ pub fn pseudoGrad(pr: *const Problem, g: []const f64, out: []f64) void {
         else
             0;
     }
-    out[np] = g[np]; // the intercept is unpenalised
 }
 
 /// Clip a trial point into the step's starting orthant so L1 stays differentiable along
 /// it; a coefficient crossing zero lands exactly on zero, which is OWL-QN's sparsity.
-pub fn projectOrthant(t: []f64, from: []const f64, pg: []const f64) void {
-    const np = t.len - 1;
-    for (t[0..np], from[0..np], pg[0..np]) |*v, o, s| {
+/// `stride` is the parameters per class block; each block's last slot is its intercept.
+pub fn projectOrthant(t: []f64, from: []const f64, pg: []const f64, stride: usize) void {
+    for (t, from, pg, 0..) |*v, o, s, i| {
+        if (i % stride == stride - 1) continue;
         const orthant = if (o != 0) o else -s;
         if (v.* * orthant <= 0) v.* = 0;
     }
@@ -372,8 +433,9 @@ pub fn fitLbfgs(
         // `projectOrthant` clips anyway, so removing this changes speed, not result.
         // Kept as OWL-QN's stated formulation; projection alone is a weaker guarantee.
         if (pr.l1 != 0) {
-            for (dir[0 .. n - 1], pg[0 .. n - 1]) |*dv, s| {
-                if (dv.* * -s <= 0) dv.* = 0;
+            const st = pr.stride();
+            for (dir, pg, 0..) |*dv, s, i| {
+                if (i % st != st - 1 and dv.* * -s <= 0) dv.* = 0;
             }
         }
 
@@ -393,7 +455,7 @@ pub fn fitLbfgs(
         var accepted = false;
         for (0..ls_max) |_| {
             for (trial, pr.theta, dir) |*t, th, dv| t.* = th + step * dv;
-            if (pr.l1 != 0) projectOrthant(trial, pr.theta, pg);
+            if (pr.l1 != 0) projectOrthant(trial, pr.theta, pg, pr.stride());
             f_new = pr.value(trial, true) + pr.l1norm(trial);
             // After projection the move is not `step * dir`; Armijo uses the realised one.
             var expected = step * dg;
@@ -472,7 +534,7 @@ pub fn fitAdam(
     log: ?*std.Io.Writer,
 ) !Fit {
     const n = pr.theta.len;
-    const np = n - 1;
+    const st = pr.stride();
 
     const g = try gpa.alloc(f64, n);
     defer gpa.free(g);
@@ -481,9 +543,9 @@ pub fn fitAdam(
     const pg = try gpa.alloc(f64, n);
     defer gpa.free(pg);
     var fit: Fit = .{ .iters = 0 };
-    const m1 = try gpa.alloc(f64, np);
+    const m1 = try gpa.alloc(f64, n);
     defer gpa.free(m1);
-    const v1 = try gpa.alloc(f64, np);
+    const v1 = try gpa.alloc(f64, n);
     defer gpa.free(v1);
     @memset(m1, 0);
     @memset(v1, 0);
@@ -509,7 +571,12 @@ pub fn fitAdam(
         const bc2 = 1.0 - std.math.pow(f64, beta2, t);
 
         var max_delta: f64 = 0;
-        for (pr.theta[0..np], g[0..np], m1, v1) |*coef, gv, *mm, *vv| {
+        for (pr.theta, g, m1, v1, 0..) |*coef, gv, *mm, *vv, i| {
+            // Each block's intercept is deliberately unpenalised, and takes a plain step.
+            if (i % st == st - 1) {
+                coef.* -= lr * gv;
+                continue;
+            }
             mm.* = beta1 * mm.* + (1 - beta1) * gv;
             vv.* = beta2 * vv.* + (1 - beta2) * gv * gv;
             const step = lr * (mm.* / bc1) / (@sqrt(vv.* / bc2) + eps);
@@ -517,8 +584,6 @@ pub fn fitAdam(
             coef.* = softThreshold(coef.* - step, lr * pr.l1);
             max_delta = @max(max_delta, @abs(coef.* - before));
         }
-        // The intercept is deliberately unpenalised, and takes a plain step.
-        pr.theta[np] -= lr * g[np];
 
         if (log) |wr| {
             if (cfg.verbose_eval != 0 and

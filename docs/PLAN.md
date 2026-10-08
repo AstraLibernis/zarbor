@@ -79,9 +79,10 @@ trees, then the forest).
 
 **Progress.** 1a done 2026-10-08: depthwise and lossguide boosting, labels (text and integer),
 model format 6, multiclass log loss and accuracy, `predict`/`cv`/`tune`, stratified folds;
-exact parity with XGBoost and LightGBM. Refused for now with softmax: GOSS, linear leaves
-(their multiclass rules are unchecked), `scale_pos_weight`, symmetric trees, the forest and the
-linear model.
+exact parity with XGBoost and LightGBM. 1b done 2026-10-08: multinomial logistic regression
+(both solvers, L1 and L2), objective equal to scikit-learn's at the optimum. Refused for now
+with softmax: GOSS, linear leaves (their multiclass rules are unchecked), `scale_pos_weight`,
+symmetric trees and the forest.
 
 **Done when.**
 - XGBoost `multi:softprob` and LightGBM `multiclass`: exact parity on a synthetic 4-class set.

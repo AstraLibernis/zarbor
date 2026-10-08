@@ -63,7 +63,7 @@ test "projectOrthant zeroes exactly the coefficients that crossed" {
     // into, i.e. -pg: negative pg admits a positive step and vice versa.
     const pg = [_]f64{ 0, 0, 0, 0, -1.0, -1.0, 0 };
     var t = trial;
-    projectOrthant(&t, &from, &pg);
+    projectOrthant(&t, &from, &pg, t.len);
     try testing.expectEqualSlices(f64, &.{
         1.0, // same sign as before: kept
         0.0, // crossed from + to -: clipped
