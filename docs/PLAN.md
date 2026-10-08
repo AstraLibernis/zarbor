@@ -18,9 +18,14 @@ to other systems are out of scope (below).
 |---|---|---|---|
 | 1 | Multiclass | zarbor cannot attempt a 3+-class problem at all today (`MulticlassNotSupported`) | large |
 | 2 | Feature importance and SHAP | shows where feature work pays off; features beat tuning by far in past competitions | medium |
-| 3 | Sample weights | rows of unequal importance; before 4 so every new loss gets weights from the start | medium |
-| 4 | More losses + choosing the early-stopping metric | training on the loss the task is scored by | medium |
+| 3 | Sample weights, class weights, starting scores, continued training | rows of unequal importance, imbalanced classes, offsets and stacking; before 4 so every new loss gets them from the start | medium |
+| 4 | More losses + more metrics, and choosing the early-stopping metric | training and stopping on what the task is scored by | medium |
 | 5 | Monotonic constraints | known-direction effects: better generalisation on small data, required in regulated work | small |
+| 6 | Two cheap regularisers: `path_smooth`, `extra_trees` | LightGBM users' tools against overfitting on small or noisy data | small |
+
+Items 3 (class weights onward), 4 (metrics) and 6 were added after a full inventory of the
+four reference libraries on 2026-10-08: weights and offsets were in every library's top five
+missing items for results.
 
 Size is the number of subsystems touched, not a time estimate. Durations are not given until
 a milestone's first stage has been measured.
@@ -37,6 +42,10 @@ Shared rules for every milestone, from how zarbor is already kept honest
 - **Old models keep working.** A model-format bump keeps every older version loadable.
 - **Docs.** guide.md gains the settings; correctness.md gains the parity rows; the arena gains a
   row where a reference exists.
+- **Task setting or tuning knob.** Every new setting is classified in guide.md as one or the
+  other. A task setting (the loss, weights, constraints, offsets) is chosen from the problem and
+  never searched. A tuning knob gets a default that is safe without tuning and, if it moves
+  results, a range in `tune`'s default search space.
 
 ---
 
@@ -99,10 +108,12 @@ much each feature moved that row's prediction.
   trees likewise.
 - Gain importance equals XGBoost's `total_gain` on the parity trees.
 
-## 3. Sample weights
+## 3. Sample weights, class weights, starting scores, continued training
 
 **Goal.** `--weight-col=NAME`: a column giving each row's weight (dropped as a feature, like
-`--split-col`).
+`--split-col`). `--class_weight=balanced` (or explicit per-class weights). `--init-col=NAME`:
+each row's starting raw score (XGBoost `base_margin`, LightGBM `init_score`, CatBoost
+`baseline`). `--init-model=M.zm`: keep boosting from a saved model.
 
 **Design.** A weight multiplies the row's gradient and hessian, which is how XGBoost, LightGBM
 and CatBoost apply it, so splits, leaf values and `min_child_weight` follow automatically.
@@ -112,8 +123,17 @@ scikit-learn's `sample_weight` does; GOSS and MVS sample on weighted gradients (
 reference's exact rule). Open question to settle by reading CatBoost's source, not guessing:
 whether its target statistics (CTRs) count rows by weight.
 
+*Class weights* are sample weights computed from the label (balanced: `n / (K * n_k)`, as
+scikit-learn defines it), so they cost nothing once weights exist. *Starting scores* replace
+the base score row by row: the trees fit what is left, which is how an exposure offset
+(`log(exposure)` under Poisson) or stacking on another model's output works. *Continued
+training* loads a model, recomputes its raw scores on the training rows, and adds trees; the
+binning schema must come from the loaded model so old and new trees agree.
+
 **Done when.** Exact parity with weights for XGBoost, LightGBM (including a weighted GOSS
-case) and CatBoost; scikit-learn's weighted logistic and forest in family; all weights 1 gives
+case) and CatBoost; `base_margin` / `init_score` parity with XGBoost and LightGBM; a model
+trained 100 rounds then continued 100 equals a 200-round model where the references agree
+that it should (no sampling); scikit-learn's weighted logistic and forest in family; all weights 1 gives
 byte-identical models to no weight column; weight 0 is identical to dropping the row
 (a property test).
 
@@ -132,7 +152,8 @@ is scored by.
 - `poisson`: log link for counts (XGBoost `count:poisson`, including its default
   `max_delta_step` of 0.7, which matters).
 - `--eval_metric=NAME` for early stopping and reporting: auc, logloss, rmse, mae, quantile
-  loss, poisson deviance, multiclass log loss, accuracy. Adding a metric is one function in
+  loss, poisson deviance, multiclass log loss, accuracy, PR-AUC (average precision), error
+  rate at a threshold, R². Adding a metric is one function in
   `metric.zig`: the "custom metric" story is that zarbor is meant to be edited.
 - Linear: absolute error and quantile have no smooth optimum, so the linear model takes only
   the smooth losses (huber, poisson); the others are refused with a clear error.
@@ -155,6 +176,22 @@ has its own method; out of scope until someone needs it.
 **Done when.** Exact parity with XGBoost `monotone_constraints` on synthetic data; a property
 test sweeps each constrained feature across its range for many rows and finds no violation;
 the constraint at both signs and on several features at once.
+
+## 6. Two cheap regularisers
+
+**Goal.** LightGBM's `path_smooth` and `extra_trees`.
+
+**Design.**
+- `path_smooth`: a leaf's value is shrunk toward its parent's, more strongly when the leaf has
+  few rows (LightGBM's formula, `serial_tree_learner.cpp`/`feature_histogram.hpp`). It also
+  changes split gains, so it is in the split scorer, not only the leaf output.
+- `extra_trees`: each feature tries one random threshold per node instead of the best one,
+  from a seeded stream that does not depend on threads.
+- Both are tuning knobs: off by default, and in `tune`'s default space.
+
+**Done when.** Exact parity with LightGBM for `path_smooth`; `extra_trees` in family with
+LightGBM's (hold-out over seeds), plus a test that the chosen threshold is random but
+reproducible at 1, 3 and 16 threads.
 
 ---
 
