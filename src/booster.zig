@@ -463,6 +463,7 @@ pub fn train(
         .has_time = cfg.tree.has_time,
         .permutation_count = cfg.tree.permutation_count,
         .permutation_block = cfg.tree.permutation_block,
+        .ordered_bank_limit = cfg.tree.ordered_bank_limit,
     }) else null;
     defer if (sym) |*s| s.deinit();
     prof.stop(.sym_init, t_init);

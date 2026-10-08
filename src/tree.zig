@@ -127,6 +127,10 @@ pub const Params = struct {
     permutation_block: u32 = 0,
     /// `ordered`: CatBoost's ordered boosting under `symmetric` (about 4x the work of `plain`).
     boosting_type: BoostingType = .plain,
+    /// Under `ordered`: most bytes of per-prefix histograms kept between levels, so each level
+    /// counts only the smaller side of the newest split. Above it every level counts every row:
+    /// the same trees, slower.
+    ordered_bank_limit: usize = 1 << 30,
     seed: u64 = 0,
 
     /// Upper bound on leaves for allocation sizing.

@@ -102,6 +102,9 @@ pub const Settings = struct {
     /// Rows shuffled together as a block in folds after the first; 0 is CatBoost's
     /// `min(256, n / 1000 + 1)`.
     permutation_block: u32 = 0,
+    /// Most bytes ordered scoring may keep in per-prefix histograms to subtract from at the next
+    /// level; above it every level counts every row (same model, slower).
+    ordered_bank_limit: usize = 1 << 30,
 };
 
 /// One ordering of the training rows and the state that follows it (CatBoost's `TFold`): its
@@ -317,7 +320,15 @@ pub const Builder = struct {
     /// hold its raw histogram of the level above; and per-worker room for the running sums
     /// `ScoreCtx` scans, so the raw histograms survive to be subtracted from.
     sel: Selected = .{},
+    /// One derivative pair per row position, computed in parallel and then summed in order.
+    dscratch: []Deriv = &.{},
     cached: []bool = &.{},
+    /// Ordered scoring's per-prefix body and tail histograms of the static candidates, kept from
+    /// the level above for the same subtraction (`obody[k * ostride + off[c] ..]`); empty when
+    /// they would pass `Settings.ordered_bank_limit`, and every level then counts every row.
+    obody: []Cell = &.{},
+    otail: []Cell = &.{},
+    ostride: usize = 0,
     scratch: []Cell = &.{},
     max_slice: usize = 0,
 
@@ -411,11 +422,20 @@ pub const Builder = struct {
         const cached = try gpa.alloc(bool, all.len);
         errdefer gpa.free(cached);
         @memset(cached, false);
-        const scratch = try gpa.alloc(Cell, if (s.ordered) 0 else pool.workerCount() * max_slice);
+        // Ordered scoring keeps a body and a tail histogram per worker.
+        const scratch = try gpa.alloc(Cell, pool.workerCount() * max_slice * @as(usize, if (s.ordered) 2 else 1));
         errdefer gpa.free(scratch);
-        var sel: Selected = .{};
-        if (!s.ordered) sel = try Selected.init(gpa, ds.n_rows);
+        var sel = try Selected.init(gpa, ds.n_rows);
         errdefer sel.deinit(gpa);
+        const ostride = off[cands.len];
+        const bank_cells = if (s.ordered) ord.bts.len * ostride else 0;
+        const keep_banks = bank_cells != 0 and 2 * bank_cells * @sizeOf(Cell) <= s.ordered_bank_limit;
+        const obody = try gpa.alloc(Cell, if (keep_banks) bank_cells else 0);
+        errdefer gpa.free(obody);
+        const otail = try gpa.alloc(Cell, if (keep_banks) bank_cells else 0);
+        errdefer gpa.free(otail);
+        const dscratch = try gpa.alloc(Deriv, ds.n_rows);
+        errdefer gpa.free(dscratch);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -451,7 +471,11 @@ pub const Builder = struct {
             .acc_off = ord.acc_off,
             .tail_grads = ord.tail_grads,
             .sel = sel,
+            .dscratch = dscratch,
             .cached = cached,
+            .obody = obody,
+            .otail = otail,
+            .ostride = ostride,
             .scratch = scratch,
             .max_slice = max_slice,
         };
@@ -485,7 +509,10 @@ pub const Builder = struct {
         b.gpa.free(b.fold_grads);
         b.gpa.free(b.combo_buf);
         b.sel.deinit(b.gpa);
+        b.gpa.free(b.dscratch);
         b.gpa.free(b.cached);
+        b.gpa.free(b.obody);
+        b.gpa.free(b.otail);
         b.gpa.free(b.scratch);
         b.* = undefined;
     }
@@ -529,10 +556,8 @@ pub const Builder = struct {
         if (b.s.ordered) {
             b.prefixDerivatives(fold, labels, objective, scale_pos_weight);
         } else if (fold.approx.len != 0) {
-            for (b.fold_grads, fold.approx, labels) |*o, a, y| {
-                const d = derivatives(objective, a, y, scale_pos_weight);
-                o.* = .{ .g = @floatCast(d.g), .h = @floatCast(d.h) };
-            }
+            var pctx = PosCtx{ .b = b, .fold = fold, .labels = labels, .objective = objective, .spw = scale_pos_weight, .mode = .fold_grads };
+            b.pool.parallelFor(ds.n_rows, &pctx, PosCtx.run, pos_chunk);
             search_grads = b.fold_grads;
         }
         const sample_grads = if (b.s.ordered) b.tail_grads else search_grads;
@@ -551,10 +576,13 @@ pub const Builder = struct {
             if (b.s.ordered) {
                 @memset(b.acc_num, 0);
                 @memset(b.acc_den, 0);
+                const side: ?bool = if (depth == 0 or b.obody.len == 0) null else b.selectPositions(fold, depth - 1);
                 for (b.bts, 0..) |_, k| {
-                    var octx = OrderedCtx{ .b = b, .fold = fold, .bt = k, .n_leaves = n_leaves };
+                    var octx = OrderedCtx{ .b = b, .fold = fold, .bt = k, .n_leaves = n_leaves, .side = side };
                     b.pool.parallelFor(b.cands.len, &octx, OrderedCtx.run, 1);
                 }
+                // Every prefix's banks now hold this level for the static candidates.
+                if (b.obody.len != 0) @memset(b.cached[0..b.n_static], true);
             } else {
                 const side: ?bool = if (depth == 0) null else b.selectSide(search_grads, depth - 1);
                 var hctx = HistCtx{ .b = b, .grads = search_grads, .n_leaves = n_leaves, .side = side };
@@ -672,15 +700,32 @@ pub const Builder = struct {
         return cctx.side;
     }
 
+    /// Ordered scoring's counterpart of `selectSide`: fold positions (ascending) whose row is on the
+    /// side of split bit `bit` with fewer rows, into `sel.row`. Weights are applied when counting.
+    fn selectPositions(b: *Builder, fold: *const Fold, bit: u32) bool {
+        const n = b.ds.n_rows;
+        const mask = @as(u16, 1) << @intCast(bit);
+        var cctx = SelectCtx{ .b = b, .grads = &.{}, .mask = mask, .side = false, .chunk = (n + select_chunks - 1) / select_chunks, .fold = fold };
+        b.pool.parallelFor(select_chunks, &cctx, SelectCtx.count, 1);
+        var set: usize = 0;
+        for (b.sel.chunk_set) |x| set += x;
+        cctx.side = !(set * 2 > n);
+        var at: usize = 0;
+        for (b.sel.chunk_set, b.sel.chunk_kept, b.sel.chunk_at) |x, k, *o| {
+            o.* = at;
+            at += if (cctx.side) x else k - x;
+        }
+        b.sel.len = at;
+        b.pool.parallelFor(select_chunks, &cctx, SelectCtx.fill, 1);
+        return cctx.side;
+    }
+
     /// Each prefix model's derivatives on its rows, and per row its own tail's (rows of the first
     /// body take the first prefix's): what ordered scoring, bootstrap and noise read.
     fn prefixDerivatives(b: *Builder, fold: *const Fold, labels: []const f32, objective: Objective, scale_pos_weight: f32) void {
         for (b.bts, 0..) |bt, k| {
-            const a = fold.papprox[b.ap_off[k]..][0..bt.tail];
-            const d = fold.pderiv[b.ap_off[k]..][0..bt.tail];
-            for (a, d, 0..) |x, *o, pos| o.* = derivatives(objective, x, labels[fold.row(pos)], scale_pos_weight).g;
-            const from = if (k == 0) 0 else bt.body;
-            for (d[from..], from..) |x, pos| b.tail_grads[fold.row(pos)] = .{ .g = @floatCast(x), .h = 0 };
+            var pctx = PosCtx{ .b = b, .fold = fold, .labels = labels, .objective = objective, .spw = scale_pos_weight, .mode = .prefix_deriv, .k = k };
+            b.pool.parallelFor(bt.tail, &pctx, PosCtx.run, pos_chunk);
         }
     }
 
@@ -693,17 +738,19 @@ pub const Builder = struct {
         const h = try b.gpa.alloc(f64, n_leaves);
         defer b.gpa.free(h);
         for (b.bts, 0..) |bt, k| {
-            const a = fold.papprox[b.ap_off[k]..][0..bt.tail];
+            // Derivatives in parallel, then summed in position order as before.
+            var pctx = PosCtx{ .b = b, .fold = fold, .labels = labels, .objective = objective, .spw = scale_pos_weight, .mode = .body_deriv, .k = k, .leaf = leaf, .step = g };
+            b.pool.parallelFor(bt.body, &pctx, PosCtx.run, pos_chunk);
             @memset(g, 0);
             @memset(h, 0);
-            for (a[0..bt.body], 0..) |x, pos| {
-                const r = fold.row(pos);
-                const d = derivatives(objective, x, labels[r], scale_pos_weight);
-                g[leaf[r]] += d.g;
-                h[leaf[r]] += d.h;
+            for (b.dscratch[0..bt.body], 0..) |d, pos| {
+                const l = leaf[fold.row(pos)];
+                g[l] += d.g;
+                h[l] += d.h;
             }
             for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
-            for (a, 0..) |*x, pos| x.* += g[leaf[fold.row(pos)]];
+            pctx.mode = .prefix_apply;
+            b.pool.parallelFor(bt.tail, &pctx, PosCtx.run, pos_chunk);
         }
     }
 
@@ -715,15 +762,17 @@ pub const Builder = struct {
         defer b.gpa.free(g);
         const h = try b.gpa.alloc(f64, n_leaves);
         defer b.gpa.free(h);
+        var pctx = PosCtx{ .b = b, .fold = fold, .labels = labels, .objective = objective, .spw = scale_pos_weight, .mode = .plain_deriv, .leaf = leaf, .step = g };
+        b.pool.parallelFor(fold.approx.len, &pctx, PosCtx.run, pos_chunk);
         @memset(g, 0);
         @memset(h, 0);
-        for (fold.approx, labels, leaf) |x, y, l| {
-            const d = derivatives(objective, x, y, scale_pos_weight);
+        for (b.dscratch[0..fold.approx.len], leaf) |d, l| {
             g[l] += d.g;
             h[l] += d.h;
         }
         for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
-        for (fold.approx, leaf) |*x, l| x.* += g[l];
+        pctx.mode = .plain_apply;
+        b.pool.parallelFor(fold.approx.len, &pctx, PosCtx.run, pos_chunk);
     }
 
     /// Each row's leaf under `splits` on `fold`: its own online statistics for CTR splits.
@@ -1585,6 +1634,9 @@ const SelectCtx = struct {
     mask: u16,
     side: bool,
     chunk: usize,
+    /// Set for ordered scoring: chunks are fold positions, every row is kept, and only
+    /// positions are written.
+    fold: ?*const Fold = null,
 
     /// Chunk `c`'s rows are `[start(c), start(c + 1))`.
     fn start(self: *const SelectCtx, c: usize) usize {
@@ -1599,6 +1651,13 @@ const SelectCtx = struct {
         for (begin..end) |c| {
             const lo = self.start(c);
             const hi = self.start(c + 1);
+            if (self.fold) |fold| {
+                var set: usize = 0;
+                for (lo..hi) |pos| set += @intFromBool(b.leaf[fold.row(pos)] & self.mask != 0);
+                b.sel.chunk_set[c] = set;
+                b.sel.chunk_kept[c] = hi - lo;
+                continue;
+            }
             var set: usize = 0;
             var kept: usize = 0;
             for (lo..hi) |r| {
@@ -1621,6 +1680,14 @@ const SelectCtx = struct {
             const lo = self.start(c);
             const hi = self.start(c + 1);
             var at = sel.chunk_at[c];
+            if (self.fold) |fold| {
+                for (lo..hi) |pos| {
+                    if ((b.leaf[fold.row(pos)] & self.mask != 0) != self.side) continue;
+                    sel.row[at] = @intCast(pos);
+                    at += 1;
+                }
+                continue;
+            }
             for (lo..hi) |r| {
                 const s: f64 = if (w.len != 0) w[r] else 1;
                 if (s == 0) continue;
@@ -1847,37 +1914,87 @@ const OrderedCtx = struct {
     fold: *const Fold,
     bt: usize,
     n_leaves: usize,
+    /// Below the root with banks kept: the side `sel` holds (positions, ascending).
+    side: ?bool,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
         const self: *OrderedCtx = @ptrCast(@alignCast(ctx));
-        for (begin..end) |f| self.cand(f);
+        for (begin..end) |f| self.cand(f, worker);
     }
 
-    fn cand(self: *OrderedCtx, f: usize) void {
+    fn cand(self: *OrderedCtx, f: usize, worker: usize) void {
         const b = self.b;
         const c = b.cands[f];
         const nb: usize = c.nb;
         const bt = b.bts[self.bt];
         const d = self.fold.pderiv[b.ap_off[self.bt]..][0..bt.tail];
-        const body = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
-        const tail = b.cells_tail[b.off[f]..][0 .. self.n_leaves * nb];
-        @memset(body, .{});
-        @memset(tail, .{});
-        for (0..bt.tail) |pos| {
-            const r = self.fold.row(pos);
-            const bin: usize = if (c.kind == .ctr) c.col[r] else binAt(b.ds, c.feature, r);
-            const i = @as(usize, b.leaf[r]) * nb + bin;
-            if (pos < bt.body) {
-                body[i].g += d[pos];
-                body[i].n += 1;
-            } else {
-                const s: f64 = if (b.weights.len != 0) b.weights[r] else 1;
-                if (s == 0) continue;
-                tail[i].g += s * d[pos];
-                tail[i].n += s;
-            }
+        const len = self.n_leaves * nb;
+        // A static candidate's histograms live in this prefix's banks, kept across levels; a
+        // combination's (new each level), or all of them without banks, in the shared cells.
+        const banked = f < b.n_static and b.obody.len != 0;
+        const body = if (banked) b.obody[self.bt * b.ostride + b.off[f] ..][0..len] else b.cells[b.off[f]..][0..len];
+        const tail = if (banked) b.otail[self.bt * b.ostride + b.off[f] ..][0..len] else b.cells_tail[b.off[f]..][0..len];
+        if (self.side != null and banked and b.cached[f]) {
+            self.smallerSide(c, d, bt, body, tail, self.side.?);
+        } else {
+            @memset(body, .{});
+            @memset(tail, .{});
+            for (0..bt.tail) |pos| self.add(c, d, bt, body, tail, pos);
         }
+        // Running sums in this worker's scratch: the banks stay raw for the next level.
+        const scratch = b.scratch[worker * 2 * b.max_slice ..][0 .. 2 * b.max_slice];
+        const bs = scratch[0..len];
+        const ts = scratch[b.max_slice..][0..len];
+        @memcpy(bs, body);
+        @memcpy(ts, tail);
+        self.score(f, bs, ts);
+    }
+
+    /// Position `pos` of prefix `bt`: its body sums (prefix model's derivative, count) or its tail
+    /// sums (bootstrap-weighted).
+    inline fn add(self: *OrderedCtx, c: Cand, d: []const f64, bt: BodyTail, body: []Cell, tail: []Cell, pos: usize) void {
+        const b = self.b;
+        const r = self.fold.row(pos);
+        const bin: usize = if (c.kind == .ctr) c.col[r] else binAt(b.ds, c.feature, r);
+        const i = @as(usize, b.leaf[r]) * c.nb + bin;
+        if (pos < bt.body) {
+            body[i].g += d[pos];
+            body[i].n += 1;
+        } else {
+            const s: f64 = if (b.weights.len != 0) b.weights[r] else 1;
+            if (s == 0) return;
+            tail[i].g += s * d[pos];
+            tail[i].n += s;
+        }
+    }
+
+    /// The selected positions this prefix covers, then the other side as the parent minus them,
+    /// for both banks (CatBoost caches every body-tail's statistics the same way).
+    fn smallerSide(self: *OrderedCtx, c: Cand, d: []const f64, bt: BodyTail, body: []Cell, tail: []Cell, side: bool) void {
+        const half = body.len / 2;
+        inline for (.{ body, tail }) |bank| {
+            if (!side) @memcpy(bank[half..], bank[0..half]);
+            @memset(if (side) bank[half..] else bank[0..half], .{});
+        }
+        const sel = &self.b.sel;
+        for (0..sel.len) |j| {
+            const pos: usize = sel.row[j];
+            if (pos >= bt.tail) break;
+            self.add(c, d, bt, body, tail, pos);
+        }
+        inline for (.{ body, tail }) |bank| {
+            const fresh = if (side) bank[half..] else bank[0..half];
+            const other = if (side) bank[0..half] else bank[half..];
+            for (other, fresh) |*o, x| o.* = o.sub(x);
+        }
+    }
+
+    /// For each threshold and leaf, the body's leaf estimates scored against the tail, added to the
+    /// candidate's accumulators. `body` and `tail` are scratch copies, made running sums here.
+    fn score(self: *OrderedCtx, f: usize, body: []Cell, tail: []Cell) void {
+        const b = self.b;
+        const c = b.cands[f];
+        const nb: usize = c.nb;
         const num = b.acc_num[b.acc_off[f]..][0..nb];
         const den = b.acc_den[b.acc_off[f]..][0..nb];
         const lambda = b.s.lambda;
@@ -1984,6 +2101,60 @@ const ApplySplit = struct {
 };
 
 const Deriv = struct { g: f64, h: f64 };
+
+/// Rows per task for `PosCtx`, whose work per row is one derivative or one add.
+const pos_chunk = 8192;
+
+/// Per-row work over fold positions with no reductions, so any thread count gives the same bits:
+/// derivatives (prefix `k`'s, or the plain fold's), and adding a tree's step by leaf.
+const PosCtx = struct {
+    b: *Builder,
+    fold: *const Fold,
+    labels: []const f32,
+    objective: Objective,
+    spw: f32,
+    mode: enum { fold_grads, prefix_deriv, body_deriv, prefix_apply, plain_deriv, plain_apply },
+    k: usize = 0,
+    leaf: []const u16 = &.{},
+    step: []const f64 = &.{},
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *PosCtx = @ptrCast(@alignCast(ctx));
+        const b = self.b;
+        const fold = self.fold;
+        switch (self.mode) {
+            .fold_grads => for (begin..end) |r| {
+                const d = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw);
+                b.fold_grads[r] = .{ .g = @floatCast(d.g), .h = @floatCast(d.h) };
+            },
+            .prefix_deriv => {
+                const ap = b.ap_off[self.k];
+                const from = if (self.k == 0) 0 else b.bts[self.k].body;
+                for (begin..end) |pos| {
+                    const r = fold.row(pos);
+                    const g = derivatives(self.objective, fold.papprox[ap + pos], self.labels[r], self.spw).g;
+                    fold.pderiv[ap + pos] = g;
+                    if (pos >= from) b.tail_grads[r] = .{ .g = @floatCast(g), .h = 0 };
+                }
+            },
+            .body_deriv => {
+                const ap = b.ap_off[self.k];
+                for (begin..end) |pos| b.dscratch[pos] = derivatives(self.objective, fold.papprox[ap + pos], self.labels[fold.row(pos)], self.spw);
+            },
+            .prefix_apply => {
+                const ap = b.ap_off[self.k];
+                for (begin..end) |pos| fold.papprox[ap + pos] += self.step[self.leaf[fold.row(pos)]];
+            },
+            .plain_deriv => for (begin..end) |r| {
+                b.dscratch[r] = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw);
+            },
+            .plain_apply => for (begin..end) |r| {
+                fold.approx[r] += self.step[self.leaf[r]];
+            },
+        }
+    }
+};
 
 /// Exact derivatives for a re-evaluated Newton step (the first step reuses the booster's).
 fn derivatives(objective: Objective, raw: f64, y: f32, scale_pos_weight: f32) Deriv {

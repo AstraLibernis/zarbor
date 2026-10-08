@@ -705,20 +705,45 @@ test "level histograms below the root are the same to the bit at 1, 3 and 16 thr
     const raw = try gpa.alloc(f32, ds.n_rows);
     defer gpa.free(raw);
     @memset(raw, 0);
-    const settings: symmetric.Settings = .{ .depth = 4, .lambda = 1, .learning_rate = 0.3, .score = .cosine, .leaf_iterations = 1, .ctr = true, .max_ctr_complexity = 3, .bootstrap = .mvs, .subsample = 0.7, .seed = 3 };
-
-    var want: []u8 = &.{};
-    defer gpa.free(want);
-    for ([_]u32{ 1, 3, 16 }) |threads| {
-        const pool = try Pool.init(gpa, threads);
-        defer pool.deinit();
-        var b = try symmetric.Builder.init(gpa, pool, &ds, settings);
-        defer b.deinit();
-        for (0..3) |_| {
-            var t = try b.grow(grads, raw, ds.labels, .logistic, 1);
-            t.deinit(gpa);
+    // Plain and ordered; ordered keeps a body and a tail bank per prefix as well.
+    for ([_]bool{ false, true }) |ordered| {
+        const settings: symmetric.Settings = .{ .depth = 4, .lambda = 1, .learning_rate = 0.3, .score = .cosine, .leaf_iterations = 1, .ctr = true, .max_ctr_complexity = 3, .bootstrap = .mvs, .subsample = 0.7, .seed = 3, .ordered = ordered };
+        var want: std.ArrayList(u8) = .empty;
+        defer want.deinit(gpa);
+        for ([_]u32{ 1, 3, 16 }) |threads| {
+            const pool = try Pool.init(gpa, threads);
+            defer pool.deinit();
+            var b = try symmetric.Builder.init(gpa, pool, &ds, settings);
+            defer b.deinit();
+            for (0..3) |_| {
+                var t = try b.grow(grads, raw, ds.labels, .logistic, 1);
+                t.deinit(gpa);
+            }
+            if (ordered) try testing.expect(b.obody.len != 0);
+            var got: std.ArrayList(u8) = .empty;
+            defer got.deinit(gpa);
+            for ([_][]const u8{ std.mem.sliceAsBytes(b.cells), std.mem.sliceAsBytes(b.obody), std.mem.sliceAsBytes(b.otail) }) |part| try got.appendSlice(gpa, part);
+            if (threads == 1) try want.appendSlice(gpa, got.items) else try testing.expectEqualSlices(u8, want.items, got.items);
         }
-        const got = std.mem.sliceAsBytes(b.cells);
-        if (threads == 1) want = try gpa.dupe(u8, got) else try testing.expectEqualSlices(u8, want, got);
     }
+}
+
+test "ordered scoring subtracting from kept histograms grows the trees counting every row does" {
+    // The banks only change how each level's sums are formed (smaller side plus parent minus it),
+    // so with and without them the trees must agree up to rounding.
+    const gpa = testing.allocator;
+    var ds = try ctrFixture(gpa);
+    defer ds.deinit();
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var models: [2]booster.Model = undefined;
+    for ([_]usize{ 1 << 30, 0 }, 0..) |limit, i| {
+        var cfg = config.Config.from(.{ .grow_policy = .symmetric, .verbose_eval = 0, .base_score = 0, .cat_split = .ctr, .boosting_type = .ordered, .n_rounds = 12, .max_depth = 4, .bootstrap_type = .bayesian }).gbdt;
+        cfg.tree.ordered_bank_limit = limit;
+        models[i] = (try booster.train(gpa, pool, &ds, null, cfg, null)).model;
+    }
+    defer for (&models) |*m| m.deinit();
+    var raw: [2][n_rows]f32 = undefined;
+    for (&models, &raw) |*m, *r| m.predictRaw(pool, &ds, r);
+    for (raw[0], raw[1]) |x, y| try testing.expectApproxEqAbs(x, y, 1e-5);
 }
