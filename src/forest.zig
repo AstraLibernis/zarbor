@@ -28,6 +28,8 @@ pub const Params = struct {
     objective: Objective = .logistic,
     /// Print per-round metrics every N rounds. 0 silences training.
     verbose_eval: u32 = 10,
+    /// The validation metric logged; null is the objective's own.
+    eval_metric: ?metric.Metric = null,
     tree: tree.Params = .{
         .learning_rate = 1.0,
         .bootstrap = true,
@@ -40,6 +42,7 @@ pub const Params = struct {
 
     pub fn validate(p: Params) !void {
         if (p.n_rounds == 0) return error.NoRounds;
+        if (p.eval_metric) |m| if (!m.fits(p.objective)) return error.MetricDoesNotFitObjective;
         // `train` forces the step to 1, so only that value is checked.
         var t = p.tree;
         t.learning_rate = 1.0;
@@ -198,7 +201,7 @@ pub fn train(
             const t_vm = prof.start();
             const inv: f32 = 1.0 / @as(f32, @floatFromInt(model.trees.items.len));
             for (valid_scratch, valid_sum) |*dst, s| dst.* = s * inv;
-            score = try evaluate(gpa, cfg.objective, valid_scratch, v.labels, v.weights);
+            score = try metric.evaluate(gpa, cfg.eval_metric orelse .defaultFor(cfg.objective), .{ .objective = cfg.objective }, valid_scratch, .natural, v.labels, v.weights);
             prof.stop(.valid_metric, t_vm);
             valid_ns += prof.now() - wall0;
 
@@ -226,22 +229,3 @@ pub fn train(
     };
 }
 
-/// Predictions are already probabilities/means: no raw-score scale to convert, unlike the booster.
-fn evaluate(
-    gpa: std.mem.Allocator,
-    obj: Objective,
-    pred: []f32,
-    labels: []const f32,
-    weights: []const f32,
-) !f64 {
-    if (weights.len != 0) return switch (obj) {
-        .logistic => try metric.aucW(gpa, pred, labels, weights),
-        .squared_error => metric.rmseW(pred, labels, weights),
-        else => unreachable, // Refused by `Config.validate`.
-    };
-    return switch (obj) {
-        .logistic => try metric.auc(gpa, pred, labels),
-        .squared_error => metric.rmse(pred, labels),
-        else => unreachable, // Refused by `Config.validate`: boosting only for now.
-    };
-}

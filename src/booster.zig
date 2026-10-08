@@ -80,14 +80,23 @@ pub const Params = struct {
     goss_warmup: bool = true,
     /// Stop after this many rounds without validation improvement; 0 disables.
     early_stopping_rounds: u32 = 0,
+    /// The validation metric logged and early-stopped on; null is the objective's own
+    /// (`metric.Metric.defaultFor`).
+    eval_metric: ?metric.Metric = null,
     /// Print per-round metrics every N rounds. 0 silences training.
     verbose_eval: u32 = 10,
     tree: tree.Params = .{},
+
+    /// The validation metric in force: `eval_metric`, or the objective's own.
+    pub fn evalMetric(p: Params) metric.Metric {
+        return p.eval_metric orelse .defaultFor(p.objective);
+    }
 
     pub fn validate(p: Params) !void {
         if (p.n_rounds == 0) return error.NoRounds;
         if (!(p.quantile_alpha > 0 and p.quantile_alpha < 1)) return error.BadQuantileAlpha;
         if (!(p.huber_slope > 0)) return error.BadHuberSlope;
+        if (p.eval_metric) |m| if (!m.fits(p.objective)) return error.MetricDoesNotFitObjective;
         switch (p.objective) {
             .absolute_error, .quantile, .pseudo_huber, .poisson => {
                 // CatBoost estimates these leaves its own way; not built yet (PLAN 4).
@@ -510,10 +519,6 @@ pub const TrainResult = struct {
     valid_ns: u64,
 };
 
-fn higherIsBetter(obj: Objective) bool {
-    return obj == .logistic; // AUC for logistic, RMSE for regression
-}
-
 fn evaluate(
     gpa: std.mem.Allocator,
     cfg: Params,
@@ -522,35 +527,12 @@ fn evaluate(
     num_class: usize,
     weights: []const f32,
 ) !f64 {
-    const obj = cfg.objective;
-    switch (obj) {
-        // The regression losses' own metrics, on the natural scale (raw is natural but Poisson's).
-        .absolute_error => return metric.mae(raw, labels, weights),
-        .quantile => return metric.pinball(raw, labels, weights, cfg.quantile_alpha),
-        .pseudo_huber => return metric.mphe(raw, labels, weights, cfg.huber_slope),
-        .poisson => {
-            const mu = try gpa.alloc(f32, raw.len);
-            defer gpa.free(mu);
-            for (mu, raw) |*m, r| m.* = @exp(r);
-            return metric.poissonNloglik(mu, labels, weights);
-        },
-        else => {},
-    }
-    if (weights.len != 0) return switch (obj) {
-        .logistic => try metric.aucW(gpa, raw, labels, weights),
-        .squared_error => metric.rmseW(raw, labels, weights),
-        .softmax => metric.mloglossW(raw, labels, num_class, weights),
-        else => unreachable,
-    };
-    return switch (obj) {
-        .logistic => blk: {
-            // AUC is rank-based: log-odds rank like probabilities, skip the sigmoid.
-            break :blk try metric.auc(gpa, raw, labels);
-        },
-        .squared_error => metric.rmse(raw, labels),
-        .softmax => metric.mlogloss(raw, labels, num_class),
-        else => unreachable,
-    };
+    return metric.evaluate(gpa, cfg.evalMetric(), .{
+        .objective = cfg.objective,
+        .k = num_class,
+        .quantile_alpha = cfg.quantile_alpha,
+        .huber_slope = cfg.huber_slope,
+    }, raw, .raw, labels, weights);
 }
 
 /// Each class's starting score: the log of its share of the rows, less the mean of those logs
@@ -810,7 +792,7 @@ pub fn train(
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, tree_cfg) else null;
     defer if (builder_opt) |*b| b.deinit();
 
-    const better = higherIsBetter(cfg.objective);
+    const better = cfg.evalMetric().higherIsBetter();
     var best_score: f64 = if (better) -std.math.inf(f64) else std.math.inf(f64);
     var best_round: u32 = 0;
     var since_best: u32 = 0;

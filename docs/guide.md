@@ -40,6 +40,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
 | `--max_cat_levels` | task | a categorical with more levels than 255 that you mean to keep |
 | `--early_stopping_rounds` | task | on, with a validation set, unless `tune` is choosing rounds for you |
+| `--eval_metric` | task | when the task is judged by something other than the objective's default (a competition's metric); it picks the stopping round and `tune`'s winner |
 | `--learning_rate`, `--n_rounds` | knob | lower rate with more rounds is slower and usually slightly better; early stopping picks rounds |
 | `--max_depth`, `--max_leaves` | knob | the main complexity control; `tune` |
 | `--lambda`, `--alpha`, `--min_child_weight`, `--min_child_samples`, `--min_split_gain` | knob | against overfitting; `tune` (the first three are in the default space) |
@@ -145,6 +146,21 @@ round (XGBoost's `max_delta_step` for this loss; `--max_delta_step` overrides). 
 reported and early-stopped on its own metric: MAE, pinball loss, mean pseudo-Huber error,
 Poisson negative log-likelihood. Not built yet: these losses with symmetric trees, linear
 leaves, the forest or the linear model (refused with a reason).
+
+**The holdout metric** (`--eval_metric`, in `train`, `cv` and `tune`) is what early stopping
+watches, what the validation log prints, and what `cv` reports and `tune` ranks by. The
+default is the objective's own: `auc` for logistic, `rmse`, `mlogloss` for softmax, and the
+losses' metrics above. Others that fit the target:
+
+| target | metrics |
+|---|---|
+| yes/no | `auc`, `aucpr` (average precision), `logloss`, `error_rate` (wrong side of 0.5), `accuracy` |
+| classes | `mlogloss`, `accuracy` |
+| a number | `rmse`, `mae`, `r2`, `pinball` (at `--quantile_alpha`), `mphe` (at `--huber_slope`); `poisson_nloglik` under `poisson` |
+
+The objective is still what the trees minimise; the metric only picks when to stop and which
+setting wins. Pick the metric the result is judged by. A metric that does not fit the target
+is refused.
 
 **Sample weights** (`--weight-col=NAME`, in `train`, `cv` and `tune`): a numeric column of
 per-row weights, at least 0, none missing; it is never a feature. A row's weight multiplies its
@@ -448,7 +464,8 @@ logsum, uniform, auto].
 softmax], `--quantile_alpha` [0.5], `--huber_slope` [1],
 `--softmax_hessian` [xgboost], `--n_rounds` [500],
 `--learning_rate` [0.1], `--base_score` [label mean], `--scale_pos_weight` [1],
-`--early_stopping_rounds` [0 = off], `--verbose_eval` [10], `--seed` [0].
+`--early_stopping_rounds` [0 = off], `--eval_metric` [the objective's own], `--verbose_eval` [10],
+`--seed` [0].
 
 **Trees:** `--grow_policy` [depthwise], `--max_depth` [6], `--max_leaves` [0 = none],
 `--min_child_samples` [20], `--min_child_weight` [1], `--lambda` [1], `--alpha` [0],

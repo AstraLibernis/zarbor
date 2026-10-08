@@ -1645,7 +1645,7 @@ test "bin_policy=auto picks the best-scoring policy, and on training rows scores
     var best = scores[0];
     for (scores, data.concrete_policies) |sc, p| {
         try testing.expectEqual(p, sc.policy);
-        if (cv.better(cfg.objective(), sc.score, best.score)) best = sc;
+        if (cv.better(cfg.evalMetric(), sc.score, best.score)) best = sc;
     }
     try testing.expectEqual(best.policy, chosen);
     // The policies really bin differently here, or the choice is untested.

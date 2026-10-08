@@ -10,6 +10,8 @@ const data = @import("../data.zig");
 const config = @import("../config.zig");
 const booster = @import("../booster.zig");
 const metric = @import("../metric.zig");
+const cv = @import("../cv.zig");
+const forest = @import("../forest.zig");
 const model_mod = @import("../model.zig");
 const Pool = @import("../pool.zig").Pool;
 const fromBins = @import("split_test.zig").fromBins;
@@ -217,4 +219,71 @@ test "the new losses are the same to the bit at 1, 3 and 16 threads, and refused
     try testing.expectError(error.ObjectiveNeedsGbdt, config.Config.from(.{ .algo = .linear, .objective = .poisson }).validate());
     var enc = data.LabelEncoder{ .gpa = gpa };
     try testing.expectError(error.LabelOutOfRange, enc.validate(&.{ 1, -1 }, .poisson));
+}
+
+test "early stopping follows eval_metric: r2 stops where rmse does, at 1 - rmse^2 / var" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 5, false);
+    defer ds.deinit();
+    var valid = try fixture(gpa, 6, false);
+    defer valid.deinit();
+    const base = params(.{ .objective = .squared_error, .n_rounds = 400, .max_depth = 5, .learning_rate = 0.3, .early_stopping_rounds = 5 });
+    var by_rmse = base;
+    by_rmse.eval_metric = .rmse;
+    var by_r2 = base;
+    by_r2.eval_metric = .r2;
+    var a = try booster.train(gpa, pool, &ds, &valid, by_rmse, null);
+    defer a.model.deinit();
+    var b = try booster.train(gpa, pool, &ds, &valid, by_r2, null);
+    defer b.model.deinit();
+    // It stopped early, and on the same round.
+    try testing.expect(a.rounds_run < 400);
+    try testing.expectEqual(a.n_rounds, b.n_rounds);
+    var mean: f64 = 0;
+    for (valid.labels) |y| mean += y;
+    mean /= n_rows;
+    var v: f64 = 0;
+    for (valid.labels) |y| v += (y - mean) * (y - mean);
+    v /= n_rows;
+    try testing.expectApproxEqAbs(1 - a.best_score * a.best_score / v, b.best_score, 1e-9);
+    // A metric that does not fit the target is refused.
+    var bad = base;
+    bad.eval_metric = .auc;
+    try testing.expectError(error.MetricDoesNotFitObjective, bad.validate());
+    try testing.expectError(error.MetricDoesNotFitObjective, config.Config.from(.{ .objective = .softmax, .eval_metric = .logloss }).validate());
+    try testing.expectError(error.MetricDoesNotFitObjective, config.Config.from(.{ .algo = .random_forest, .objective = .squared_error, .eval_metric = .auc }).validate());
+}
+
+test "cv and the forest score holdouts by eval_metric; each layer refuses a metric that does not fit" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var ds = try fixture(gpa, 7, false);
+    defer ds.deinit();
+    // cv's pooled score is the chosen metric over the out-of-fold predictions.
+    const fold_of = try cv.assignFolds(gpa, ds.labels, 4, 1, false);
+    defer gpa.free(fold_of);
+    var oof: [n_rows]f32 = undefined;
+    const cfg = config.Config.from(.{ .objective = .squared_error, .eval_metric = .mae, .n_rounds = 10, .max_depth = 3, .verbose_eval = 0 });
+    const o = try cv.crossValidate(gpa, testing.io, pool, &ds, cfg, fold_of, 4, .{ .oof = &oof });
+    try testing.expectApproxEqAbs(metric.mae(&oof, ds.labels, &.{}), o.pooled, 1e-9);
+    try testing.expectEqualStrings("mae", cfg.metricName());
+
+    // The forest's validation score likewise.
+    var valid = try fixture(gpa, 8, false);
+    defer valid.deinit();
+    var fp: forest.Params = config.Config.from(.{ .algo = .random_forest, .objective = .squared_error, .n_rounds = 5, .verbose_eval = 0 }).random_forest;
+    fp.eval_metric = .r2;
+    var f = try forest.train(gpa, pool, &ds, &valid, fp, null);
+    defer f.model.deinit();
+    var pred: [n_rows]f32 = undefined;
+    f.model.predict(pool, &valid, &pred);
+    try testing.expectApproxEqAbs(metric.r2(&pred, valid.labels, &.{}), f.score, 1e-9);
+
+    fp.eval_metric = .logloss;
+    try testing.expectError(error.MetricDoesNotFitObjective, fp.validate());
+    // The linear model has no metric of its own: only the config check stands guard.
+    try testing.expectError(error.MetricDoesNotFitObjective, config.Config.from(.{ .algo = .linear, .objective = .squared_error, .eval_metric = .auc }).validate());
 }

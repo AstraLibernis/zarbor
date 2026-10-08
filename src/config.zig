@@ -13,6 +13,7 @@ const booster = @import("booster.zig");
 const forest = @import("forest.zig");
 const linear = @import("linear.zig");
 const Objective = @import("objective.zig").Objective;
+const Metric = @import("metric.zig").Metric;
 
 /// Which model to fit; all share `data.zig` binning, missing-value and categorical handling.
 pub const Algo = enum {
@@ -85,6 +86,10 @@ pub const Config = struct {
     algo: Algo = .gbdt,
     /// Class weights for a classification target (`logistic`, `softmax`).
     class_weight: ClassWeight = .none,
+    /// The holdout metric: early stopping, the validation log, `cv` and `tune`'s ranking.
+    /// Null is the objective's own (`metric.Metric.defaultFor`). Set in every group that
+    /// evaluates, as `applyFlag` sets a name.
+    eval_metric: ?Metric = null,
     /// Worker threads. 0 means "one per logical core".
     n_threads: u32 = 0,
     bin: data.BinParams = .{},
@@ -144,17 +149,13 @@ pub const Config = struct {
         return c.objective().classifies();
     }
 
-    /// The metric a holdout is scored by: AUC, RMSE or multiclass log loss.
+    /// The metric a holdout is scored by: `eval_metric`, or the objective's own.
+    pub fn evalMetric(c: Config) Metric {
+        return c.eval_metric orelse .defaultFor(c.objective());
+    }
+
     pub fn metricName(c: Config) []const u8 {
-        return switch (c.objective()) {
-            .logistic => "auc",
-            .squared_error => "rmse",
-            .softmax => "mlogloss",
-            .absolute_error => "mae",
-            .quantile => "pinball",
-            .pseudo_huber => "mphe",
-            .poisson => "poisson-nloglik",
-        };
+        return @tagName(c.evalMetric());
     }
 
     /// Standard name of the fitted model, so the run says what it is. Needed for
@@ -220,6 +221,7 @@ pub const Config = struct {
     pub fn validate(c: Config) !void {
         try c.bin.validate();
         if (c.class_weight != .none and !c.classifies()) return error.ClassWeightNeedsClasses;
+        if (!c.evalMetric().fits(c.objective())) return error.MetricDoesNotFitObjective;
         switch (c.objective()) {
             .absolute_error, .quantile, .pseudo_huber, .poisson => if (c.algo != .gbdt) return error.ObjectiveNeedsGbdt,
             else => {},

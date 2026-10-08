@@ -363,6 +363,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             else => {
                 const scale = res.model.predictForReport(pool, v, scores);
                 try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width(), v.weights);
+                // A chosen metric the fixed report does not show.
+                if (cfg.eval_metric) |m| try out.print("valid   {s}={d:.6}{s}\n", .{
+                    @tagName(m),
+                    try metric.evaluate(gpa, m, .{ .objective = cfg.objective(), .k = cfg.width() }, scores, scale, v.labels, v.weights),
+                    if (v.weights.len != 0) "  (weighted)" else "",
+                });
             },
         }
     }

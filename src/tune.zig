@@ -24,7 +24,7 @@ const config = @import("config.zig");
 const data = @import("data.zig");
 const pool_mod = @import("pool.zig");
 const cv = @import("cv.zig");
-const Objective = @import("objective.zig").Objective;
+const metric = @import("metric.zig");
 
 pub const Search = enum { grid, random, bayes, bandit };
 
@@ -428,7 +428,7 @@ pub const Tpe = struct {
         r: std.Random,
         space: []const Param,
         trials: []const Trial,
-        obj: Objective,
+        eval_metric: metric.Metric,
         out: []f64,
     ) !void {
         const n = trials.len;
@@ -437,12 +437,12 @@ pub const Tpe = struct {
         for (order, 0..) |*v, i| v.* = @intCast(i);
         const Ctx = struct {
             t: []const Trial,
-            obj: Objective,
+            eval_metric: metric.Metric,
             fn lessThan(c: @This(), a: u32, b: u32) bool {
-                return cv.better(c.obj, c.t[a].score, c.t[b].score);
+                return cv.better(c.eval_metric, c.t[a].score, c.t[b].score);
             }
         };
-        std.sort.pdq(u32, order, Ctx{ .t = trials, .obj = obj }, Ctx.lessThan);
+        std.sort.pdq(u32, order, Ctx{ .t = trials, .eval_metric = eval_metric }, Ctx.lessThan);
 
         const n_good = @max(@as(usize, 2), @min(n - 1, @as(usize, @intFromFloat(
             @floor(t.gamma * @as(f64, @floatFromInt(n))),

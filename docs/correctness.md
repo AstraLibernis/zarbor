@@ -62,7 +62,12 @@ residual, max difference 8.8e-7) and `quantile` at alpha 0.8 (25 trees, 1.4e-6);
 1.4e-6). The quantile case stops at 25 trees because LightGBM skips one split there: at tree
 29 an 11-row split of gain 1.09 is pruned by a shortcut in its leaf-wise search that zarbor does
 not copy. Poisson matches only with XGBoost's tree `max_delta_step` of 0.7, which its learner
-sets for this objective alone.
+sets for this objective alone. Early stopping on a chosen metric (`--eval_metric`, a fixed
+70/30 split, 10 rounds of patience) stops on the same round with the same best score as
+XGBoost's `eval_metric` for `auc`, `logloss`, `error`, `rmse`, `mae`, `poisson-nloglik`,
+`mlogloss` and `merror` (zarbor's `accuracy` = 1 - `merror`). Average precision and R² equal
+scikit-learn's `average_precision_score` and `r2_score` to 1e-12, with ties and weights;
+XGBoost's `aucpr` interpolates the curve differently, so it is not compared.
 The tables below come from the original harness on competition data.
 
 **Method.** Compare predictions row for row on data where binning cannot differ: 100,000

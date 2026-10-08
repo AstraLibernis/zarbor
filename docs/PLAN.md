@@ -163,7 +163,11 @@ LightGBM rather than XGBoost (both re-fit leaves to a residual percentile; Light
 percentile is the one with a written rule), `pseudo_huber` and `poisson` follow XGBoost; exact
 parity for all four. Flags as built: `--quantile_alpha`, `--huber_slope`. Each loss reports and
 early-stops on its own metric. Not yet: the linear model's huber and poisson, and these losses
-under symmetric trees (refused). Next: `--eval_metric`.
+under symmetric trees (refused). `--eval_metric` done the same day: 12 metrics (`auc`, `aucpr`,
+`logloss`, `error_rate`, `accuracy`, `mlogloss`, `rmse`, `mae`, `r2`, `pinball`, `mphe`,
+`poisson_nloglik`) drive early stopping, the validation log, `cv` and `tune`; early stopping
+matches XGBoost's for every metric it shares, average precision and R² match scikit-learn.
+Milestone 4 complete except the linear model's huber and poisson losses.
 
 **Goal.** Losses for the common regression cases, and early stopping on the metric the task
 is scored by.

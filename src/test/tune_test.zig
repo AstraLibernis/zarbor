@@ -121,7 +121,7 @@ test "TPE proposes where good outnumbers bad, not merely where it has looked" {
     var hits: usize = 0;
     var outv: [1]f64 = undefined;
     for (0..40) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
+        try tpe.propose(gpa, prng.random(), &space, trials.items, .auc, &outv);
         if (outv[0] > 0.6) hits += 1;
     }
     try testing.expect(hits > 30);
@@ -193,7 +193,7 @@ test "TPE keeps exploring when the good set collapses onto one point" {
     defer seen.deinit(gpa);
     var outv: [1]f64 = undefined;
     for (0..60) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
+        try tpe.propose(gpa, prng.random(), &space, trials.items, .auc, &outv);
         try seen.append(gpa, outv[0]);
     }
 
@@ -235,7 +235,7 @@ test "TPE does not pile proposals onto a boundary" {
     var on_bound: usize = 0;
     var outv: [1]f64 = undefined;
     for (0..60) |_| {
-        try tpe.propose(gpa, prng.random(), &space, trials.items, .logistic, &outv);
+        try tpe.propose(gpa, prng.random(), &space, trials.items, .auc, &outv);
         if (@abs(outv[0] - 1.0) < 1e-12) on_bound += 1;
     }
     try testing.expect(on_bound < 30);

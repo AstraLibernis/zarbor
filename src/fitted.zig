@@ -15,7 +15,7 @@ const model = @import("model.zig");
 
 /// Which scale `predictForReport` wrote. The booster reports raw log-odds;
 /// the forest and the linear model already apply their own link.
-pub const Scale = enum { raw, natural };
+pub const Scale = @import("metric.zig").Scale;
 
 pub const Fitted = union(config.Algo) {
     gbdt: booster.Model,

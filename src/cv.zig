@@ -262,7 +262,7 @@ pub fn chooseBinPolicy(
         defer gpa.free(oof);
         const o = try crossValidate(gpa, io, pool, ds, c, fold_of, folds, .{ .oof = oof, .groups = groups });
         sc.* = .{ .policy = p, .score = o.pooled };
-        if (better(cfg.objective(), o.pooled, scores[best].score)) best = i;
+        if (better(cfg.evalMetric(), o.pooled, scores[best].score)) best = i;
     }
     return scores[best].policy;
 }
@@ -276,37 +276,20 @@ pub fn writePolicyScores(out: *std.Io.Writer, scores: []const PolicyScore, chose
     try out.flush();
 }
 
-/// A holdout's score from natural-scale predictions (`width` per row): AUC, RMSE or multiclass
-/// log loss.
+/// A holdout's score from natural-scale predictions (`width` per row) by the config's metric.
 pub fn holdoutScore(gpa: std.mem.Allocator, cfg: config.Config, pred: []const f32, labels: []const f32, weights: []const f32) !f64 {
-    switch (cfg.objective()) {
-        .absolute_error => return metric.mae(pred, labels, weights),
-        .quantile => return metric.pinball(pred, labels, weights, cfg.gbdt.quantile_alpha),
-        .pseudo_huber => return metric.mphe(pred, labels, weights, cfg.gbdt.huber_slope),
-        .poisson => return metric.poissonNloglik(pred, labels, weights),
-        else => {},
-    }
-    if (weights.len != 0) return switch (cfg.objective()) {
-        .logistic => try metric.aucW(gpa, pred, labels, weights),
-        .squared_error => metric.rmseW(pred, labels, weights),
-        .softmax => metric.mloglossProbW(pred, labels, cfg.width(), weights),
-        else => unreachable,
-    };
-    return switch (cfg.objective()) {
-        .logistic => try metric.auc(gpa, pred, labels),
-        .squared_error => metric.rmse(pred, labels),
-        .softmax => metric.mloglossProb(pred, labels, cfg.width()),
-        else => unreachable,
-    };
+    return metric.evaluate(gpa, cfg.evalMetric(), .{
+        .objective = cfg.objective(),
+        .k = cfg.width(),
+        .quantile_alpha = cfg.gbdt.quantile_alpha,
+        .huber_slope = cfg.gbdt.huber_slope,
+    }, pred, .natural, labels, weights);
 }
 
-/// Higher AUC, lower RMSE and log loss is better. All config ranking goes through here so
-/// the comparison cannot drift from the objective.
-pub fn better(obj: Objective, a: f64, b: f64) bool {
-    return switch (obj) {
-        .logistic => a > b,
-        else => a < b,
-    };
+/// Whether score `a` beats `b` under `m` (higher AUC, lower loss). All config ranking goes
+/// through here so the comparison cannot drift from the metric.
+pub fn better(m: metric.Metric, a: f64, b: f64) bool {
+    return if (m.higherIsBetter()) a > b else a < b;
 }
 
 /// Cross-validate one config over an already-binned dataset. Data and folds

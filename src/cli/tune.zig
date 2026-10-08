@@ -377,7 +377,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             best_i: *?usize,
             x: []const f64,
             o: cv.Outcome,
-            obj: zarbor.objective.Objective,
+            eval_metric: zarbor.metric.Metric,
         ) !void {
             const xs = try a.alloc(f64, x.len);
             @memcpy(xs, x);
@@ -392,7 +392,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             });
             const i = list.items.len - 1;
             var mark: []const u8 = "";
-            if (best_i.* == null or cv.better(obj, o.pooled, list.items[best_i.*.?].score)) {
+            if (best_i.* == null or cv.better(eval_metric, o.pooled, list.items[best_i.*.?].score)) {
                 best_i.* = i;
                 mark = "  <- best";
             }
@@ -435,7 +435,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             while (done < @min(total, trials_want)) : (done += 1) {
                 for (x, axes, digit) |*v, ax, d| v.* = ax[d];
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
+                    try record(arena, out, ev, &results, &best, x, o, cfg.evalMetric());
                 var d: usize = 0;
                 while (d < digit.len) : (d += 1) {
                     digit[d] += 1;
@@ -449,7 +449,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             for (0..trials_want) |_| {
                 for (x, space) |*v, p| v.* = p.sample(r);
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
+                    try record(arena, out, ev, &results, &best, x, o, cfg.evalMetric());
             }
         },
         .bayes => {
@@ -458,10 +458,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 if (i < warmup or results.items.len < 4) {
                     for (x, space) |*v, p| v.* = p.sample(r);
                 } else {
-                    try tpe.propose(gpa, r, space, results.items, cfg.objective(), x);
+                    try tpe.propose(gpa, r, space, results.items, cfg.evalMetric(), x);
                 }
                 if (try ev.run(x, 0)) |o|
-                    try record(arena, out, ev, &results, &best, x, o, cfg.objective());
+                    try record(arena, out, ev, &results, &best, x, o, cfg.evalMetric());
             }
         },
         .bandit => {
@@ -492,18 +492,18 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                         // Only a full-fidelity result is comparable with the
                         // other strategies, so only those are recorded.
                         if (o.folds_run == n_folds)
-                            try record(arena, out, ev, &results, &best, xs, o, cfg.objective());
+                            try record(arena, out, ev, &results, &best, xs, o, cfg.evalMetric());
                     }
                 }
                 if (scored.items.len == 0) break;
 
                 const S = struct {
-                    obj: zarbor.objective.Objective,
+                    eval_metric: zarbor.metric.Metric,
                     fn lessThan(c: @This(), a: Scored, b: Scored) bool {
-                        return cv.better(c.obj, a.s, b.s);
+                        return cv.better(c.eval_metric, a.s, b.s);
                     }
                 };
-                std.sort.pdq(Scored, scored.items, S{ .obj = cfg.objective() }, S.lessThan);
+                std.sort.pdq(Scored, scored.items, S{ .eval_metric = cfg.evalMetric() }, S.lessThan);
 
                 if (rung_folds >= n_folds) break;
                 const keep = @max(@as(usize, 1), scored.items.len / eta);
@@ -526,12 +526,12 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     for (order, 0..) |*v, i| v.* = @intCast(i);
     const Ctx = struct {
         t: []const Trial,
-        obj: zarbor.objective.Objective,
+        eval_metric: zarbor.metric.Metric,
         fn lessThan(c: @This(), a: u32, b: u32) bool {
-            return cv.better(c.obj, c.t[a].score, c.t[b].score);
+            return cv.better(c.eval_metric, c.t[a].score, c.t[b].score);
         }
     };
-    std.sort.pdq(u32, order, Ctx{ .t = results.items, .obj = cfg.objective() }, Ctx.lessThan);
+    std.sort.pdq(u32, order, Ctx{ .t = results.items, .eval_metric = cfg.evalMetric() }, Ctx.lessThan);
 
     const win = results.items[order[0]];
     try out.print("\nbest     {d:.6}   {d} trials", .{ win.score, results.items.len });

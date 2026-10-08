@@ -21,6 +21,7 @@ writes 6 decimals and accumulates scores in f32, so a regression prediction near
 Needs xgboost, lightgbm and catboost, and a ReleaseFast zarbor (`zig build -Doptimize=ReleaseFast`).
 Results: docs/correctness.md section 1.
 """
+import re
 import subprocess
 import sys
 import tempfile
@@ -425,6 +426,57 @@ def xgb_huber_poisson():
     p = dict(objective="count:poisson", tree_method="hist", max_bin=256, nthread=16, seed=0,
              base_score=float(np.mean(YCNT)), eta=0.1, max_depth=6)
     report("xgb count:poisson, 100 trees", z, xgb.train(p, xgb.DMatrix(X, YCNT), 100).predict(xgb.DMatrix(X)))
+
+
+# ---- Early stopping on a chosen metric: the same best round and score as XGBoost's eval_metric --
+SPLIT = (np.arange(N) >= 70_000).astype(int)
+for name, col, lab in (("disc", "y", y), ("reg", "yreg", yreg), ("multi", "ymc", ymc), ("cnt", "ycnt", YCNT)):
+    pd.concat([X, pd.Series(SPLIT, name="split"), pd.Series(lab, name=col)], axis=1).to_csv(WORK / f"s{name}.csv", index=False)
+
+
+def zarbor_stop(csv, label, flags):
+    cmd = [Z, str(WORK / csv), f"--label={label}", "--split-col=split", "--verbose_eval=0", *flags]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    m = re.search(r"early stop at round \d+; best (\S+) @(\d+)", r.stdout)
+    if r.returncode != 0 or m is None:
+        raise RuntimeError(f"no early stop:\n{r.stdout[-600:]}{r.stderr[-600:]}")
+    return int(m[2]), float(m[1])
+
+
+def xgb_stop(objective, label, metric, base, **kw):
+    tr, va = slice(0, 70_000), slice(70_000, N)
+    p = dict(objective=objective, tree_method="hist", max_bin=256, nthread=16, seed=0, eta=0.3, max_depth=6,
+             eval_metric=metric, **({} if base is None else dict(base_score=base)), **kw)
+    b = xgb.train(p, xgb.DMatrix(X[tr], label[tr]), 1000, evals=[(xgb.DMatrix(X[va], label[va]), "v")],
+                  early_stopping_rounds=10, verbose_eval=False)
+    return b.best_iteration, b.best_score
+
+
+@case
+def xgb_eval_metric():
+    tr = slice(0, 70_000)
+    runs = [  # zarbor objective and metric, XGBoost objective and metric, label, data file, label column
+        ("logistic", "auc", "binary:logistic", "auc", y, "sdisc.csv", "y"),
+        ("logistic", "logloss", "binary:logistic", "logloss", y, "sdisc.csv", "y"),
+        ("logistic", "error_rate", "binary:logistic", "error", y, "sdisc.csv", "y"),
+        ("squared_error", "rmse", "reg:squarederror", "rmse", yreg, "sreg.csv", "yreg"),
+        ("squared_error", "mae", "reg:squarederror", "mae", yreg, "sreg.csv", "yreg"),
+        ("poisson", "poisson_nloglik", "count:poisson", "poisson-nloglik", YCNT, "scnt.csv", "ycnt"),
+        ("softmax", "mlogloss", "multi:softprob", "mlogloss", ymc, "smulti.csv", "ymc"),
+        ("softmax", "accuracy", "multi:softprob", "merror", ymc, "smulti.csv", "ymc"),
+    ]
+    for zobj, zm, xobj, xm, lab, csv, col in runs:
+        zr, zs = zarbor_stop(csv, col, XZ + [f"--objective={zobj}", f"--eval_metric={zm}", "--n_rounds=1000",
+                                            "--learning_rate=0.3", "--max_depth=6", "--early_stopping_rounds=10"])
+        base = None if zobj == "softmax" else float(np.mean(lab[tr]))
+        xr, xs = xgb_stop(xobj, lab, xm, base, **(dict(num_class=4) if zobj == "softmax" else {}))
+        if xm == "merror":
+            xs = 1 - xs
+        ok = zr == xr and abs(zs - xs) <= 2e-6 * max(1.0, abs(xs))
+        if not ok:
+            FAILED.append(f"xgb_eval_metric {zm}")
+        print(f"{'pass' if ok else 'FAIL'}  {'early stop on ' + zm + ' (' + xm + ')':<44} best round {zr} vs {xr}, "
+              f"score {zs:.6f} vs {xs:.6f}", flush=True)
 
 
 # ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------

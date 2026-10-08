@@ -84,3 +84,80 @@ test "radix auc equals the comparison-sort auc to the bit" {
         try testing.expectEqual(try aucReference(gpa, s, y), try auc(gpa, s, y));
     }
 }
+
+// ------------------------------------------------------------ --eval_metric
+
+// Reference values from scikit-learn 1.9 in float64 (`average_precision_score`, `r2_score`).
+const ap_scores = [_]f32{ 0.9, 0.8, 0.8, 0.7, 0.6, 0.6, 0.6, 0.3, 0.2, 0.1 };
+const ap_labels = [_]f32{ 1, 1, 0, 1, 0, 1, 0, 0, 1, 0 };
+const ap_weights = [_]f32{ 1.0, 0.5, 2.0, 1.5, 1.0, 0.25, 3.0, 1.0, 0.5, 2.0 };
+
+test "average precision equals scikit-learn's, ties and weights included" {
+    const gpa = testing.allocator;
+    try testing.expectApproxEqAbs(@as(f64, 0.7087301587301587), try metric.averagePrecision(gpa, &ap_scores, &ap_labels, &.{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.633744575139924), try metric.averagePrecision(gpa, &ap_scores, &ap_labels, &ap_weights), 1e-12);
+    // Shuffled rows give the same value: the order of a tied block does not matter.
+    const perm = [_]usize{ 6, 2, 9, 0, 5, 3, 8, 1, 7, 4 };
+    var s: [10]f32 = undefined;
+    var y: [10]f32 = undefined;
+    var w: [10]f32 = undefined;
+    for (perm, 0..) |p, i| {
+        s[i] = ap_scores[p];
+        y[i] = ap_labels[p];
+        w[i] = ap_weights[p];
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.633744575139924), try metric.averagePrecision(gpa, &s, &y, &w), 1e-12);
+    // A perfect ranking is 1; no positives is 0.
+    try testing.expectEqual(@as(f64, 1), try metric.averagePrecision(gpa, &.{ 0.1, 0.9, 0.8 }, &.{ 0, 1, 1 }, &.{}));
+    try testing.expectEqual(@as(f64, 0), try metric.averagePrecision(gpa, &.{ 0.1, 0.9 }, &.{ 0, 0 }, &.{}));
+}
+
+test "r2 equals scikit-learn's, weighted and not, and its constant-target convention" {
+    const p = [_]f32{ 1.0, 2.5, 2.0, 4.0, 3.5, 0.5 };
+    const y = [_]f32{ 1.5, 2.0, 2.5, 3.0, 4.5, 1.0 };
+    const w = [_]f32{ 1, 2, 0.5, 1, 3, 0.25 };
+    try testing.expectApproxEqAbs(@as(f64, 0.6108108108108108), metric.r2(&p, &y, &.{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.5925124792013311), metric.r2(&p, &y, &w), 1e-12);
+    try testing.expectEqual(@as(f64, 1), metric.r2(&.{ 2, 2 }, &.{ 2, 2 }, &.{}));
+    try testing.expectEqual(@as(f64, 0), metric.r2(&.{ 1, 2 }, &.{ 2, 2 }, &.{}));
+}
+
+test "evaluate: raw and natural scales agree for every metric that takes either" {
+    const gpa = testing.allocator;
+    const raw = [_]f32{ -2.0, 0.5, 1.5, -0.25, 3.0, -1.0 };
+    const y = [_]f32{ 0, 1, 1, 1, 1, 0 };
+    const w = [_]f32{ 1, 2, 0.5, 1, 3, 0.25 };
+    var prob: [6]f32 = undefined;
+    for (&prob, raw) |*q, r| q.* = 1 / (1 + @exp(-r));
+    const ctx: metric.Ctx = .{ .objective = .logistic };
+    inline for (.{ .auc, .aucpr, .logloss, .error_rate, .accuracy }) |m| for ([_][]const f32{ &.{}, &w }) |ws| {
+        const a = try metric.evaluate(gpa, m, ctx, &raw, .raw, &y, ws);
+        const b = try metric.evaluate(gpa, m, ctx, &prob, .natural, &y, ws);
+        try testing.expectApproxEqAbs(a, b, 1e-6);
+    };
+    // One row is on the wrong side (raw -0.25, label 1).
+    try testing.expectApproxEqAbs(@as(f64, 1.0 / 6.0), try metric.evaluate(gpa, .error_rate, ctx, &raw, .raw, &y, &.{}), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 5.0 / 6.0), try metric.evaluate(gpa, .accuracy, ctx, &raw, .raw, &y, &.{}), 1e-12);
+    // Poisson: a raw score is a log mean.
+    const pc: metric.Ctx = .{ .objective = .poisson };
+    const counts = [_]f32{ 0, 1, 3, 2, 5, 0 };
+    var mu: [6]f32 = undefined;
+    for (&mu, raw) |*m, r| m.* = @exp(r);
+    inline for (.{ .rmse, .mae, .r2, .poisson_nloglik }) |m| {
+        try testing.expectApproxEqAbs(try metric.evaluate(gpa, m, pc, &mu, .natural, &counts, &w), try metric.evaluate(gpa, m, pc, &raw, .raw, &counts, &w), 1e-6);
+    }
+}
+
+test "every objective's default metric fits it, and directions are right" {
+    inline for (@typeInfo(@import("../objective.zig").Objective).@"enum".fields) |f| {
+        const obj: @import("../objective.zig").Objective = @enumFromInt(f.value);
+        try testing.expect(metric.Metric.defaultFor(obj).fits(obj));
+    }
+    try testing.expect(!metric.Metric.auc.fits(.squared_error));
+    try testing.expect(!metric.Metric.rmse.fits(.logistic));
+    try testing.expect(!metric.Metric.poisson_nloglik.fits(.squared_error));
+    try testing.expect(!metric.Metric.mlogloss.fits(.logistic));
+    try testing.expect(metric.Metric.accuracy.fits(.logistic) and metric.Metric.accuracy.fits(.softmax));
+    for ([_]metric.Metric{ .auc, .aucpr, .accuracy, .r2 }) |m| try testing.expect(m.higherIsBetter());
+    for ([_]metric.Metric{ .logloss, .error_rate, .mlogloss, .rmse, .mae, .pinball, .mphe, .poisson_nloglik }) |m| try testing.expect(!m.higherIsBetter());
+}
