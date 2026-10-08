@@ -73,8 +73,18 @@ fn hasIn(comptime T: type, key: []const u8) bool {
 
 /// Every setting, grouped by who reads it. Each model's group carries that
 /// model's own defaults; a flag sets its name in every group that has it.
+/// Per-class weights derived from the training labels.
+pub const ClassWeight = enum {
+    none,
+    /// scikit-learn's `class_weight="balanced"`: class c weighs `n / (K * n_c)`, computed from
+    /// each fit's own training rows and multiplied into any `--weight-col`.
+    balanced,
+};
+
 pub const Config = struct {
     algo: Algo = .gbdt,
+    /// Class weights for a classification target (`logistic`, `softmax`).
+    class_weight: ClassWeight = .none,
     /// Worker threads. 0 means "one per logical core".
     n_threads: u32 = 0,
     bin: data.BinParams = .{},
@@ -204,6 +214,7 @@ pub const Config = struct {
     /// Binning plus the chosen model's own checks.
     pub fn validate(c: Config) !void {
         try c.bin.validate();
+        if (c.class_weight != .none and !c.classifies()) return error.ClassWeightNeedsClasses;
         // Not yet for the forest (docs/PLAN.md milestone 1, stage 1c).
         if (c.algo == .random_forest and c.objective() == .softmax) return error.SoftmaxForestUnsupported;
         switch (c.algo) {

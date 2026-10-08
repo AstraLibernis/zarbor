@@ -32,6 +32,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--pos-label` | task | when the sorted class order guesses wrong ("abnormal" < "normal") |
 | `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
 | `--weight-col` | task | rows of unequal importance: survey or exposure weights, recent data, deduplicated rows |
+| `--class_weight=balanced` | task | a rare class that the metric cares about; AUC rarely needs it |
 | `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
 | `--has_time` | task | rows are in time order and the model must not peek ahead (CatBoost style) |
 | `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
@@ -135,6 +136,14 @@ CatBoost-style trees: there, as in CatBoost, weights multiply the derivatives an
 counts in split scoring, target statistics ignore them, and `lambda` is scaled by the mean
 weight (each prefix body's mean under ordered boosting), so scaling every weight changes
 nothing but a zero weight still counts in that mean.
+
+**Class weights** (`--class_weight=balanced`, classification only): each class weighs
+`n / (K * n_c)`, scikit-learn's "balanced", counted from each fit's own training rows (so each
+cv fold gets its own) and multiplied into any `--weight-col`; with sample weights, `n` and `n_c`
+are weight sums, as scikit-learn 1.9 counts them. Only training is weighted: validation and cv
+scores are not. Useful when a rare class matters to the metric (recall, F1, log loss on a
+balanced test); AUC rarely needs it. CatBoost's `auto_class_weights=Balanced` differs by a
+constant factor, which CatBoost-style trees ignore.
 
 **Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per

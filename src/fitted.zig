@@ -41,6 +41,16 @@ pub const Fitted = union(config.Algo) {
         cfg: config.Config,
         log: ?*std.Io.Writer,
     ) !Result {
+        if (cfg.class_weight != .none) {
+            // Train on a view of `ds` whose weights also carry each row's class weight.
+            const w = try classWeights(gpa, ds, cfg);
+            defer gpa.free(w);
+            var view = ds.*;
+            view.weights = w;
+            var c = cfg;
+            c.class_weight = .none;
+            return train(gpa, pool, &view, valid, c, log);
+        }
         return switch (cfg.algo) {
             .gbdt => blk: {
                 const r = try booster.train(gpa, pool, ds, valid, cfg.gbdt, log);
@@ -55,6 +65,34 @@ pub const Fitted = union(config.Algo) {
                 break :blk .{ .model = .{ .linear = r.model }, .steps = r.epochs, .valid_ns = r.valid_ns, .lin_fit = r.fit };
             },
         };
+    }
+
+    /// Each row's sample weight (1 without one) times `n / (K * n_c)` for its class c, where
+    /// with sample weights `n` and `n_c` are weight sums: scikit-learn's
+    /// `compute_class_weight("balanced", sample_weight=...)`, as `LogisticRegression` calls it.
+    /// A binary target's classes are `y > 0.5` and not. Caller frees.
+    pub fn classWeights(gpa: std.mem.Allocator, ds: *const data.Dataset, cfg: config.Config) ![]f32 {
+        const k: usize = if (cfg.objective() == .softmax) cfg.width() else 2;
+        const counts = try gpa.alloc(f64, k);
+        defer gpa.free(counts);
+        @memset(counts, 0);
+        var n: f64 = 0;
+        for (ds.labels, 0..) |y, r| {
+            const base: f64 = if (ds.weights.len != 0) ds.weights[r] else 1;
+            counts[classOf(y, k)] += base;
+            n += base;
+        }
+        const kf: f64 = @floatFromInt(k);
+        const w = try gpa.alloc(f32, ds.n_rows);
+        for (w, ds.labels, 0..) |*o, y, r| {
+            const base: f64 = if (ds.weights.len != 0) ds.weights[r] else 1;
+            o.* = @floatCast(base * n / (kf * counts[classOf(y, k)]));
+        }
+        return w;
+    }
+
+    fn classOf(y: f32, k: usize) usize {
+        return if (k == 2 and y <= 1) @intFromBool(y > 0.5) else @intFromFloat(y);
     }
 
     pub fn deinit(m: *Fitted) void {

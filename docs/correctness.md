@@ -46,7 +46,9 @@ objectives equal scikit-learn's `sample_weight` fits at the optimum (logistic 1.
 multinomial 5.2e-10, ridge 1.1e-9). CatBoost with `sample_weight`: 100 trees with 3 Newton
 steps 6.4e-7, ordered boosting 6.5e-7, target statistics with combinations 6.6e-7 (CatBoost
 scales `l2_leaf_reg` by the mean weight, per prefix body under ordered boosting, and its
-target statistics ignore weights). Multinomial logistic
+target statistics ignore weights). Balanced class weights against scikit-learn's
+`LogisticRegression(class_weight="balanced")`, with and without `sample_weight`, binary and
+multinomial: penalised objectives equal at the optimum to 1.0e-9 .. 8.2e-9. Multinomial logistic
 regression against scikit-learn's `LogisticRegression` (2026-10-08, 20,000 rows, 8 integer
 columns so the binned design holds the raw values, standardisation off on both sides): the
 penalised objective at the optimum agrees to 4.8e-9 (L2, `lambda` 1) and 4.7e-10 (`lambda`

@@ -297,3 +297,79 @@ test "CatBoost-style trees: weights of 1 change nothing, and scaling every weigh
         for (outs[1], outs[2]) |a, b| try testing.expectApproxEqAbs(a, b, 1e-5);
     }
 }
+
+test "balanced class weights: n / (K n_c), from weight sums when rows are weighted" {
+    const gpa = testing.allocator;
+    var score: [n_rows]f32 = undefined;
+    var ds = try fixture(gpa, 9, &score);
+    defer ds.deinit();
+    // Binary: each class's total weight becomes n / 2.
+    const cfg = config.Config.from(.{ .class_weight = .balanced });
+    const w = try Fitted.classWeights(gpa, &ds, cfg);
+    defer gpa.free(w);
+    var pos: f64 = 0;
+    var neg: f64 = 0;
+    for (w, ds.labels) |v, y| {
+        if (y > 0.5) pos += v else neg += v;
+    }
+    try testing.expectApproxEqRel(@as(f64, n_rows) / 2, pos, 1e-6);
+    try testing.expectApproxEqRel(@as(f64, n_rows) / 2, neg, 1e-6);
+
+    // With sample weights, the classes' weighted totals are equal (scikit-learn 1.9).
+    ds.weights = try gpa.alloc(f32, n_rows);
+    for (ds.weights, 0..) |*v, i| v.* = @floatFromInt(1 + i % 5);
+    const ww = try Fitted.classWeights(gpa, &ds, cfg);
+    defer gpa.free(ww);
+    var total: f64 = 0;
+    for (ds.weights) |v| total += v;
+    pos = 0;
+    neg = 0;
+    for (ww, ds.labels) |v, y| {
+        if (y > 0.5) pos += v else neg += v;
+    }
+    try testing.expectApproxEqRel(total / 2, pos, 1e-6);
+    try testing.expectApproxEqRel(total / 2, neg, 1e-6);
+
+    // Softmax: three classes, each totals n / 3.
+    var soft = config.Config.from(.{ .objective = .softmax, .class_weight = .balanced });
+    soft.setNumClass(3);
+    gpa.free(ds.weights);
+    ds.weights = &.{};
+    for (ds.labels, 0..) |*y, i| y.* = @floatFromInt(i % 7 % 3);
+    const ws = try Fitted.classWeights(gpa, &ds, soft);
+    defer gpa.free(ws);
+    var per = [_]f64{0} ** 3;
+    for (ws, ds.labels) |v, y| per[@intFromFloat(y)] += v;
+    for (per) |t| try testing.expectApproxEqRel(@as(f64, n_rows) / 3, t, 1e-6);
+
+    try testing.expectError(error.ClassWeightNeedsClasses, config.Config.from(.{ .objective = .squared_error, .class_weight = .balanced }).validate());
+}
+
+test "balanced classes of equal size weigh exactly 1: the unweighted model, to the bit" {
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 2);
+    defer pool.deinit();
+    var score: [n_rows]f32 = undefined;
+    var ds = try fixture(gpa, 10, &score);
+    defer ds.deinit();
+    for (ds.labels, 0..) |*y, i| y.* = @floatFromInt(i % 2);
+    const a = try predictions(gpa, pool, &ds, &ds, config.Config.from(.{ .n_rounds = 8, .verbose_eval = 0 }));
+    defer gpa.free(a);
+    const b = try predictions(gpa, pool, &ds, &ds, config.Config.from(.{ .n_rounds = 8, .class_weight = .balanced, .verbose_eval = 0 }));
+    defer gpa.free(b);
+    try testing.expectEqualSlices(f32, a, b);
+
+    // Unequal classes: the weights move the model (and lift the rare class's probabilities).
+    for (ds.labels, 0..) |*y, i| y.* = if (i % 5 == 0) 1 else 0;
+    const c = try predictions(gpa, pool, &ds, &ds, config.Config.from(.{ .n_rounds = 8, .verbose_eval = 0 }));
+    defer gpa.free(c);
+    const d = try predictions(gpa, pool, &ds, &ds, config.Config.from(.{ .n_rounds = 8, .class_weight = .balanced, .verbose_eval = 0 }));
+    defer gpa.free(d);
+    var mc: f64 = 0;
+    var md: f64 = 0;
+    for (c, d) |x, y| {
+        mc += x;
+        md += y;
+    }
+    try testing.expect(md > mc + 0.1 * n_rows);
+}
