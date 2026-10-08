@@ -308,6 +308,41 @@ def lgb_weights():
     report("lgb weighted, 30 trees", z, ref)
 
 
+# CatBoost: weights multiply the derivatives, replace the row count in split scoring, and scale
+# l2_leaf_reg by the mean weight; target statistics ignore them.
+pd.concat([XC, pd.Series(W, name="w"), pd.Series(ycat, name="y")], axis=1).to_csv(WORK / "wcat.csv", index=False)
+
+
+def cat_pred_w(data, label, **kw):
+    p = dict(depth=6, l2_leaf_reg=3, boosting_type="Plain", bootstrap_type="No", random_strength=0,
+             leaf_estimation_method="Newton", leaf_estimation_iterations=1, leaf_estimation_backtracking="No",
+             border_count=254, feature_border_type="GreedyLogSum", thread_count=16, verbose=0,
+             allow_writing_files=False, has_time=True)
+    p.update(kw)
+    fit_kw = {"sample_weight": W}
+    if "cat_features" in p:
+        fit_kw["cat_features"] = p.pop("cat_features")
+    m = catboost.CatBoostClassifier(**p)
+    m.fit(data, label, **fit_kw)
+    return m.predict_proba(data)[:, 1]
+
+
+@case
+def cat_weights():
+    z = zarbor("wdisc.csv", "y", CZ + ["--weight-col=w", "--n_rounds=100", "--learning_rate=0.1",
+                                      "--leaf_estimation_iterations=3"])
+    report("catboost weighted, 100 trees, 3 Newton steps", z, cat_pred_w(X, y, iterations=100, learning_rate=0.1,
+                                                                        leaf_estimation_iterations=3))
+    z = zarbor("wdisc.csv", "y", CZ + ["--weight-col=w", "--n_rounds=50", "--learning_rate=0.1", "--boosting_type=ordered"])
+    report("catboost weighted ordered boosting, 50 trees", z, cat_pred_w(X, y, iterations=50, learning_rate=0.1,
+                                                                        boosting_type="Ordered"))
+    z = zarbor("wcat.csv", "y", CZ + ["--weight-col=w", "--cat_split=ctr", "--one_hot_max_size=2", "--n_rounds=50",
+                                      "--learning_rate=0.1", "--max_ctr_complexity=4"])
+    report("catboost weighted, target statistics cx 4, 50 trees", z,
+           cat_pred_w(XC, ycat, iterations=50, learning_rate=0.1, one_hot_max_size=2, max_ctr_complexity=4,
+                      cat_features=["c2", "c3", "c40"]))
+
+
 # ---- SHAP: on the same trees, the per-row attributions must agree too ------------------------
 def zarbor_shap(csv, label, flags, cover):
     """Train like `zarbor`, then `zarbor explain --shap`: one column per feature, then the bias."""

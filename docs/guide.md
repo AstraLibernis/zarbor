@@ -130,8 +130,11 @@ gradient and hessian, as XGBoost and LightGBM apply one, so splits, leaf values 
 `min_child_weight` follow it, while `min_child_samples` still counts rows. The starting score is
 the weighted label mean; the forest's leaves hold weighted means (scikit-learn's
 `sample_weight`); the linear model weights each row's loss. Validation, `cv` and `tune` scores
-are weighted too. A weight of 0 acts as a dropped row and 2 as a duplicated one. Not yet with
-CatBoost-style trees.
+are weighted too. A weight of 0 acts as a dropped row and 2 as a duplicated one, except under
+CatBoost-style trees: there, as in CatBoost, weights multiply the derivatives and replace row
+counts in split scoring, target statistics ignore them, and `lambda` is scaled by the mean
+weight (each prefix body's mean under ordered boosting), so scaling every weight changes
+nothing but a zero weight still counts in that mean.
 
 **Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per

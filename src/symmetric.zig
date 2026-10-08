@@ -302,6 +302,16 @@ pub const Builder = struct {
     leaf_n: []f64 = &.{},
     /// Bootstrap weight per row for the tree being grown; empty without bootstrap.
     weights: []f32,
+    /// Sample weights (`--weight-col`), `ds.weights`: empty for none. They multiply each
+    /// derivative and stand in for a row's count, but not in target statistics, as in CatBoost.
+    row_w: []const f32 = &.{},
+    /// `lambda` times the mean sample weight, as CatBoost scales `l2_leaf_reg` (`ScaleL2Reg`) in
+    /// both split scoring and leaf values; `lambda` itself without weights.
+    lam: f64 = 0,
+    /// Ordered scoring's `lambda` per learning fold and prefix (`[fold * bts.len + k]`): scaled by
+    /// that prefix body's own mean sample weight, as CatBoost scores each body-tail
+    /// (`BodySumWeight / BodyFinish`). Empty unless ordered.
+    ord_lam: []f64 = &.{},
     /// MVS scratch: one candidate per row, each block sorting its own slice.
     mvs_scratch: []f64,
     /// Trees grown so far: the noise decay and every random stream key on it.
@@ -338,6 +348,11 @@ pub const Builder = struct {
     max_slice: usize = 0,
 
     const Best = struct { score: f64, threshold: u32 };
+
+    /// Row `r`'s sample weight: 1 without `--weight-col`.
+    inline fn rowW(b: *const Builder, r: usize) f64 {
+        return if (b.row_w.len != 0) b.row_w[r] else 1;
+    }
 
     pub fn init(gpa: std.mem.Allocator, pool: *Pool, ds: *const Dataset, s: Settings) !Builder {
         if (s.depth == 0 or s.depth > max_depth) return error.BadSymmetricDepth;
@@ -420,6 +435,17 @@ pub const Builder = struct {
             var a = folds_made.avg;
             if (!folds_made.avg_alias) a.deinit(gpa);
         }
+        const ord_lam = try gpa.alloc(f64, if (s.ordered) folds_made.learning.len * ord.bts.len else 0);
+        errdefer gpa.free(ord_lam);
+        for (folds_made.learning, 0..) |*fd, fi| {
+            if (!s.ordered) break;
+            var sum: f64 = 0;
+            var pos: usize = 0;
+            for (ord.bts, 0..) |bt, k| {
+                while (pos < bt.body) : (pos += 1) sum += if (ds.weights.len != 0) ds.weights[fd.row(pos)] else 1;
+                ord_lam[fi * ord.bts.len + k] = s.lambda * (sum / @as(f64, @floatFromInt(bt.body)));
+            }
+        }
         const leaf_buf = try gpa.alloc(u16, ds.n_rows);
         errdefer gpa.free(leaf_buf);
         const leaf_tmp = try gpa.alloc(u16, ds.n_rows);
@@ -464,6 +490,13 @@ pub const Builder = struct {
             .has_missing = has_missing,
             .best = best,
             .values = values,
+            .row_w = ds.weights,
+            .ord_lam = ord_lam,
+            .lam = if (ds.weights.len == 0) s.lambda else blk: {
+                var sum: f64 = 0;
+                for (ds.weights) |w| sum += w;
+                break :blk s.lambda * (sum / @as(f64, @floatFromInt(ds.n_rows)));
+            },
             .leaf_g = leaf_g,
             .leaf_h = leaf_h,
             .leaf_n = leaf_n,
@@ -509,6 +542,7 @@ pub const Builder = struct {
         b.gpa.free(b.has_missing);
         b.gpa.free(b.best);
         b.gpa.free(b.values);
+        b.gpa.free(b.ord_lam);
         b.gpa.free(b.leaf_g);
         b.gpa.free(b.leaf_h);
         b.gpa.free(b.leaf_n);
@@ -681,7 +715,7 @@ pub const Builder = struct {
                 try b.assignLeaves(fd, splits[0..depth], b.leaf_tmp);
                 lj = b.leaf_tmp;
             }
-            if (b.s.ordered) try b.updatePrefixes(fd, depth, lj, labels, objective, scale_pos_weight) else try b.updatePlain(fd, depth, lj, labels, objective, scale_pos_weight);
+            if (b.s.ordered) try b.updatePrefixes(fd, j, depth, lj, labels, objective, scale_pos_weight) else try b.updatePlain(fd, depth, lj, labels, objective, scale_pos_weight);
         }
         const n_leaves = @as(usize, 1) << @intCast(depth);
         var sum_abs: f64 = 0;
@@ -748,7 +782,7 @@ pub const Builder = struct {
 
     /// After a tree: each prefix model takes Newton steps fitted on its body rows only and applies
     /// them to every row it scores (CatBoost's approx_calcer, ordered branch).
-    fn updatePrefixes(b: *Builder, fold: *Fold, depth: u32, leaf: []const u16, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
+    fn updatePrefixes(b: *Builder, fold: *Fold, fold_index: usize, depth: u32, leaf: []const u16, labels: []const f32, objective: Objective, scale_pos_weight: f32) !void {
         const n_leaves = @as(usize, 1) << @intCast(depth);
         const g = try b.gpa.alloc(f64, n_leaves);
         defer b.gpa.free(g);
@@ -765,7 +799,9 @@ pub const Builder = struct {
                 g[l] += d.g;
                 h[l] += d.h;
             }
-            for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
+            // Each prefix's own body sets its L2 scale (CatBoost's `CalcLeafDeltasSimple`).
+            const lam = b.ord_lam[fold_index * b.bts.len + k];
+            for (g, h) |*gs, hs| gs.* = if (hs + lam > 0) -gs.* / (hs + lam) * b.s.learning_rate else 0;
             pctx.mode = .prefix_apply;
             b.pool.parallelFor(bt.tail, &pctx, PosCtx.run, pos_chunk);
         }
@@ -787,7 +823,7 @@ pub const Builder = struct {
             g[l] += d.g;
             h[l] += d.h;
         }
-        for (g, h) |*gs, hs| gs.* = if (hs + b.s.lambda > 0) -gs.* / (hs + b.s.lambda) * b.s.learning_rate else 0;
+        for (g, h) |*gs, hs| gs.* = if (hs + b.lam > 0) -gs.* / (hs + b.lam) * b.s.learning_rate else 0;
         pctx.mode = .plain_apply;
         b.pool.parallelFor(fold.approx.len, &pctx, PosCtx.run, pos_chunk);
     }
@@ -1071,14 +1107,14 @@ pub const Builder = struct {
                 @memcpy(b.leaf_g[0..n_leaves], g);
                 @memcpy(b.leaf_h[0..n_leaves], h);
             } else {
-                for (leaf, raw, labels) |l, r0, y| {
-                    const d = derivatives(objective, @as(f64, r0) + delta[l], y, scale_pos_weight);
+                for (leaf, raw, labels, 0..) |l, r0, y, r| {
+                    const d = derivatives(objective, @as(f64, r0) + delta[l], y, scale_pos_weight).times(b.rowW(r));
                     g[l] += d.g;
                     h[l] += d.h;
                 }
             }
             for (delta, g, h) |*dl, gs, hs| {
-                if (hs + b.s.lambda > 0) dl.* += -gs / (hs + b.s.lambda);
+                if (hs + b.lam > 0) dl.* += -gs / (hs + b.lam);
             }
         }
         for (delta) |*dl| dl.* *= b.s.learning_rate;
@@ -1186,7 +1222,7 @@ pub const Builder = struct {
             stat_g[i] = gl + gr;
             const hl: f64 = l.hess;
             const hr: f64 = r.hess;
-            const lam = b.s.lambda;
+            const lam = b.lam;
             const gain = gl * gl / (hl + lam) + gr * gr / (hr + lam) - (gl + gr) * (gl + gr) / (hl + hr + lam);
             stats[i] = .{ .gain = @floatCast(gain), .hess = l.hess + r.hess, .count = l.count + r.count };
         }
@@ -1874,7 +1910,7 @@ const SelectCtx = struct {
                 const gp = self.grads[r];
                 sel.row[at] = @intCast(r);
                 sel.g[at] = s * gp.g;
-                sel.n[at] = s;
+                sel.n[at] = s * b.rowW(r);
                 sel.h[at] = s * gp.h;
                 at += 1;
             }
@@ -1922,7 +1958,7 @@ const HistCtx = struct {
             const bin: usize = if (cand.kind == .ctr) cand.col[r] else binAt(b.ds, cand.feature, r);
             const c = &slice[@as(usize, l) * nb + bin];
             c.g += s * gp.g;
-            c.n += s;
+            c.n += s * b.rowW(r);
             c.h += s * gp.h;
         }
     }
@@ -1969,11 +2005,11 @@ const ScoreCtx = struct {
     inline fn side(b: *const Builder, c: Cell, num: *f64, den: *f64) void {
         switch (b.s.score) {
             .cosine, .l2, .auto => {
-                const v = if (c.n > 0) c.g / (c.n + b.s.lambda) else 0;
+                const v = if (c.n > 0) c.g / (c.n + b.lam) else 0;
                 num.* += v * c.g;
                 den.* += v * v * c.n;
             },
-            .gain => num.* += c.g * c.g / (c.h + b.s.lambda),
+            .gain => num.* += c.g * c.g / (c.h + b.lam),
         }
     }
 
@@ -2138,12 +2174,12 @@ const OrderedCtx = struct {
         const i = @as(usize, b.leaf[r]) * c.nb + bin;
         if (pos < bt.body) {
             body[i].g += d[pos];
-            body[i].n += 1;
+            body[i].n += b.rowW(r);
         } else {
             const s: f64 = if (b.weights.len != 0) b.weights[r] else 1;
             if (s == 0) return;
             tail[i].g += s * d[pos];
-            tail[i].n += s;
+            tail[i].n += s * b.rowW(r);
         }
     }
 
@@ -2176,7 +2212,7 @@ const OrderedCtx = struct {
         const nb: usize = c.nb;
         const num = b.acc_num[b.acc_off[f]..][0..nb];
         const den = b.acc_den[b.acc_off[f]..][0..nb];
-        const lambda = b.s.lambda;
+        const lambda = b.ord_lam[b.fold_k * b.bts.len + self.bt];
         const est = struct {
             fn v(cell: Cell, lam: f64) f64 {
                 return if (cell.n > 0) cell.g / (cell.n + lam) else 0;
@@ -2309,7 +2345,15 @@ const ApplySplit = struct {
     }
 };
 
-const Deriv = struct { g: f64, h: f64 };
+const Deriv = struct {
+    g: f64,
+    h: f64,
+
+    /// Both derivatives times a sample weight.
+    inline fn times(d: Deriv, w: f64) Deriv {
+        return .{ .g = d.g * w, .h = d.h * w };
+    }
+};
 
 /// Rows per task for `PosCtx`, whose work per row is one derivative or one add.
 const pos_chunk = 8192;
@@ -2334,7 +2378,7 @@ const PosCtx = struct {
         const fold = self.fold;
         switch (self.mode) {
             .fold_grads => for (begin..end) |r| {
-                const d = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw);
+                const d = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw).times(b.rowW(r));
                 b.fold_grads[r] = .{ .g = @floatCast(d.g), .h = @floatCast(d.h) };
             },
             .prefix_deriv => {
@@ -2342,21 +2386,24 @@ const PosCtx = struct {
                 const from = if (self.k == 0) 0 else b.bts[self.k].body;
                 for (begin..end) |pos| {
                     const r = fold.row(pos);
-                    const g = derivatives(self.objective, fold.papprox[ap + pos], self.labels[r], self.spw).g;
+                    const g = derivatives(self.objective, fold.papprox[ap + pos], self.labels[r], self.spw).times(b.rowW(r)).g;
                     fold.pderiv[ap + pos] = g;
                     if (pos >= from) b.tail_grads[r] = .{ .g = @floatCast(g), .h = 0 };
                 }
             },
             .body_deriv => {
                 const ap = b.ap_off[self.k];
-                for (begin..end) |pos| b.dscratch[pos] = derivatives(self.objective, fold.papprox[ap + pos], self.labels[fold.row(pos)], self.spw);
+                for (begin..end) |pos| {
+                    const r = fold.row(pos);
+                    b.dscratch[pos] = derivatives(self.objective, fold.papprox[ap + pos], self.labels[r], self.spw).times(b.rowW(r));
+                }
             },
             .prefix_apply => {
                 const ap = b.ap_off[self.k];
                 for (begin..end) |pos| fold.papprox[ap + pos] += self.step[self.leaf[fold.row(pos)]];
             },
             .plain_deriv => for (begin..end) |r| {
-                b.dscratch[r] = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw);
+                b.dscratch[r] = derivatives(self.objective, fold.approx[r], self.labels[r], self.spw).times(b.rowW(r));
             },
             .plain_apply => for (begin..end) |r| {
                 fold.approx[r] += self.step[self.leaf[r]];

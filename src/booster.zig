@@ -532,8 +532,6 @@ pub fn train(
 ) !TrainResult {
     try cfg.validate();
     if (ds.labels.len == 0) return error.NoLabels;
-    // CatBoost weights its target statistics and leaf estimates too; not built yet (PLAN 3).
-    if (ds.weights.len != 0 and cfg.tree.grow_policy == .symmetric) return error.WeightsSymmetricUnsupported;
 
     var model = Model{
         .gpa = gpa,

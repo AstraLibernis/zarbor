@@ -121,10 +121,9 @@ much each feature moved that row's prediction.
 
 ## 3. Sample weights, class weights, starting scores, continued training
 
-**Progress.** Sample weights done 2026-10-08 for boosting (depthwise, lossguide, GOSS),
-softmax, the forest and the linear model, with exact XGBoost/LightGBM parity and
-scikit-learn's linear objectives; CatBoost-style trees still refuse weights. Next: CatBoost
-weights, then class weights, starting scores, continued training.
+**Progress.** Sample weights done 2026-10-08 for every model: exact XGBoost, LightGBM and
+CatBoost parity (CatBoost plain, ordered and with target statistics), scikit-learn's linear
+objectives. Next: class weights, starting scores, continued training.
 
 **Goal.** `--weight-col=NAME`: a column giving each row's weight (dropped as a feature, like
 `--split-col`). `--class_weight=balanced` (or explicit per-class weights). `--init-col=NAME`:

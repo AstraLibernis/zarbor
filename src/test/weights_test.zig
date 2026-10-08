@@ -262,3 +262,38 @@ test "weighted linear objective: the gradient is its derivative (central differe
         }
     }
 }
+
+test "CatBoost-style trees: weights of 1 change nothing, and scaling every weight changes nothing" {
+    // CatBoost scales `l2_leaf_reg` by the mean weight (by each prefix body's under ordered
+    // boosting), so multiplying every weight by c multiplies derivatives, counts and L2 alike:
+    // leaf values and the chosen splits stay put. Boosting without that scaling would not.
+    // Which mean (the fold's or each prefix body's) and whether the prefix models' derivatives
+    // are weighted are invisible to this identity; `bench/parity/parity.py` (cat_weights) pins
+    // them against CatBoost row for row.
+    const gpa = testing.allocator;
+    const pool = try Pool.init(gpa, 3);
+    defer pool.deinit();
+    var score: [n_rows]f32 = undefined;
+    var base = try fixture(gpa, 7, &score);
+    defer base.deinit();
+    inline for (.{ .plain, .ordered }) |bt| {
+        const cfg = config.Config.from(.{ .grow_policy = .symmetric, .boosting_type = bt, .has_time = true, .lambda = 3, .n_rounds = 12, .max_depth = 4, .verbose_eval = 0 });
+        const plain = try predictions(gpa, pool, &base, &base, cfg);
+        defer gpa.free(plain);
+        var prng: std.Random.DefaultPrng = .init(11);
+        var w: [n_rows]f32 = undefined;
+        for (&w) |*v| v.* = 0.2 + 3 * prng.random().float(f32);
+        var outs: [3][]f32 = undefined;
+        for ([_]f32{ 1, 1, 7 }, 0..) |c, i| {
+            var d = try data.subset(gpa, &base, &iota);
+            defer d.deinit();
+            d.weights = try gpa.alloc(f32, n_rows);
+            for (d.weights, w) |*dst, v| dst.* = if (i == 0) 1 else c * v;
+            outs[i] = try predictions(gpa, pool, &d, &base, cfg);
+        }
+        defer for (outs) |o| gpa.free(o);
+        try testing.expectEqualSlices(f32, plain, outs[0]);
+        try testing.expect(!std.mem.eql(f32, plain, outs[1]));
+        for (outs[1], outs[2]) |a, b| try testing.expectApproxEqAbs(a, b, 1e-5);
+    }
+}
