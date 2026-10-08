@@ -805,7 +805,7 @@ pub fn fromForest(gpa: std.mem.Allocator, m: *const forest.Forest, schema: data.
     };
 }
 
-fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
+pub fn dupeTrees(gpa: std.mem.Allocator, src: []const tree.Tree) ![]tree.Tree {
     const out = try gpa.alloc(tree.Tree, src.len);
     var made: usize = 0;
     errdefer {

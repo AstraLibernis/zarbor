@@ -32,6 +32,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     var split_col: ?[]const u8 = null;
     var weight_col: ?[]const u8 = null;
     var init_col: ?[]const u8 = null;
+    var init_model: ?[]const u8 = null;
     var save_path: ?[]const u8 = null;
     var pos_label: ?[]const u8 = null;
 
@@ -79,6 +80,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             weight_col = val;
         } else if (std.mem.eql(u8, key, "init-col")) {
             init_col = val;
+        } else if (std.mem.eql(u8, key, "init-model")) {
+            init_model = val;
         } else if (std.mem.eql(u8, key, "max-bytes")) {
             max_bytes = try std.fmt.parseInt(usize, val, 10);
         } else if (try config.applyFlag(&cfg, key, val)) {
@@ -213,9 +216,24 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         std.sort.pdq(u32, perm[n_train..], {}, std.sort.asc(u32));
     }
 
+    // `--init-model`: keep boosting a saved model. Its schema bins this file, so old and new trees
+    // read the same bins; its raw scores become each row's starting score; the saved result is its
+    // trees followed by the new ones.
+    var prior: ?zarbor.model.Bundle = null;
+    defer if (prior) |*p| p.deinit();
+    if (init_model) |mp| {
+        prior = try zarbor.model.load(gpa, io, mp);
+        const p = &prior.?;
+        if (p.kind != .gbdt or cfg.algo != .gbdt) return error.InitModelNeedsGbdt;
+        if (p.objective != cfg.objective()) return error.InitModelObjectiveDiffers;
+        if (p.width() != cfg.width()) return error.InitModelClassesDiffer;
+        if (p.classes.len != enc.classes.len) return error.InitModelClassesDiffer;
+        for (p.classes, enc.classes) |a, b| if (!std.mem.eql(u8, a, b)) return error.InitModelClassesDiffer;
+    }
+
     // `--bin_policy=auto`: score each policy by CV on the training rows only, so the hold-out
     // score below stays a hold-out score.
-    if (cfg.bin.bin_policy == .auto) {
+    if (cfg.bin.bin_policy == .auto and prior == null) {
         var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
         cfg.bin.bin_policy = try zarbor.cv.chooseBinPolicy(gpa, io, pool, &frame, cfg, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx, .init_cols = init_idx.items }, drops.items, null, perm[0..n_train], &scores);
         try zarbor.cv.writePolicyScores(out, &scores, cfg.bin.bin_policy);
@@ -223,13 +241,25 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
 
     // `bin` times binning alone: the split above and any `auto` choice are not binning.
     const t_bin0 = std.Io.Timestamp.now(io, .awake).toNanoseconds();
-    var full = data.quantise(gpa, pool, &frame, cfg.bin, .{ .col = label_col, .enc = &enc, .weight_col = weight_idx, .init_cols = init_idx.items }, drops.items) catch |err| {
+    const spec: data.LabelSpec = .{ .col = label_col, .enc = &enc, .weight_col = weight_idx, .init_cols = init_idx.items };
+    var full = if (prior) |*p| data.applySchema(gpa, pool, &frame, &p.schema, spec) catch |err| {
+        try explainLabel(out, err, target);
+        return err;
+    } else data.quantise(gpa, pool, &frame, cfg.bin, spec, drops.items) catch |err| {
         if (err == error.CategoricalTooWide) try data.explainWidth(out, &frame, cfg.bin, drops.items);
         try explainLabel(out, err, target);
         return err;
     };
     var full_live = true;
     defer if (full_live) full.deinit();
+    if (prior) |*p| {
+        // The saved model's raw scores (plus any `--init-col`) start every row.
+        const raw = try gpa.alloc(f32, full.n_rows * p.width());
+        p.predictRaw(pool, &full, raw);
+        if (full.init.len != 0) gpa.free(full.init);
+        full.init = raw;
+        try out.print("init    continuing {s}: {d} trees\n", .{ init_model.?, p.trees.len });
+    }
     enc.validate(full.labels, cfg.objective()) catch |err| {
         try explainLabel(out, err, target);
         return err;
@@ -298,7 +328,22 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     if (save_path) |sp| {
         const sch = schema.?;
         schema = null; // `save` owns it now
-        try res.model.save(gpa, io, sp, sch, target, &enc);
+        if (prior) |*p| {
+            // One model: the saved one's base and trees, then the new trees.
+            var b = try zarbor.model.fromBooster(gpa, &res.model.gbdt, sch);
+            defer b.deinit();
+            const old = try zarbor.model.dupeTrees(gpa, p.trees);
+            defer gpa.free(old);
+            const all = try gpa.alloc(zarbor.tree.Tree, old.len + b.trees.len);
+            @memcpy(all[0..old.len], old);
+            @memcpy(all[old.len..], b.trees);
+            gpa.free(b.trees);
+            b.trees = all;
+            b.base_score = p.base_score;
+            @memcpy(b.class_base, p.class_base);
+            try b.setLabel(target, &enc);
+            try zarbor.model.save(gpa, io, sp, &b);
+        } else try res.model.save(gpa, io, sp, sch, target, &enc);
         try out.print("saved   {s}\n", .{sp});
     }
     if (valid_ds) |*v| {

@@ -234,7 +234,11 @@ pub fn applySchema(
             out.levels[f] = copy;
         }
     }
-    if (label) |ls| out.labels = try ls.enc.encode(gpa, src, ls.col);
+    if (label) |ls| {
+        out.labels = try ls.enc.encode(gpa, src, ls.col);
+        if (ls.weight_col) |wc| out.weights = try data.readWeights(gpa, src, wc);
+        if (ls.init_cols.len != 0) out.init = try data.readInit(gpa, src, ls.init_cols);
+    }
     return out;
 }
 

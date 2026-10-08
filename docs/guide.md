@@ -34,6 +34,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--weight-col` | task | rows of unequal importance: survey or exposure weights, recent data, deduplicated rows |
 | `--class_weight=balanced` | task | a rare class that the metric cares about; AUC rarely needs it |
 | `--init-col` | task | an offset the model should not learn (exposure), or stacking on another model's raw score |
+| `--init-model` | task | adding rounds to a saved model, or updating it on new data |
 | `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
 | `--has_time` | task | rows are in time order and the model must not peek ahead (CatBoost style) |
 | `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
@@ -154,6 +155,13 @@ scores leave, and the saved model's base score is 0: pass the same columns to `p
 Uses: an exposure offset (`log(exposure)` under a log link), or boosting on top of another
 model's raw output. The validation set needs them too; the forest and the linear model refuse
 them.
+
+**Continued training** (`--init-model=M.zm`, gbdt): keep boosting a saved model on this file.
+The file is binned with the saved model's schema (binning flags are ignored), every row starts
+from the saved model's raw score (plus any `--init-col`), and `--save` writes one model: the saved
+trees, then the new ones. The objective and classes must match. Without sampling or split noise,
+100 rounds continued by 100 more give the 200-round model byte for byte; with them, random draws
+restart from the seed, so the result is a different (equally valid) model, as in XGBoost.
 
 **Multiclass** (`--objective=softmax`, gbdt and linear): every distinct label is a class,
 text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per

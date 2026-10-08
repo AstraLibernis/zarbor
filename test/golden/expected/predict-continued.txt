@@ -1,0 +1,23 @@
+$ zarbor predict titanic3.csv --model=gc.zm --label=survived
+exit 0
+--- stdout
+rows    1309
+models  1
+read # ms
+bin # ms
+predict # ms
+score   auc=0.968753  logloss=0.223077
+
+first 10 predictions
+  0.933471
+  0.129328
+  0.104307
+  0.005033
+  0.098060
+  0.963338
+  0.998787
+  0.035521
+  0.999076
+  0.000498
+--- stderr
+--- files

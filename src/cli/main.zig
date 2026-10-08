@@ -35,6 +35,8 @@ pub const usage =
     \\  --init-col=NAME     per-row starting raw score (one per class under softmax,
     \\                      comma-separated); dropped as a feature; pass it to
     \\                      predict too
+    \\  --init-model=M.zm   keep boosting a saved gbdt model on this file; saves
+    \\                      its trees followed by the new ones
     \\  --save=FILE         write the trained model to FILE
     \\
     \\other commands:

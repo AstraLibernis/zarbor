@@ -1,0 +1,26 @@
+$ zarbor titanic3.csv --label=survived --init-model=g.zm --n_rounds=20 --save=gc.zm --drop=boat --drop=body --drop=name --drop=ticket --drop=home.dest --n_threads=4
+exit 0
+--- stdout
+parse   14 cols (7 numeric, 7 categorical)  3855 missing (21.04%)
+init    continuing g.zm: 500 trees
+data    titanic3.csv
+rows    1309
+feats   8  (label "survived")
+model   gradient-boosted trees (depthwise, XGBoost-style)
+threads 4
+read # ms
+bin # ms
+encode  numeric target, used as-is
+train   1047 rows / valid 262 rows
+
+[   0] valid=0.874359  best=0.874359 @0
+[  10] valid=0.874424  best=0.874424 @10
+[  19] valid=0.873969  best=0.874424 @10
+
+rounds  20
+train # ms  ( # ms/tree)
+saved   gc.zm
+valid   auc=0.873969  logloss=0.513855
+--- stderr
+--- files
+gc.zm  693880 bytes  sha256 0c2a4573bc9b59f683c13394d87f996926b3096b0ba5e032b791a237662470b7

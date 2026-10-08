@@ -125,7 +125,9 @@ much each feature moved that row's prediction.
 CatBoost parity (CatBoost plain, ordered and with target statistics), scikit-learn's linear
 objectives. Balanced class weights done the same day (scikit-learn's definition, weighted
 counts as in 1.9). Starting scores (`--init-col`, boosting only) done the same day, exact
-against all three libraries. Next: continued training.
+against all three libraries. Continued training (`--init-model`) done the same day: 100 + 100
+rounds equals 200 byte for byte without randomness (depthwise, lossguide, softmax, symmetric).
+Milestone 3 complete.
 
 **Goal.** `--weight-col=NAME`: a column giving each row's weight (dropped as a feature, like
 `--split-col`). `--class_weight=balanced` (or explicit per-class weights). `--init-col=NAME`:
