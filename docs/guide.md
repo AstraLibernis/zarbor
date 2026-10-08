@@ -9,6 +9,55 @@ Every setting is a flag named after its config field (`--max_depth=7`), generate
 config structs, so flags and code cannot drift apart. Names follow XGBoost where an equivalent
 exists and LightGBM or CatBoost where only they have the setting.
 
+## Which settings to touch, and when
+
+Most settings are not for turning by hand. They fall into four kinds, used differently:
+
+1. **Task settings** describe the problem: what to predict, how you are scored, which rows
+   count. Choose them from the problem statement; never search them. A wrong one cannot be
+   fixed by tuning.
+2. **Tuning knobs** trade fit against overfitting. Leave them at their defaults and let `tune`
+   pick (section 11): each has a range in its default search space.
+3. **Style choices** pick an algorithm family. Try each once under `cv`; the useful result is
+   often a blend of two (section 12), not a winner.
+4. **Plumbing** is memory, threads, logging and solver internals. Leave it unless something
+   is wrong.
+
+A workable order: set the task settings; train with defaults; improve the features (this has
+paid far more than tuning in past competitions); run `tune`; try another style and blend.
+
+| Setting | Kind | When to touch it |
+|---|---|---|
+| `--label`, `--objective` | task | always: `logistic` for a yes/no target, `squared_error` for a number |
+| `--pos-label` | task | when the sorted class order guesses wrong ("abnormal" < "normal") |
+| `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
+| `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
+| `--has_time` | task | rows are in time order and the model must not peek ahead (CatBoost style) |
+| `--scale_pos_weight` | task | a rare positive class *and* a metric that cares about it (recall, F1); AUC rarely needs it |
+| `--max_cat_levels` | task | a categorical with more levels than 255 that you mean to keep |
+| `--early_stopping_rounds` | task | on, with a validation set, unless `tune` is choosing rounds for you |
+| `--learning_rate`, `--n_rounds` | knob | lower rate with more rounds is slower and usually slightly better; early stopping picks rounds |
+| `--max_depth`, `--max_leaves` | knob | the main complexity control; `tune` |
+| `--lambda`, `--alpha`, `--min_child_weight`, `--min_child_samples`, `--min_split_gain` | knob | against overfitting; `tune` (the first three are in the default space) |
+| `--subsample`, `--colsample_*`, `--bootstrap` | knob | randomness against overfitting; `tune` |
+| `--max_bin`, `--min_data_in_bin`, `--bin_policy` | knob | `tune` searches bins; try `--bin_policy=auto` once on a new dataset |
+| `--cat_smooth`, `--max_cat_threshold`, `--max_cat_to_onehot`, `--min_data_per_group` | knob | only with `--cat_split=optimal` and many-level categoricals |
+| `--random_strength`, `--bagging_temperature`, `--mvs_reg`, `--model_size_reg` | knob | CatBoost style only; its defaults are sensible |
+| `--max_delta_step` | knob | logistic loss on extremely imbalanced data, if training is unstable |
+| `--algo`, `--grow_policy` | style | try depthwise, lossguide and symmetric; blend the best two |
+| `--cat_split` | style | `optimal` for categoricals with a handful of levels, `ctr` for many levels |
+| `--sampling=goss`, `--bootstrap_type` | style | LightGBM's and CatBoost's row sampling; GOSS was not faster on the arena data, so judge it by `cv` score |
+| `--boosting_type=ordered` | style | CatBoost's guard against target leakage in its statistics; costs about 3x |
+| `--linear_leaves` | style | smooth trends trees approximate in steps, or prediction beyond the training range |
+| `--top_rate`, `--other_rate`, `--goss_rank`, `--goss_warmup` | knob | only under GOSS; defaults follow LightGBM |
+| `--score_function`, `--leaf_estimation_iterations`, `--one_hot_max_size`, `--max_ctr_complexity` | knob | CatBoost style; defaults follow CatBoost |
+| `--permutation_count`, `--permutation_block` | plumbing | CatBoost's defaults; more permutations cost time |
+| `--lin_solver`, `--lin_epochs`, `--lin_lr`, `--lin_tol`, `--lin_standardize` | plumbing | the defaults converge; `tune` covers the linear penalties |
+| `--seed` | plumbing | change it to see how much a result is luck |
+| `--n_threads`, `--histogram_pool_size`, `--ordered_bank_limit`, `--max-bytes`, `--verbose_eval` | plumbing | machine limits and logging |
+
+Settings added later (docs/PLAN.md) are classified here as they land.
+
 ## 1. Commands
 
     zarbor <train.csv> --label=y [--save=m.zm]        train, report a hold-out score
