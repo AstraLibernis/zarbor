@@ -274,21 +274,35 @@ pub const Combo = struct {
 /// The key of a row given its bins per column (`bin_of(f)`), for `parts` in canonical order.
 /// Training and prediction share this, so the two cannot disagree on a key.
 pub fn comboKey(parts: []const Part, ctx: anytype, comptime bin_of: fn (@TypeOf(ctx), u32) data.BinIdx) u64 {
-    var x: u64 = 0x243F6A8885A308D3;
-    for (parts) |p| {
-        const b = bin_of(ctx, p.feature);
-        const v: u64 = switch (p.kind) {
-            .cat => b,
-            .bin => @intFromBool(b > p.value),
-            .onehot => @intFromBool(b == p.value),
-        };
-        x +%= 0x9E3779B97F4A7C15 +% v;
-        var z = x;
-        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
-        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
-        x = z ^ (z >> 31);
-    }
+    var x: u64 = combo_seed;
+    for (parts) |p| x = comboMix(x, partValue(p, bin_of(ctx, p.feature)));
     return x;
+}
+
+/// What a part contributes to a key: the level for `cat`, the test's outcome otherwise.
+pub inline fn partValue(p: Part, b: data.BinIdx) u64 {
+    return switch (p.kind) {
+        .cat => b,
+        .bin => @intFromBool(b > p.value),
+        .onehot => @intFromBool(b == p.value),
+    };
+}
+
+/// `comboKey` from the parts' values directly (`partValue` of each, in order).
+pub fn comboKeyValues(values: []const u64) u64 {
+    var x: u64 = combo_seed;
+    for (values) |v| x = comboMix(x, v);
+    return x;
+}
+
+const combo_seed: u64 = 0x243F6A8885A308D3;
+
+inline fn comboMix(x0: u64, v: u64) u64 {
+    const x = x0 +% 0x9E3779B97F4A7C15 +% v;
+    var z = x;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+    return z ^ (z >> 31);
 }
 
 fn rowBin(rb: []const data.BinIdx, f: u32) data.BinIdx {

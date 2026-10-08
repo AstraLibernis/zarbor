@@ -779,21 +779,9 @@ pub const Builder = struct {
     fn assignLeaves(b: *Builder, fold: *const Fold, splits: []const Split, out: []u16) !void {
         @memset(out, 0);
         for (splits, 0..) |sp, d| {
-            const bit: u4 = @intCast(d);
-            if (sp.combo != no_combo) {
-                try comboOnline(b.gpa, b.ds, b.tree_combos.items[sp.combo].parts, sp.ctr_type, fold.order, b.combo_buf);
-                for (out, b.combo_buf) |*o, bk| o.* |= @as(u16, @intFromBool(bk > sp.threshold)) << bit;
-                continue;
-            }
-            const c = b.all[sp.cand];
-            for (out, 0..) |*o, r| {
-                const one = switch (c.kind) {
-                    .numeric => binAt(b.ds, c.feature, r) > sp.threshold,
-                    .onehot => binAt(b.ds, c.feature, r) == sp.threshold,
-                    .ctr => fold.ctr[c.slot][r] > sp.threshold,
-                };
-                o.* |= @as(u16, @intFromBool(one)) << bit;
-            }
+            if (sp.combo != no_combo) try comboOnline(b.gpa, b.ds, b.tree_combos.items[sp.combo].parts, sp.ctr_type, fold.order, b.combo_buf);
+            var ctx = LeafBitCtx{ .b = b, .fold = fold, .sp = sp, .bit = @intCast(d), .out = out };
+            b.pool.parallelFor(out.len, &ctx, LeafBitCtx.run, pos_chunk);
         }
     }
 
@@ -945,24 +933,45 @@ pub const Builder = struct {
             }
         }
         std.debug.assert(n + projs.items.len * n_ctr_types <= b.all.len);
+        const n_new = projs.items.len * n_ctr_types;
+        const out = b.all[n..][0..n_new];
+        for (out) |*c| c.* = .{ .kind = .ctr, .feature = std.math.maxInt(u32), .nb = ctr_buckets };
+        // Every candidate's arrays are freed on error; none owns its projection until the end.
+        errdefer for (out) |*c| {
+            c.freeOwned(gpa);
+            c.* = .{ .kind = .ctr, .feature = std.math.maxInt(u32), .nb = ctr_buckets };
+        };
+        const work = try gpa.alloc(ComboWork, projs.items.len);
+        defer gpa.free(work);
+        for (work) |*w| w.* = .{ .proj = &.{} };
+        defer for (work) |*w| w.deinit(gpa);
+        for (work, projs.items) |*w, x| w.* = try ComboWork.init(gpa, b.ds, x);
+        for (out, 0..) |*c, i| {
+            c.ctr_type = @intCast(i % n_ctr_types);
+            c.col = try gpa.alloc(u8, b.ds.n_rows);
+        }
         const errs = try gpa.alloc(?anyerror, projs.items.len);
         defer gpa.free(errs);
-        var cctx = ComboCtx{ .gpa = gpa, .ds = b.ds, .order = order, .projs = projs.items, .out = b.all[n..], .errs = errs };
-        b.pool.parallelFor(projs.items.len, &cctx, ComboCtx.run, 1);
-        var first_err: ?anyerror = null;
-        for (errs) |e| if (first_err == null) {
-            first_err = e;
-        };
-        if (first_err) |e| {
-            // Built candidates own their projection; the failed ones' stay in `projs` to be freed.
-            for (errs, 0..) |x, i| if (x == null) {
-                freeCands(gpa, b.all[n + i * n_ctr_types ..][0..n_ctr_types]);
-                projs.items[i] = &.{};
-            };
-            return e;
-        }
+        @memset(errs, null);
+        var cctx = ComboCtx{ .gpa = gpa, .ds = b.ds, .order = order, .work = work, .out = out, .errs = errs, .pass = .codes };
+        const n_tasks = projs.items.len * combo_chunks;
+        b.pool.parallelFor(n_tasks, &cctx, ComboCtx.run, 1);
+        for (errs) |e| if (e) |err| return err;
+        for (work) |*w| try w.tables(gpa, b.ds.n_rows);
+        cctx.pass = .count;
+        b.pool.parallelFor(n_tasks, &cctx, ComboCtx.run, 1);
+        for (work) |*w| w.prefix();
+        cctx.pass = .replay;
+        b.pool.parallelFor(n_tasks, &cctx, ComboCtx.run, 1);
+        cctx.pass = .counter;
+        b.pool.parallelFor(n_tasks, &cctx, ComboCtx.run, 1);
+        for (work, 0..) |*w, i| try w.finish(gpa, out[i * n_ctr_types ..][0..n_ctr_types]);
         for (projs.items, 0..) |*x, i| {
-            max_uniq = @max(max_uniq, b.all[n + i * n_ctr_types].uniq);
+            const first = &out[i * n_ctr_types];
+            first.parts = x.*;
+            first.owns_parts = true;
+            for (out[i * n_ctr_types + 1 ..][0 .. n_ctr_types - 1]) |*c| c.parts = x.*;
+            max_uniq = @max(max_uniq, first.uniq);
             x.* = &.{}; // the first candidate owns it now
         }
         n += projs.items.len * n_ctr_types;
@@ -1320,95 +1329,221 @@ fn comboOnline(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Pa
     for (col, ids) |*o, id| o.* = bucketOf(@as(f32, @floatFromInt(total[id])) / den);
 }
 
-/// The four CTR candidates of a combination `proj` (owned by the first afterwards): each row's key,
-/// then online buckets (Borders: earlier rows only; Counter: all rows) and the stored table from
-/// counts over every row.
-fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, order: []const u32, out: []Cand) !void {
-    const n = ds.n_rows;
-    const ids = try gpa.alloc(u32, n);
-    defer gpa.free(ids);
-    var key_of: std.ArrayList(u64) = .empty;
-    defer key_of.deinit(gpa);
-    try comboIds(gpa, ds, proj, ids, &key_of);
-    const uniq: u32 = @intCast(key_of.items.len);
-    const good = try gpa.alloc(u32, uniq);
-    defer gpa.free(good);
-    @memset(good, 0);
-    const total = try gpa.alloc(u32, uniq);
-    defer gpa.free(total);
-    @memset(total, 0);
+/// Chunks a combination's rows are split into for its parallel passes, a fixed count so the
+/// result does not depend on threads.
+const combo_chunks = 16;
 
-    var made: usize = 0;
-    errdefer for (out[0..made]) |c| {
-        if (c.col.len != 0) gpa.free(c.col);
-        if (c.keys.len != 0) gpa.free(c.keys);
-        if (c.kbuckets.len != 0) gpa.free(c.kbuckets);
-    };
-    for (out, 0..) |*c, t| {
-        c.* = .{ .kind = .ctr, .feature = std.math.maxInt(u32), .ctr_type = @intCast(t), .nb = ctr_buckets, .parts = if (t == 0) proj else &.{} };
-        c.col = try gpa.alloc(u8, n);
-        made += 1;
-    }
-    // Borders, online along `order`.
-    for (0..n) |pos| {
-        const r = if (order.len == 0) pos else order[pos];
-        const id = ids[r];
-        const g: f32 = @floatFromInt(good[id]);
-        const tot: f32 = @floatFromInt(total[id]);
-        for (ctr_priors, 0..) |prior, t| out[t].col[r] = bucketOf((g + prior) / (tot + 1));
-        total[id] += 1;
-        good[id] += @intFromBool(ds.labels[r] > 0.5);
-    }
-    // `total` and `good` now hold the full counts: Counter and the stored tables.
-    var largest: u32 = 0;
-    for (total) |x| largest = @max(largest, x);
-    const den: f32 = @floatFromInt(largest + 1);
-    for (out[ctr_priors.len].col, ids) |*o, id| o.* = bucketOf(@as(f32, @floatFromInt(total[id])) / den);
+/// One new combination of a level, built in passes that each split the rows into chunks:
+/// every row's code (its mixed-radix part values when they fit `direct_ids`, else a dense id from
+/// hashing), per-chunk counts of each code along the fold order, each chunk's starting counts
+/// (a prefix over chunks), then the online buckets replayed per chunk. Counts are integers, so
+/// this equals one sequential pass exactly.
+const ComboWork = struct {
+    proj: []const tree.Part,
+    /// Part cardinalities for the direct codes; empty on the hashed path.
+    card: []u32 = &.{},
+    code: []u32 = &.{},
+    n_codes: usize = 0,
+    /// Hashed path: each id's key.
+    key_of: std.ArrayList(u64) = .empty,
+    /// Chunks along the fold order: `combo_chunks`, or 1 when a chunk's count table would be
+    /// larger than the chunk.
+    chunks: usize = 1,
+    /// `chunks * n_codes`: counts per chunk, then each chunk's starting counts.
+    good: []u32 = &.{},
+    total: []u32 = &.{},
+    /// Counts over every row.
+    full_total: []u32 = &.{},
+    full_good: []u32 = &.{},
+    den: f32 = 0,
 
-    // Ids sorted by key give the tables' order.
-    const by_key = try gpa.alloc(u32, uniq);
-    defer gpa.free(by_key);
-    for (by_key, 0..) |*x, i| x.* = @intCast(i);
-    std.sort.pdq(u32, by_key, key_of.items, struct {
-        fn lt(keys: []const u64, x: u32, y: u32) bool {
-            return keys[x] < keys[y];
+    fn deinit(w: *ComboWork, gpa: std.mem.Allocator) void {
+        if (w.card.len != 0) gpa.free(w.card);
+        if (w.code.len != 0) gpa.free(w.code);
+        w.key_of.deinit(gpa);
+        if (w.good.len != 0) gpa.free(w.good);
+        if (w.total.len != 0) gpa.free(w.total);
+        if (w.full_total.len != 0) gpa.free(w.full_total);
+        if (w.full_good.len != 0) gpa.free(w.full_good);
+        w.* = .{ .proj = &.{} };
+    }
+
+    fn init(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Part) !ComboWork {
+        var w: ComboWork = .{ .proj = proj };
+        errdefer w.deinit(gpa);
+        var space: usize = 1;
+        for (proj) |part| {
+            const card: usize = if (part.kind == .cat) ds.n_bins[part.feature] else 2;
+            space = std.math.mul(usize, space, card) catch std.math.maxInt(usize);
         }
-    }.lt);
-    for (out, 0..) |*c, t| {
-        c.uniq = uniq;
-        c.keys = try gpa.alloc(u64, uniq);
-        c.kbuckets = try gpa.alloc(u8, uniq);
-        for (by_key, c.keys, c.kbuckets) |id, *k, *bk| {
-            k.* = key_of.items[id];
-            bk.* = if (t < ctr_priors.len)
-                bucketOf((@as(f32, @floatFromInt(good[id])) + ctr_priors[t]) / (@as(f32, @floatFromInt(total[id])) + 1))
-            else
-                bucketOf(@as(f32, @floatFromInt(total[id])) / den);
+        w.code = try gpa.alloc(u32, ds.n_rows);
+        if (space <= direct_ids and proj.len <= max_combo_parts) {
+            w.card = try gpa.alloc(u32, proj.len);
+            for (proj, w.card) |part, *c| c.* = if (part.kind == .cat) ds.n_bins[part.feature] else 2;
+            w.n_codes = space;
         }
-        c.unseen = if (t < ctr_priors.len) bucketOf(ctr_priors[t]) else 0;
+        return w;
     }
-    // Every candidate of the projection reads it; only the first frees it.
-    out[0].owns_parts = true;
-    for (out[1..]) |*c| c.parts = out[0].parts;
-}
 
-/// One task per new projection: its four candidates into `out[i * n_ctr_types ..]`.
+    /// After the codes exist: chunking and count tables.
+    fn tables(w: *ComboWork, gpa: std.mem.Allocator, n: usize) !void {
+        if (w.card.len == 0) w.n_codes = w.key_of.items.len;
+        w.chunks = if (w.n_codes * combo_chunks <= n) combo_chunks else 1;
+        w.good = try gpa.alloc(u32, w.chunks * w.n_codes);
+        @memset(w.good, 0);
+        w.total = try gpa.alloc(u32, w.chunks * w.n_codes);
+        @memset(w.total, 0);
+        w.full_good = try gpa.alloc(u32, w.n_codes);
+        w.full_total = try gpa.alloc(u32, w.n_codes);
+    }
+
+    /// Chunk `c` of `chunks` over `[0, n)`.
+    fn span(n: usize, chunks: usize, c: usize) [2]usize {
+        return .{ n * c / chunks, n * (c + 1) / chunks };
+    }
+
+    /// Each chunk's counts become its starting counts; the sums over all chunks are the totals.
+    fn prefix(w: *ComboWork) void {
+        var largest: u32 = 0;
+        for (0..w.n_codes) |k| {
+            var g: u32 = 0;
+            var t: u32 = 0;
+            for (0..w.chunks) |c| {
+                const i = c * w.n_codes + k;
+                const gc = w.good[i];
+                const tc = w.total[i];
+                w.good[i] = g;
+                w.total[i] = t;
+                g += gc;
+                t += tc;
+            }
+            w.full_good[k] = g;
+            w.full_total[k] = t;
+            largest = @max(largest, t);
+        }
+        w.den = @floatFromInt(largest + 1);
+    }
+
+    /// The key of code `k`: from its digits (direct) or remembered (hashed).
+    fn key(w: *const ComboWork, k: usize) u64 {
+        if (w.card.len == 0) return w.key_of.items[k];
+        var values: [max_combo_parts]u64 = undefined;
+        var rest = k;
+        var i = w.proj.len;
+        while (i > 0) {
+            i -= 1;
+            values[i] = rest % w.card[i];
+            rest /= w.card[i];
+        }
+        return tree.comboKeyValues(values[0..w.proj.len]);
+    }
+
+    /// The four candidates' stored tables (keys ascending) from the full counts.
+    fn finish(w: *const ComboWork, gpa: std.mem.Allocator, out: []Cand) !void {
+        var present: usize = 0;
+        for (w.full_total) |t| present += @intFromBool(t != 0);
+        const Entry = struct { key: u64, code: u32 };
+        const entries = try gpa.alloc(Entry, present);
+        defer gpa.free(entries);
+        var at: usize = 0;
+        for (w.full_total, 0..) |t, k| if (t != 0) {
+            entries[at] = .{ .key = w.key(k), .code = @intCast(k) };
+            at += 1;
+        };
+        std.sort.pdq(Entry, entries, {}, struct {
+            fn lt(_: void, x: Entry, y: Entry) bool {
+                return x.key < y.key;
+            }
+        }.lt);
+        for (out, 0..) |*c, t| {
+            c.uniq = @intCast(present);
+            c.keys = try gpa.alloc(u64, present);
+            c.kbuckets = try gpa.alloc(u8, present);
+            for (entries, c.keys, c.kbuckets) |e, *k, *bk| {
+                k.* = e.key;
+                bk.* = if (t < ctr_priors.len)
+                    bucketOf((@as(f32, @floatFromInt(w.full_good[e.code])) + ctr_priors[t]) / (@as(f32, @floatFromInt(w.full_total[e.code])) + 1))
+                else
+                    bucketOf(@as(f32, @floatFromInt(w.full_total[e.code])) / w.den);
+            }
+            c.unseen = if (t < ctr_priors.len) bucketOf(ctr_priors[t]) else 0;
+        }
+    }
+};
+
+/// Longest projection: the split bits of a tree (one per level) plus its categoricals.
+const max_combo_parts = 2 * max_depth;
+
+/// The passes of `ComboWork` over every new combination of a level at once: task `i` is chunk
+/// `i % combo_chunks` of combination `i / combo_chunks`. Each task writes only its own chunk.
 const ComboCtx = struct {
     gpa: std.mem.Allocator,
     ds: *const Dataset,
     order: []const u32,
-    projs: []const []tree.Part,
+    work: []ComboWork,
     out: []Cand,
     errs: []?anyerror,
+    pass: enum { codes, count, replay, counter },
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ComboCtx = @ptrCast(@alignCast(ctx));
-        for (begin..end) |i| {
-            self.errs[i] = null;
-            comboCands(self.gpa, self.ds, self.projs[i], self.order, self.out[i * n_ctr_types ..][0..n_ctr_types]) catch |e| {
-                self.errs[i] = e;
-            };
+        for (begin..end) |i| self.task(i / combo_chunks, i % combo_chunks) catch |e| {
+            self.errs[i / combo_chunks] = e;
+        };
+    }
+
+    fn task(self: *ComboCtx, p: usize, c: usize) !void {
+        const w = &self.work[p];
+        const ds = self.ds;
+        const n = ds.n_rows;
+        switch (self.pass) {
+            .codes => {
+                if (w.card.len == 0) {
+                    // Hashed: one sequential pass, dense ids by first appearance.
+                    if (c == 0) try comboIds(self.gpa, ds, w.proj, w.code, &w.key_of);
+                    return;
+                }
+                const lo, const hi = ComboWork.span(n, combo_chunks, c);
+                for (lo..hi) |r| {
+                    var code: u32 = 0;
+                    for (w.proj, w.card) |part, card| code = code * card + @as(u32, @intCast(tree.partValue(part, binAt(ds, part.feature, r))));
+                    w.code[r] = code;
+                }
+            },
+            .count => {
+                if (c >= w.chunks) return;
+                const lo, const hi = ComboWork.span(n, w.chunks, c);
+                const good = w.good[c * w.n_codes ..][0..w.n_codes];
+                const total = w.total[c * w.n_codes ..][0..w.n_codes];
+                for (lo..hi) |pos| {
+                    const r = if (self.order.len == 0) pos else self.order[pos];
+                    const k = w.code[r];
+                    total[k] += 1;
+                    good[k] += @intFromBool(ds.labels[r] > 0.5);
+                }
+            },
+            .replay => {
+                if (c >= w.chunks) return;
+                const lo, const hi = ComboWork.span(n, w.chunks, c);
+                const good = w.good[c * w.n_codes ..][0..w.n_codes];
+                const total = w.total[c * w.n_codes ..][0..w.n_codes];
+                const out = self.out[p * n_ctr_types ..][0..n_ctr_types];
+                for (lo..hi) |pos| {
+                    const r = if (self.order.len == 0) pos else self.order[pos];
+                    const k = w.code[r];
+                    const g: f32 = @floatFromInt(good[k]);
+                    const t: f32 = @floatFromInt(total[k]);
+                    for (ctr_priors, 0..) |prior, i| out[i].col[r] = bucketOf((g + prior) / (t + 1));
+                    total[k] += 1;
+                    good[k] += @intFromBool(ds.labels[r] > 0.5);
+                }
+            },
+            .counter => {
+                const lo, const hi = ComboWork.span(n, combo_chunks, c);
+                const col = self.out[p * n_ctr_types + ctr_priors.len].col;
+                for (lo..hi) |r| col[r] = bucketOf(@as(f32, @floatFromInt(w.full_total[w.code[r]])) / w.den);
+            },
         }
     }
 };
@@ -2076,6 +2211,36 @@ const Ordered = struct {
         if (o.acc_den.len != 0) gpa.free(o.acc_den);
         if (o.acc_off.len != 0) gpa.free(o.acc_off);
         if (o.tail_grads.len != 0) gpa.free(o.tail_grads);
+    }
+};
+
+/// One split's bit of every row's leaf on a fold (its own CTR columns; a combination's buckets
+/// are in `combo_buf`). Per row, no reductions.
+const LeafBitCtx = struct {
+    b: *Builder,
+    fold: *const Fold,
+    sp: Split,
+    bit: u4,
+    out: []u16,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *LeafBitCtx = @ptrCast(@alignCast(ctx));
+        const b = self.b;
+        const sp = self.sp;
+        if (sp.combo != no_combo) {
+            for (self.out[begin..end], b.combo_buf[begin..end]) |*o, bk| o.* |= @as(u16, @intFromBool(bk > sp.threshold)) << self.bit;
+            return;
+        }
+        const c = b.all[sp.cand];
+        for (self.out[begin..end], begin..) |*o, r| {
+            const one = switch (c.kind) {
+                .numeric => binAt(b.ds, c.feature, r) > sp.threshold,
+                .onehot => binAt(b.ds, c.feature, r) == sp.threshold,
+                .ctr => self.fold.ctr[c.slot][r] > sp.threshold,
+            };
+            o.* |= @as(u16, @intFromBool(one)) << self.bit;
+        }
     }
 };
 
