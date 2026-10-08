@@ -69,6 +69,11 @@ zarbor is worth reaching for when:
   other things, that LightGBM ranks GOSS rows by `|g*h|` (its docs say `|g|`) and skips
   features in descendants after one bad node.
 
+It is deliberately not everything those libraries are: binary and regression targets on dense
+tables, on one machine, from the command line. Multiclass, feature importance and SHAP, sample
+weights, more losses and monotonic constraints are planned; GPU, distributed training,
+language bindings and export formats are out of scope. See [docs/PLAN.md](docs/PLAN.md).
+
 ## Documentation
 
 - [docs/guide.md](docs/guide.md): every command and setting, and what zarbor does with your
@@ -77,6 +82,8 @@ zarbor is worth reaching for when:
   run, how the code is tested, open questions.
 - [docs/measurements.md](docs/measurements.md): the measured numbers behind code-level
   decisions.
+- [docs/PLAN.md](docs/PLAN.md): purpose, the next five features in order, and what is out of
+  scope.
 - [docs/archive/](docs/archive/README.md): design notes, pre-registered experiments and
   investigations, kept as history.
 
