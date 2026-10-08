@@ -30,6 +30,15 @@ pub const Phase = enum {
     apply,
     valid_predict,
     valid_metric,
+    /// Symmetric (CatBoost-style) builder phases, in `symmetric.zig`.
+    sym_init,
+    sym_setup,
+    sym_combo,
+    sym_hist,
+    sym_score,
+    sym_split,
+    sym_leaves,
+    sym_folds,
     other,
 };
 

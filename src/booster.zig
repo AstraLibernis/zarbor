@@ -442,6 +442,7 @@ pub fn train(
     defer gpa.free(span_buf);
 
     // Exactly one of the two builders exists: symmetric trees have their own (symmetric.zig).
+    const t_init = prof.start();
     var sym: ?symmetric.Builder = if (cfg.tree.grow_policy == .symmetric) try symmetric.Builder.init(gpa, pool, ds, .{
         .depth = cfg.tree.max_depth,
         .lambda = cfg.tree.lambda,
@@ -464,6 +465,7 @@ pub fn train(
         .permutation_block = cfg.tree.permutation_block,
     }) else null;
     defer if (sym) |*s| s.deinit();
+    prof.stop(.sym_init, t_init);
     var builder_opt: ?tree.Builder = if (sym == null) try tree.Builder.init(gpa, pool, ds, cfg.tree) else null;
     defer if (builder_opt) |*b| b.deinit();
 

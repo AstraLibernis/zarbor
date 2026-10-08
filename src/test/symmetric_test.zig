@@ -686,3 +686,39 @@ test "permutations: the same model at 1, 3 and 16 threads; the seed matters only
         try testing.expectEqualSlices(f32, &t4, &t5);
     }
 }
+
+test "level histograms below the root are the same to the bit at 1, 3 and 16 threads" {
+    // The checks above compare f32 predictions, which round away a regrouped f64 sum. This
+    // compares the builder's histogram cells, which hold the smaller side's sums and the parent
+    // minus them, after trees with combinations and MVS weights. The gradients span many binades
+    // (p from 1e-9 to 0.5): f32 values close in magnitude sum exactly in f64 in any order.
+    const gpa = testing.allocator;
+    var ds = try ctrFixture(gpa);
+    defer ds.deinit();
+    const grads = try gpa.alloc(@import("../hist.zig").GradPair, ds.n_rows);
+    defer gpa.free(grads);
+    var prng: std.Random.DefaultPrng = .init(9);
+    for (grads, ds.labels) |*g, y| {
+        const p: f32 = 0.5 * @exp(-20.0 * prng.random().float(f32));
+        g.* = .{ .g = p - y, .h = p * (1 - p) };
+    }
+    const raw = try gpa.alloc(f32, ds.n_rows);
+    defer gpa.free(raw);
+    @memset(raw, 0);
+    const settings: symmetric.Settings = .{ .depth = 4, .lambda = 1, .learning_rate = 0.3, .score = .cosine, .leaf_iterations = 1, .ctr = true, .max_ctr_complexity = 3, .bootstrap = .mvs, .subsample = 0.7, .seed = 3 };
+
+    var want: []u8 = &.{};
+    defer gpa.free(want);
+    for ([_]u32{ 1, 3, 16 }) |threads| {
+        const pool = try Pool.init(gpa, threads);
+        defer pool.deinit();
+        var b = try symmetric.Builder.init(gpa, pool, &ds, settings);
+        defer b.deinit();
+        for (0..3) |_| {
+            var t = try b.grow(grads, raw, ds.labels, .logistic, 1);
+            t.deinit(gpa);
+        }
+        const got = std.mem.sliceAsBytes(b.cells);
+        if (threads == 1) want = try gpa.dupe(u8, got) else try testing.expectEqualSlices(u8, want, got);
+    }
+}

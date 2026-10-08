@@ -16,6 +16,7 @@ const Dataset = data.Dataset;
 const hist = @import("hist.zig");
 const tree = @import("tree.zig");
 const Pool = @import("pool.zig").Pool;
+const prof = @import("prof.zig");
 const Objective = @import("objective.zig").Objective;
 
 /// Deepest supported tree: 2^16 leaves, and the leaf index fits a `u16`.
@@ -311,6 +312,14 @@ pub const Builder = struct {
     acc_den: []f64 = &.{},
     acc_off: []usize = &.{},
     tail_grads: []hist.GradPair = &.{},
+    /// Plain scoring below the root (CatBoost's smallest-side trick): the rows on the smaller side
+    /// of the newest split, ascending, with their weighted derivatives; whether candidate c's cells
+    /// hold its raw histogram of the level above; and per-worker room for the running sums
+    /// `ScoreCtx` scans, so the raw histograms survive to be subtracted from.
+    sel: Selected = .{},
+    cached: []bool = &.{},
+    scratch: []Cell = &.{},
+    max_slice: usize = 0,
 
     const Best = struct { score: f64, threshold: u32 };
 
@@ -397,6 +406,16 @@ pub const Builder = struct {
         errdefer gpa.free(fold_grads);
         const combo_buf = try gpa.alloc(u8, if (max_combos != 0) ds.n_rows else 0);
         errdefer gpa.free(combo_buf);
+        var max_slice: usize = scored_leaves * ctr_buckets;
+        for (cands) |c| max_slice = @max(max_slice, scored_leaves * c.nb);
+        const cached = try gpa.alloc(bool, all.len);
+        errdefer gpa.free(cached);
+        @memset(cached, false);
+        const scratch = try gpa.alloc(Cell, if (s.ordered) 0 else pool.workerCount() * max_slice);
+        errdefer gpa.free(scratch);
+        var sel: Selected = .{};
+        if (!s.ordered) sel = try Selected.init(gpa, ds.n_rows);
+        errdefer sel.deinit(gpa);
         return .{
             .gpa = gpa,
             .pool = pool,
@@ -431,6 +450,10 @@ pub const Builder = struct {
             .acc_den = ord.acc_den,
             .acc_off = ord.acc_off,
             .tail_grads = ord.tail_grads,
+            .sel = sel,
+            .cached = cached,
+            .scratch = scratch,
+            .max_slice = max_slice,
         };
     }
 
@@ -461,6 +484,9 @@ pub const Builder = struct {
         b.gpa.free(b.leaf_tmp);
         b.gpa.free(b.fold_grads);
         b.gpa.free(b.combo_buf);
+        b.sel.deinit(b.gpa);
+        b.gpa.free(b.cached);
+        b.gpa.free(b.scratch);
         b.* = undefined;
     }
 
@@ -476,6 +502,7 @@ pub const Builder = struct {
         scale_pos_weight: f32,
     ) !tree.Tree {
         const ds = b.ds;
+        const t_setup = prof.start();
         @memset(b.leaf, 0);
         var splits: [max_depth]Split = undefined;
         var depth: u32 = 0;
@@ -511,11 +538,16 @@ pub const Builder = struct {
         const sample_grads = if (b.s.ordered) b.tail_grads else search_grads;
         if (b.s.bootstrap != .none) b.sampleWeights(sample_grads);
         b.sigma = if (b.s.random_strength > 0) b.noiseScale(sample_grads) else 0;
+        prof.stop(.sym_setup, t_setup);
 
         defer b.dropCombos();
+        @memset(b.cached, false);
         while (depth < b.s.depth) {
             const n_leaves = @as(usize, 1) << @intCast(depth);
+            const t_combo = prof.start();
             try b.levelCombos(splits[0..depth], fold.order);
+            prof.stop(.sym_combo, t_combo);
+            const t_hist = prof.start();
             if (b.s.ordered) {
                 @memset(b.acc_num, 0);
                 @memset(b.acc_den, 0);
@@ -524,9 +556,12 @@ pub const Builder = struct {
                     b.pool.parallelFor(b.cands.len, &octx, OrderedCtx.run, 1);
                 }
             } else {
-                var hctx = HistCtx{ .b = b, .grads = search_grads, .n_leaves = n_leaves };
+                const side: ?bool = if (depth == 0) null else b.selectSide(search_grads, depth - 1);
+                var hctx = HistCtx{ .b = b, .grads = search_grads, .n_leaves = n_leaves, .side = side };
                 b.pool.parallelFor(b.cands.len, &hctx, HistCtx.run, 1);
             }
+            prof.stop(.sym_hist, t_hist);
+            const t_score = prof.start();
             var sctx = ScoreCtx{ .b = b, .n_leaves = n_leaves, .level = depth };
             b.pool.parallelFor(b.cands.len, &sctx, ScoreCtx.run, 1);
 
@@ -549,6 +584,7 @@ pub const Builder = struct {
                     win_score = s;
                 }
             }
+            prof.stop(.sym_score, t_score);
             const f = win orelse break;
             var sp: Split = .{ .cand = @intCast(f), .threshold = @intCast(b.best[f].threshold) };
             // Marked on choice, as CatBoost does: later levels of this tree see it as used, even
@@ -562,9 +598,11 @@ pub const Builder = struct {
             }
             splits[depth] = sp;
 
+            const t_split = prof.start();
             var actx = ApplySplit{ .b = b, .sp = sp, .bit = @intCast(depth) };
             b.pool.parallelFor(ds.n_rows, &actx, ApplySplit.run, 8192);
             depth += 1;
+            prof.stop(.sym_split, t_split);
 
             // CatBoost stops early when a split (any, not only the new one) separates nothing:
             // every pair of leaves differing only in its bit has an empty member. It is removed
@@ -580,12 +618,16 @@ pub const Builder = struct {
 
         // The model's leaves: membership on the averaging fold, whose online statistics may place a
         // row differently from the fold that chose the splits.
+        const t_leaves = prof.start();
         b.leaf_model = b.leaf;
         if (!(b.avg_alias and b.fold_k == 0)) {
             try b.assignLeaves(&b.avg, splits[0..depth], b.leaf_buf);
             b.leaf_model = b.leaf_buf;
         }
         try b.leafValues(depth, grads, raw, labels, objective, scale_pos_weight, b.leaf_model);
+        prof.stop(.sym_leaves, t_leaves);
+        const t_folds = prof.start();
+        defer prof.stop(.sym_folds, t_folds);
         // Every learning fold takes its own step, on its own membership.
         for (b.folds, 0..) |*fd, j| {
             if (fd.approx.len == 0 and fd.papprox.len == 0) continue;
@@ -602,6 +644,32 @@ pub const Builder = struct {
         b.prev_mean_leaf = sum_abs / @as(f64, @floatFromInt(n_leaves));
         b.iteration += 1;
         return b.toTree(splits[0..depth]);
+    }
+
+    /// CatBoost's `SetSmallestSideControl`: of the rows a histogram counts (nonzero weight), the
+    /// side of split bit `bit` with fewer of them (`true` = bit set; a tie takes it), compacted
+    /// into `sel` in ascending row order with the weighted derivatives the histograms add.
+    fn selectSide(b: *Builder, grads: []const hist.GradPair, bit: u32) bool {
+        const n = b.ds.n_rows;
+        const mask = @as(u16, 1) << @intCast(bit);
+        var cctx = SelectCtx{ .b = b, .grads = grads, .mask = mask, .side = false, .chunk = (n + select_chunks - 1) / select_chunks };
+        b.pool.parallelFor(select_chunks, &cctx, SelectCtx.count, 1);
+        var set: usize = 0;
+        var kept: usize = 0;
+        for (b.sel.chunk_set, b.sel.chunk_kept) |x, k| {
+            set += x;
+            kept += k;
+        }
+        cctx.side = !(set * 2 > kept);
+        // Each chunk's start in `sel`: the chunks before it, in order, on the chosen side.
+        var at: usize = 0;
+        for (b.sel.chunk_set, b.sel.chunk_kept, b.sel.chunk_at) |x, k, *o| {
+            o.* = at;
+            at += if (cctx.side) x else k - x;
+        }
+        b.sel.len = at;
+        b.pool.parallelFor(select_chunks, &cctx, SelectCtx.fill, 1);
+        return cctx.side;
     }
 
     /// Each prefix model's derivatives on its rows, and per row its own tail's (rows of the first
@@ -796,6 +864,13 @@ pub const Builder = struct {
         for (b.all[0..b.n_static]) |c| if (c.kind == .ctr) {
             max_uniq = @max(max_uniq, c.uniq);
         };
+        // The level's new projections, deduplicated in discovery order; their candidates are then
+        // built in parallel, each into its own slots, so the result does not depend on threads.
+        var projs: std.ArrayList([]tree.Part) = .empty;
+        defer {
+            for (projs.items) |x| if (x.len != 0) gpa.free(x);
+            projs.deinit(gpa);
+        }
         for (bases.items) |base| {
             var n_cats: usize = 0;
             var bits_part: usize = 0;
@@ -814,17 +889,34 @@ pub const Builder = struct {
                 proj[base.len] = .{ .kind = .cat, .feature = w };
                 std.sort.pdq(tree.Part, proj, {}, tree.Part.lessThan);
                 var dup = false;
-                var i = b.n_static;
-                while (i < n) : (i += n_ctr_types) dup = dup or partsEql(b.all[i].parts, proj);
+                for (projs.items) |x| dup = dup or partsEql(x, proj);
                 if (dup) continue;
-                std.debug.assert(n + n_ctr_types <= b.all.len);
-                try comboCands(gpa, b.ds, proj, order, b.all[n..][0..n_ctr_types]);
-                proj_owned = false; // the first candidate owns it; the rest borrow
-                max_uniq = @max(max_uniq, b.all[n].uniq);
-                n += n_ctr_types;
-                b.cands = b.all[0..n];
+                try projs.append(gpa, proj);
+                proj_owned = false;
             }
         }
+        std.debug.assert(n + projs.items.len * n_ctr_types <= b.all.len);
+        const errs = try gpa.alloc(?anyerror, projs.items.len);
+        defer gpa.free(errs);
+        var cctx = ComboCtx{ .gpa = gpa, .ds = b.ds, .order = order, .projs = projs.items, .out = b.all[n..], .errs = errs };
+        b.pool.parallelFor(projs.items.len, &cctx, ComboCtx.run, 1);
+        var first_err: ?anyerror = null;
+        for (errs) |e| if (first_err == null) {
+            first_err = e;
+        };
+        if (first_err) |e| {
+            // Built candidates own their projection; the failed ones' stay in `projs` to be freed.
+            for (errs, 0..) |x, i| if (x == null) {
+                freeCands(gpa, b.all[n + i * n_ctr_types ..][0..n_ctr_types]);
+                projs.items[i] = &.{};
+            };
+            return e;
+        }
+        for (projs.items, 0..) |*x, i| {
+            max_uniq = @max(max_uniq, b.all[n + i * n_ctr_types].uniq);
+            x.* = &.{}; // the first candidate owns it now
+        }
+        n += projs.items.len * n_ctr_types;
         b.max_uniq = max_uniq;
         b.cands = b.all[0..n];
         // Histogram layout for the combinations, after the static candidates'.
@@ -1099,38 +1191,84 @@ fn rowCtxBin(ctx: RowCtx, f: u32) data.BinIdx {
     return binAt(ctx.ds, f, ctx.r);
 }
 
-/// One CTR type's online buckets for a combination along `order` (by row), for a fold other than
-/// the one that chose it.
-fn comboOnline(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Part, t: u8, order: []const u32, col: []u8) !void {
-    const Counts = struct { good: u32 = 0, total: u32 = 0 };
-    var running: std.AutoHashMapUnmanaged(u64, Counts) = .empty;
-    defer running.deinit(gpa);
-    const key = struct {
-        fn f(p: []const tree.Part, d: *const Dataset, r: usize) u64 {
-            return tree.comboKey(p, RowCtx{ .ds = d, .r = r }, rowCtxBin);
-        }
-    }.f;
-    if (t < ctr_priors.len) {
-        for (0..ds.n_rows) |pos| {
-            const r = if (order.len == 0) pos else order[pos];
-            const gop = try running.getOrPut(gpa, key(proj, ds, r));
-            if (!gop.found_existing) gop.value_ptr.* = .{};
-            col[r] = bucketOf((@as(f32, @floatFromInt(gop.value_ptr.good)) + ctr_priors[t]) / (@as(f32, @floatFromInt(gop.value_ptr.total)) + 1));
-            gop.value_ptr.total += 1;
-            gop.value_ptr.good += @intFromBool(ds.labels[r] > 0.5);
+/// Each row's dense id for `proj` (0.. in order of first appearance by row) into `ids`, and every
+/// id's key, in id order, into `key_of`. When the parts' value combinations fit `direct_ids`, a row's
+/// mixed-radix code indexes a table; otherwise one hash lookup per row. Either way ids and keys are
+/// the same, and the key is computed once per id.
+fn comboIds(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Part, ids: []u32, key_of: *std.ArrayList(u64)) !void {
+    var space: usize = 1;
+    for (proj) |part| {
+        const card: usize = if (part.kind == .cat) ds.n_bins[part.feature] else 2;
+        space = std.math.mul(usize, space, card) catch std.math.maxInt(usize);
+    }
+    if (space <= direct_ids) {
+        const table = try gpa.alloc(u32, space);
+        defer gpa.free(table);
+        @memset(table, unseen_id);
+        for (ids, 0..) |*id, r| {
+            var code: usize = 0;
+            for (proj) |part| {
+                const bin = binAt(ds, part.feature, r);
+                code = switch (part.kind) {
+                    .cat => code * ds.n_bins[part.feature] + bin,
+                    .bin => code * 2 + @intFromBool(bin > part.value),
+                    .onehot => code * 2 + @intFromBool(bin == part.value),
+                };
+            }
+            if (table[code] == unseen_id) {
+                table[code] = @intCast(key_of.items.len);
+                try key_of.append(gpa, tree.comboKey(proj, RowCtx{ .ds = ds, .r = r }, rowCtxBin));
+            }
+            id.* = table[code];
         }
         return;
     }
-    for (0..ds.n_rows) |r| {
-        const gop = try running.getOrPut(gpa, key(proj, ds, r));
-        if (!gop.found_existing) gop.value_ptr.* = .{};
-        gop.value_ptr.total += 1;
+    var index: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    defer index.deinit(gpa);
+    for (ids, 0..) |*id, r| {
+        const k = tree.comboKey(proj, RowCtx{ .ds = ds, .r = r }, rowCtxBin);
+        const gop = try index.getOrPut(gpa, k);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(key_of.items.len);
+            try key_of.append(gpa, k);
+        }
+        id.* = gop.value_ptr.*;
     }
+}
+
+/// Largest value space `comboIds` indexes directly (4 MiB of u32 per projection being built).
+const direct_ids = 1 << 20;
+const unseen_id = std.math.maxInt(u32);
+
+/// One CTR type's online buckets for a combination along `order` (by row), for a fold other than
+/// the one that chose it.
+fn comboOnline(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Part, t: u8, order: []const u32, col: []u8) !void {
+    const ids = try gpa.alloc(u32, ds.n_rows);
+    defer gpa.free(ids);
+    var key_of: std.ArrayList(u64) = .empty;
+    defer key_of.deinit(gpa);
+    try comboIds(gpa, ds, proj, ids, &key_of);
+    const total = try gpa.alloc(u32, key_of.items.len);
+    defer gpa.free(total);
+    @memset(total, 0);
+    if (t < ctr_priors.len) {
+        const good = try gpa.alloc(u32, key_of.items.len);
+        defer gpa.free(good);
+        @memset(good, 0);
+        for (0..ds.n_rows) |pos| {
+            const r = if (order.len == 0) pos else order[pos];
+            const id = ids[r];
+            col[r] = bucketOf((@as(f32, @floatFromInt(good[id])) + ctr_priors[t]) / (@as(f32, @floatFromInt(total[id])) + 1));
+            total[id] += 1;
+            good[id] += @intFromBool(ds.labels[r] > 0.5);
+        }
+        return;
+    }
+    for (ids) |id| total[id] += 1;
     var largest: u32 = 0;
-    var it = running.valueIterator();
-    while (it.next()) |v| largest = @max(largest, v.total);
+    for (total) |x| largest = @max(largest, x);
     const den: f32 = @floatFromInt(largest + 1);
-    for (col, 0..) |*o, r| o.* = bucketOf(@as(f32, @floatFromInt(running.get(key(proj, ds, r)).?.total)) / den);
+    for (col, ids) |*o, id| o.* = bucketOf(@as(f32, @floatFromInt(total[id])) / den);
 }
 
 /// The four CTR candidates of a combination `proj` (owned by the first afterwards): each row's key,
@@ -1138,13 +1276,19 @@ fn comboOnline(gpa: std.mem.Allocator, ds: *const Dataset, proj: []const tree.Pa
 /// counts over every row.
 fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, order: []const u32, out: []Cand) !void {
     const n = ds.n_rows;
-    const keys = try gpa.alloc(u64, n);
-    defer gpa.free(keys);
-    for (keys, 0..) |*k, r| k.* = tree.comboKey(proj, RowCtx{ .ds = ds, .r = r }, rowCtxBin);
+    const ids = try gpa.alloc(u32, n);
+    defer gpa.free(ids);
+    var key_of: std.ArrayList(u64) = .empty;
+    defer key_of.deinit(gpa);
+    try comboIds(gpa, ds, proj, ids, &key_of);
+    const uniq: u32 = @intCast(key_of.items.len);
+    const good = try gpa.alloc(u32, uniq);
+    defer gpa.free(good);
+    @memset(good, 0);
+    const total = try gpa.alloc(u32, uniq);
+    defer gpa.free(total);
+    @memset(total, 0);
 
-    const Counts = struct { good: u32 = 0, total: u32 = 0 };
-    var running: std.AutoHashMapUnmanaged(u64, Counts) = .empty;
-    defer running.deinit(gpa);
     var made: usize = 0;
     errdefer for (out[0..made]) |c| {
         if (c.col.len != 0) gpa.free(c.col);
@@ -1159,40 +1303,38 @@ fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, ord
     // Borders, online along `order`.
     for (0..n) |pos| {
         const r = if (order.len == 0) pos else order[pos];
-        const k = keys[r];
-        const gop = try running.getOrPut(gpa, k);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
-        const cnt = gop.value_ptr.*;
-        for (ctr_priors, 0..) |prior, t| {
-            out[t].col[r] = bucketOf((@as(f32, @floatFromInt(cnt.good)) + prior) / (@as(f32, @floatFromInt(cnt.total)) + 1));
-        }
-        gop.value_ptr.total += 1;
-        gop.value_ptr.good += @intFromBool(ds.labels[r] > 0.5);
+        const id = ids[r];
+        const g: f32 = @floatFromInt(good[id]);
+        const tot: f32 = @floatFromInt(total[id]);
+        for (ctr_priors, 0..) |prior, t| out[t].col[r] = bucketOf((g + prior) / (tot + 1));
+        total[id] += 1;
+        good[id] += @intFromBool(ds.labels[r] > 0.5);
     }
-    // `running` now holds the full counts: Counter and the stored tables.
+    // `total` and `good` now hold the full counts: Counter and the stored tables.
     var largest: u32 = 0;
-    var it = running.valueIterator();
-    while (it.next()) |v| largest = @max(largest, v.total);
+    for (total) |x| largest = @max(largest, x);
     const den: f32 = @floatFromInt(largest + 1);
-    for (keys, 0..) |k, r| out[ctr_priors.len].col[r] = bucketOf(@as(f32, @floatFromInt(running.get(k).?.total)) / den);
+    for (out[ctr_priors.len].col, ids) |*o, id| o.* = bucketOf(@as(f32, @floatFromInt(total[id])) / den);
 
-    const uniq: u32 = running.count();
-    const sorted = try gpa.alloc(u64, uniq);
-    defer gpa.free(sorted);
-    var ki = running.keyIterator();
-    var i: usize = 0;
-    while (ki.next()) |k| : (i += 1) sorted[i] = k.*;
-    std.sort.pdq(u64, sorted, {}, std.sort.asc(u64));
+    // Ids sorted by key give the tables' order.
+    const by_key = try gpa.alloc(u32, uniq);
+    defer gpa.free(by_key);
+    for (by_key, 0..) |*x, i| x.* = @intCast(i);
+    std.sort.pdq(u32, by_key, key_of.items, struct {
+        fn lt(keys: []const u64, x: u32, y: u32) bool {
+            return keys[x] < keys[y];
+        }
+    }.lt);
     for (out, 0..) |*c, t| {
         c.uniq = uniq;
-        c.keys = try gpa.dupe(u64, sorted);
+        c.keys = try gpa.alloc(u64, uniq);
         c.kbuckets = try gpa.alloc(u8, uniq);
-        for (sorted, c.kbuckets) |k, *bk| {
-            const cnt = running.get(k).?;
+        for (by_key, c.keys, c.kbuckets) |id, *k, *bk| {
+            k.* = key_of.items[id];
             bk.* = if (t < ctr_priors.len)
-                bucketOf((@as(f32, @floatFromInt(cnt.good)) + ctr_priors[t]) / (@as(f32, @floatFromInt(cnt.total)) + 1))
+                bucketOf((@as(f32, @floatFromInt(good[id])) + ctr_priors[t]) / (@as(f32, @floatFromInt(total[id])) + 1))
             else
-                bucketOf(@as(f32, @floatFromInt(cnt.total)) / den);
+                bucketOf(@as(f32, @floatFromInt(total[id])) / den);
         }
         c.unseen = if (t < ctr_priors.len) bucketOf(ctr_priors[t]) else 0;
     }
@@ -1200,6 +1342,27 @@ fn comboCands(gpa: std.mem.Allocator, ds: *const Dataset, proj: []tree.Part, ord
     out[0].owns_parts = true;
     for (out[1..]) |*c| c.parts = out[0].parts;
 }
+
+/// One task per new projection: its four candidates into `out[i * n_ctr_types ..]`.
+const ComboCtx = struct {
+    gpa: std.mem.Allocator,
+    ds: *const Dataset,
+    order: []const u32,
+    projs: []const []tree.Part,
+    out: []Cand,
+    errs: []?anyerror,
+
+    fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *ComboCtx = @ptrCast(@alignCast(ctx));
+        for (begin..end) |i| {
+            self.errs[i] = null;
+            comboCands(self.gpa, self.ds, self.projs[i], self.order, self.out[i * n_ctr_types ..][0..n_ctr_types]) catch |e| {
+                self.errs[i] = e;
+            };
+        }
+    }
+};
 
 pub fn freeCands(gpa: std.mem.Allocator, cands: []Cand) void {
     for (cands) |c| c.freeOwned(gpa);
@@ -1378,33 +1541,170 @@ inline fn binAt(ds: *const Dataset, f: usize, r: usize) data.BinIdx {
     return if (ds.isWide(f)) ds.columnWide(f)[r] else ds.columnNarrow(f)[r];
 }
 
+/// Fixed chunk count for `selectSide`, so `sel` is the same at any thread count.
+const select_chunks = 64;
+
+const Selected = struct {
+    row: []u32 = &.{},
+    g: []f64 = &.{},
+    n: []f64 = &.{},
+    h: []f64 = &.{},
+    len: usize = 0,
+    chunk_set: []usize = &.{},
+    chunk_kept: []usize = &.{},
+    chunk_at: []usize = &.{},
+
+    fn init(gpa: std.mem.Allocator, n: usize) !Selected {
+        var x: Selected = .{};
+        errdefer x.deinit(gpa);
+        x.row = try gpa.alloc(u32, n);
+        x.g = try gpa.alloc(f64, n);
+        x.n = try gpa.alloc(f64, n);
+        x.h = try gpa.alloc(f64, n);
+        x.chunk_set = try gpa.alloc(usize, select_chunks);
+        x.chunk_kept = try gpa.alloc(usize, select_chunks);
+        x.chunk_at = try gpa.alloc(usize, select_chunks);
+        return x;
+    }
+
+    fn deinit(x: *Selected, gpa: std.mem.Allocator) void {
+        if (x.row.len != 0) gpa.free(x.row);
+        if (x.g.len != 0) gpa.free(x.g);
+        if (x.n.len != 0) gpa.free(x.n);
+        if (x.h.len != 0) gpa.free(x.h);
+        if (x.chunk_set.len != 0) gpa.free(x.chunk_set);
+        if (x.chunk_kept.len != 0) gpa.free(x.chunk_kept);
+        if (x.chunk_at.len != 0) gpa.free(x.chunk_at);
+        x.* = .{};
+    }
+};
+
+const SelectCtx = struct {
+    b: *Builder,
+    grads: []const hist.GradPair,
+    mask: u16,
+    side: bool,
+    chunk: usize,
+
+    /// Chunk `c`'s rows are `[start(c), start(c + 1))`.
+    fn start(self: *const SelectCtx, c: usize) usize {
+        return @min(self.b.ds.n_rows, c * self.chunk);
+    }
+
+    fn count(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SelectCtx = @ptrCast(@alignCast(ctx));
+        const b = self.b;
+        const w = b.weights;
+        for (begin..end) |c| {
+            const lo = self.start(c);
+            const hi = self.start(c + 1);
+            var set: usize = 0;
+            var kept: usize = 0;
+            for (lo..hi) |r| {
+                if (w.len != 0 and w[r] == 0) continue;
+                kept += 1;
+                set += @intFromBool(b.leaf[r] & self.mask != 0);
+            }
+            b.sel.chunk_set[c] = set;
+            b.sel.chunk_kept[c] = kept;
+        }
+    }
+
+    fn fill(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
+        _ = worker;
+        const self: *SelectCtx = @ptrCast(@alignCast(ctx));
+        const b = self.b;
+        const w = b.weights;
+        const sel = &b.sel;
+        for (begin..end) |c| {
+            const lo = self.start(c);
+            const hi = self.start(c + 1);
+            var at = sel.chunk_at[c];
+            for (lo..hi) |r| {
+                const s: f64 = if (w.len != 0) w[r] else 1;
+                if (s == 0) continue;
+                if ((b.leaf[r] & self.mask != 0) != self.side) continue;
+                const gp = self.grads[r];
+                sel.row[at] = @intCast(r);
+                sel.g[at] = s * gp.g;
+                sel.n[at] = s;
+                sel.h[at] = s * gp.h;
+                at += 1;
+            }
+        }
+    }
+};
+
 /// Per-feature histograms of the current level: each task owns one feature's slice, rows in order,
-/// so the sums are the same at any thread count.
+/// so the sums are the same at any thread count. At the root, and for a combination (new each
+/// level), every row is counted; otherwise only the rows of the newest split's smaller side, and
+/// the other side is the level above's histogram minus them, as CatBoost does (`FixUpStats`).
 const HistCtx = struct {
     b: *Builder,
     grads: []const hist.GradPair,
     n_leaves: usize,
+    /// The side `sel` holds, below the root.
+    side: ?bool,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *HistCtx = @ptrCast(@alignCast(ctx));
         const b = self.b;
         for (begin..end) |f| {
-            const cand = b.cands[f];
-            const nb: usize = cand.nb;
-            const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
-            @memset(slice, .{});
-            const w = b.weights;
-            for (b.leaf, self.grads, 0..) |l, gp, r| {
-                const s: f64 = if (w.len != 0) w[r] else 1;
-                if (s == 0) continue;
-                const bin: usize = if (cand.kind == .ctr) cand.col[r] else binAt(b.ds, cand.feature, r);
-                const c = &slice[@as(usize, l) * nb + bin];
-                c.g += s * gp.g;
-                c.n += s;
-                c.h += s * gp.h;
+            if (self.side) |side| {
+                if (b.cached[f]) {
+                    self.smallerSide(f, side);
+                    continue;
+                }
             }
+            self.allRows(f);
+            if (f < b.n_static) b.cached[f] = true;
         }
+    }
+
+    fn allRows(self: *HistCtx, f: usize) void {
+        const b = self.b;
+        const cand = b.cands[f];
+        const nb: usize = cand.nb;
+        const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
+        @memset(slice, .{});
+        const w = b.weights;
+        for (b.leaf, self.grads, 0..) |l, gp, r| {
+            const s: f64 = if (w.len != 0) w[r] else 1;
+            if (s == 0) continue;
+            const bin: usize = if (cand.kind == .ctr) cand.col[r] else binAt(b.ds, cand.feature, r);
+            const c = &slice[@as(usize, l) * nb + bin];
+            c.g += s * gp.g;
+            c.n += s;
+            c.h += s * gp.h;
+        }
+    }
+
+    fn smallerSide(self: *HistCtx, f: usize, side: bool) void {
+        const b = self.b;
+        const cand = b.cands[f];
+        const nb: usize = cand.nb;
+        const half = self.n_leaves / 2 * nb;
+        const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
+        // The level above's histogram is the lower half; its leaf l splits into l and l + half.
+        if (!side) @memcpy(slice[half..], slice[0..half]);
+        const fresh = if (side) slice[half..] else slice[0..half];
+        const other = if (side) slice[0..half] else slice[half..];
+        @memset(fresh, .{});
+        const sel = &b.sel;
+        // An index loop: a four-slice `for` here crashed the Debug tests (the stack walker read a
+        // bad frame) though LLVM Debug, ReleaseSafe and valgrind found nothing; suspected
+        // self-hosted backend bug, not reduced to a minimal case.
+        for (0..sel.len) |i| {
+            const r = sel.row[i];
+            const bin: usize = if (cand.kind == .ctr) cand.col[r] else binAt(b.ds, cand.feature, r);
+            const c = &slice[@as(usize, b.leaf[r]) * nb + bin];
+            c.g += sel.g[i];
+            c.n += sel.n[i];
+            c.h += sel.h[i];
+        }
+        for (other, fresh) |*o, x| o.* = o.sub(x);
     }
 };
 
@@ -1415,9 +1715,8 @@ const ScoreCtx = struct {
     level: u32,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
-        _ = worker;
         const self: *ScoreCtx = @ptrCast(@alignCast(ctx));
-        for (begin..end) |f| self.b.best[f] = self.feature(f);
+        for (begin..end) |f| self.b.best[f] = self.feature(f, worker);
     }
 
     /// One leaf side's contribution to the level's score.
@@ -1439,16 +1738,18 @@ const ScoreCtx = struct {
         };
     }
 
-    fn feature(self: *ScoreCtx, f: usize) Builder.Best {
+    fn feature(self: *ScoreCtx, f: usize, worker: usize) Builder.Best {
         const b = self.b;
         const nb: usize = b.cands[f].nb;
         var best: Builder.Best = .{ .score = -std.math.inf(f64), .threshold = 0 };
         if (nb < 2) return best;
         if (b.s.ordered) return self.fromAccumulators(f);
         if (b.cands[f].kind == .onehot) return self.oneHot(f);
-        const slice = b.cells[b.off[f]..][0 .. self.n_leaves * nb];
-        // Each leaf's bins become running sums in place (rebuilt every level): `slice[l*nb + k]`
-        // is then the left side of threshold k and the last cell the leaf's total.
+        // Each leaf's bins as running sums, in this worker's scratch (the raw histogram is the
+        // next level's parent): `slice[l*nb + k]` is the left side of threshold k and the last
+        // cell the leaf's total.
+        const slice = b.scratch[worker * b.max_slice ..][0 .. self.n_leaves * nb];
+        @memcpy(slice, b.cells[b.off[f]..][0 .. self.n_leaves * nb]);
         for (0..self.n_leaves) |l| {
             const cells = slice[l * nb ..][0..nb];
             for (1..nb) |i| cells[i] = cells[i - 1].add(cells[i]);
