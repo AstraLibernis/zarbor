@@ -60,26 +60,32 @@ def make_data():
     # The categoricals carry signal, so their statistics are chosen as splits.
     fc = f + 0.8 * (cats.c3 == "z") + 0.05 * cats.c40.str[1:].astype(int) - 1.0
     ycat = (rng.random(N) < 1 / (1 + np.exp(-fc))).astype(int)
-    return X, y, yreg.to_numpy(), cats, ycat
+    # Four classes, from four noisy scores of the same ratings: unequal sizes, overlapping.
+    s4 = np.stack([0.5 * X.r0 - 0.3 * X.r3, 0.4 * X.r5 + 0.2 * X.r1 * (X.r7 > 2), 0.3 * X.r9 - 0.2 * X.r2 + 0.4,
+                   0.25 * X.r11 + 0.2 * (X.r4 < 2)], axis=1) + rng.gumbel(scale=0.7, size=(N, 4))
+    ymc = s4.argmax(axis=1)
+    return X, y, yreg.to_numpy(), cats, ycat, ymc
 
 
-X, y, yreg, CATS, ycat = make_data()
+X, y, yreg, CATS, ycat, ymc = make_data()
 pd.concat([X, pd.Series(y, name="y")], axis=1).to_csv(WORK / "disc.csv", index=False)
 pd.concat([X, pd.Series(yreg, name="yreg")], axis=1).to_csv(WORK / "reg.csv", index=False)
 XC = pd.concat([X.iloc[:, :4], CATS], axis=1)
 pd.concat([XC, pd.Series(ycat, name="y")], axis=1).to_csv(WORK / "cat.csv", index=False)
+pd.concat([X, pd.Series(ymc, name="ymc")], axis=1).to_csv(WORK / "multi.csv", index=False)
 MEAN = y.mean()
 BASE_MARGIN = float(np.log(MEAN / (1 - MEAN)))
 
 
-def zarbor(csv, label, flags):
+def zarbor(csv, label, flags, cols=1):
     model, out = WORK / "z.zm", WORK / "z.csv"
     for cmd in ([Z, str(WORK / csv), f"--label={label}", "--valid-frac=0", "--verbose_eval=0", f"--save={model}", *flags],
                 [Z, "predict", str(WORK / csv), f"--model={model}", f"--out={out}"]):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd[:3])} failed:\n{r.stdout[-600:]}{r.stderr[-600:]}")
-    return pd.read_csv(out).iloc[:, -1].to_numpy()
+    pred = pd.read_csv(out)
+    return pred.iloc[:, -1].to_numpy() if cols == 1 else pred.iloc[:, -cols:].to_numpy()
 
 
 FAILED = []
@@ -154,6 +160,27 @@ def xgb_scale_pos_weight():
     report("xgb scale_pos_weight 3, 100 trees", z, xgb_pred(dict(eta=0.1, max_depth=6, scale_pos_weight=3), 100, base=MEAN))
 
 
+# Multiclass: one tree per class per round, XGBoost's `2 p (1 - p)` hessian and its centred
+# per-class starting scores (estimated by XGBoost itself, as zarbor does).
+def xgb_multi(params, rounds):
+    p = dict(objective="multi:softprob", num_class=4, tree_method="hist", max_bin=256, nthread=16, seed=0, **params)
+    return xgb.train(p, xgb.DMatrix(X, ymc), rounds).predict(xgb.DMatrix(X))
+
+
+@case
+def xgb_multiclass():
+    z = zarbor("multi.csv", "ymc", XZ + ["--objective=softmax", "--n_rounds=100", "--max_depth=6", "--learning_rate=0.1"], cols=4)
+    report("xgb multiclass, 4 classes, 100 rounds", z.ravel(), xgb_multi(dict(eta=0.1, max_depth=6), 100).ravel())
+
+
+@case
+def xgb_multiclass_regularised():
+    z = zarbor("multi.csv", "ymc", XZ + ["--objective=softmax", "--n_rounds=40", "--max_depth=4", "--learning_rate=0.3",
+                                        "--lambda=3", "--alpha=0.5", "--min_child_weight=5", "--min_split_gain=0.5"], cols=4)
+    report("xgb multiclass, L1 + L2 + gamma + mcw, 40 rounds", z.ravel(),
+           xgb_multi(dict(eta=0.3, max_depth=4, reg_lambda=3.0, reg_alpha=0.5, min_child_weight=5, gamma=0.5), 40).ravel())
+
+
 # ---- LightGBM, leaf-wise: its binning, no row-count floor (it estimates row counts) ------------
 LZ = ["--bin_policy=greedy", "--grow_policy=lossguide", "--max_depth=0", "--max_leaves=31", "--min_child_samples=0"]
 
@@ -182,6 +209,18 @@ def lgb_15_leaves():
     lz = [f for f in LZ if not f.startswith("--max_leaves")] + ["--max_leaves=15"]
     z = zarbor("disc.csv", "y", lz + ["--n_rounds=50", "--learning_rate=0.1"])
     report("lgb 50 trees 15 leaves", z, lgb_pred(dict(learning_rate=0.1, num_leaves=15), 50))
+
+
+# LightGBM's multiclass hessian is `K / (K - 1) p (1 - p)`; its starting scores are the class
+# log-priors without XGBoost's centring, which changes no probability.
+@case
+def lgb_multiclass():
+    z = zarbor("multi.csv", "ymc", LZ + ["--objective=softmax", "--softmax_hessian=lightgbm", "--n_rounds=10",
+                                        "--learning_rate=0.1"], cols=4)
+    p = dict(objective="multiclass", num_class=4, max_bin=255, num_threads=16, seed=0, verbose=-1, max_depth=-1,
+             num_leaves=31, min_data_in_leaf=0, min_sum_hessian_in_leaf=1.0, lambda_l2=1.0, learning_rate=0.1)
+    ref = lgb.train(p, lgb.Dataset(X, ymc), 10).predict(X)
+    report("lgb multiclass, 4 classes, 10 rounds", z.ravel(), ref.ravel())
 
 
 # ---- CatBoost, symmetric trees: plain, file order, no sampling or noise -----------------------

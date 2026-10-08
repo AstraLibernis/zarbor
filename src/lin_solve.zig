@@ -66,6 +66,7 @@ const EvalCtx = struct {
                         r = zi - y;
                         if (self.want_loss) l += 0.5 * r * r;
                     },
+                    .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
                 }
                 self.resid[i] = @floatCast(r);
                 rs += r;

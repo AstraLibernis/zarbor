@@ -77,6 +77,12 @@ from the label (strings or integers), as now for binary.
 **Stages.** 1a boosting + labels + format + metrics; 1b linear; 1c vector leaves (symmetric
 trees, then the forest).
 
+**Progress.** 1a done 2026-10-08: depthwise and lossguide boosting, labels (text and integer),
+model format 6, multiclass log loss and accuracy, `predict`/`cv`/`tune`, stratified folds;
+exact parity with XGBoost and LightGBM. Refused for now with softmax: GOSS, linear leaves
+(their multiclass rules are unchecked), `scale_pos_weight`, symmetric trees, the forest and the
+linear model.
+
 **Done when.**
 - XGBoost `multi:softprob` and LightGBM `multiclass`: exact parity on a synthetic 4-class set.
 - scikit-learn multinomial logistic: objective equal at the optimum, as for binary.

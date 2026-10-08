@@ -159,8 +159,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try drops.append(gpa, name);
     }
 
-    var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
+    var enc = try data.LabelEncoder.forObjective(gpa, &frame, label_col, pos_label, cfg.objective());
     defer enc.deinit();
+    // Softmax: the label's classes are the model's, fixed before any fold or split can miss one.
+    if (cfg.objective() == .softmax) cfg.gbdt.num_class = @intCast(enc.classes.len);
 
     // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
     if (cfg.bin.bin_policy == .auto) {
@@ -200,16 +202,16 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
             \\
             \\
         , .{
-            path,                                                                                             full.n_rows,
-            full.n_features,                                                                                  target,
-            n_folds,                                                                                          fold_seed,
-            if (group_col != null) ", grouped" else if (cfg.objective() == .logistic) ", stratified" else "", pool.workerCount(),
-            @tagName(builtin.mode),                                                                           @divTrunc(t_bin - t0, 1_000_000),
+            path,                                                                                 full.n_rows,
+            full.n_features,                                                                      target,
+            n_folds,                                                                              fold_seed,
+            if (group_col != null) ", grouped" else if (cfg.classifies()) ", stratified" else "", pool.workerCount(),
+            @tagName(builtin.mode),                                                               @divTrunc(t_bin - t0, 1_000_000),
         });
         try out.flush();
     }
 
-    const oof = try gpa.alloc(f32, full.n_rows);
+    const oof = try gpa.alloc(f32, full.n_rows * cfg.width());
     defer gpa.free(oof);
 
     // Repeats loop *outside* the read and the bin, which is the whole point:
@@ -236,7 +238,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         const fold_of = if (groups) |g|
             try assignGroupFolds(gpa, g, n_folds, seed)
         else
-            try assignFolds(gpa, full.labels, n_folds, seed, cfg.objective() == .logistic);
+            try assignFolds(gpa, full.labels, n_folds, seed, cfg.classifies());
         var keep_this = false;
         defer if (!keep_this) gpa.free(fold_of);
 
@@ -300,15 +302,22 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         const oof_w = keep_oof;
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
-        try buf.appendSlice(gpa, "fold,label,prediction\n");
-        var line: [128]u8 = undefined;
+        const width = cfg.width();
+        var line: [512]u8 = undefined;
+        if (width == 1) {
+            try buf.appendSlice(gpa, "fold,label,prediction\n");
+        } else {
+            // Softmax: one probability column per class, named by the class.
+            try buf.appendSlice(gpa, "fold,label");
+            for (enc.classes) |c| try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, ",prediction_{s}", .{c}));
+            try buf.appendSlice(gpa, "\n");
+        }
         if (repeats > 1) try out.writeAll("note    --oof is the first repeat only\n");
-        for (oof_w, full.labels, fold_of) |p, y, k|
-            try buf.appendSlice(gpa, try std.fmt.bufPrint(
-                &line,
-                "{d},{d},{d:.8}\n",
-                .{ k, y, p },
-            ));
+        for (full.labels, fold_of, 0..) |y, k, row| {
+            try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{d},{d}", .{ k, y }));
+            for (oof_w[row * width ..][0..width]) |p| try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, ",{d:.8}", .{p}));
+            try buf.appendSlice(gpa, "\n");
+        }
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = op, .data = buf.items });
         try out.print("wrote   {s}\n", .{op});
     }

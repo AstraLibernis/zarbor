@@ -29,8 +29,12 @@ Machine: Ryzen 7 9800X3D, 16 threads, Fedora 44, ReleaseFast builds.
 ## 1. Exact parity: the same trees
 
 **Rerun it:** `python bench/parity/parity.py` (42 s; exits non-zero on any failure) runs the
-core cases on seeded synthetic data. All 12 pass: XGBoost to 500 trees, LightGBM to 30 trees
-at 31 leaves and 50 at 15, CatBoost to 300 trees, with ordered boosting and target statistics.
+core cases on seeded synthetic data. All 15 pass: XGBoost to 500 trees, LightGBM to 30 trees
+at 31 leaves and 50 at 15, CatBoost to 300 trees, with ordered boosting and target statistics,
+and multiclass: 4 classes against XGBoost `multi:softprob` (100 rounds, 400 trees, max
+difference 7.1e-7; and 40 rounds with L1, L2, gamma and `min_child_weight`) and LightGBM
+`multiclass` (10 rounds with `--softmax_hessian=lightgbm`, 6.0e-7). Using the wrong hessian
+form against XGBoost misses by 0.32, so the cases do discriminate.
 The tables below come from the original harness on competition data.
 
 **Method.** Compare predictions row for row on data where binning cannot differ: 100,000

@@ -41,6 +41,8 @@ pub const GossRank = enum {
     gradient_hessian,
 };
 
+pub const SoftmaxHessian = enum { xgboost, lightgbm };
+
 /// Everything gradient boosting needs; the trees' own settings are in `tree`.
 pub const Params = struct {
     /// Boosting rounds (trees).
@@ -51,6 +53,11 @@ pub const Params = struct {
     objective: Objective = .logistic,
     /// Multiplier on positive-class gradients; >1 upweights an imbalanced minority.
     scale_pos_weight: f32 = 1.0,
+    /// Classes under `objective = softmax`; set from the label's classes, not by hand.
+    num_class: u32 = 0,
+    /// Softmax hessian: XGBoost's `2 p (1 - p)` or LightGBM's `K / (K - 1) p (1 - p)`. The two
+    /// agree at two classes; above, they give different trees, so parity with either needs its own.
+    softmax_hessian: SoftmaxHessian = .xgboost,
     /// Row-selection strategy. `goss` is LightGBM's; `uniform` is XGBoost's.
     sampling: Sampling = .uniform,
     /// GOSS ranking key: the paper's `|g|` (measures better here) or LightGBM's
@@ -72,6 +79,14 @@ pub const Params = struct {
 
     pub fn validate(p: Params) !void {
         if (p.n_rounds == 0) return error.NoRounds;
+        if (p.objective == .softmax) {
+            if (p.num_class < 2) return error.SoftmaxNeedsClasses;
+            // Not yet with softmax (docs/PLAN.md milestone 1): each needs its own multiclass rule.
+            if (p.tree.grow_policy == .symmetric) return error.SoftmaxSymmetricUnsupported;
+            if (p.sampling == .goss) return error.SoftmaxGossUnsupported;
+            if (p.tree.linear_leaves) return error.SoftmaxLinearLeavesUnsupported;
+            if (p.scale_pos_weight != 1) return error.ScalePosWeightNeedsBinary;
+        }
         try p.tree.validate();
         // With replacement a row's gradient counts more than once, meaningless when
         // next round's gradient comes from one accumulated score per row.
@@ -96,26 +111,37 @@ pub const Model = struct {
     base_score: f32,
     objective: Objective,
     n_features: usize,
+    /// Softmax: classes, and each class's starting raw score (owned). Tree `i` belongs to class
+    /// `i % num_class`. Otherwise 1 and empty.
+    num_class: u32 = 1,
+    class_base: []f32 = &.{},
 
     pub fn deinit(m: *Model) void {
         for (m.trees.items) |*t| t.deinit(m.gpa);
         m.trees.deinit(m.gpa);
+        if (m.class_base.len != 0) m.gpa.free(m.class_base);
         m.* = undefined;
     }
 
-    /// Raw scores (log-odds for logistic) for every row of `ds`.
+    /// Scores per row: `num_class` under softmax, else 1. Outputs are row-major,
+    /// `out[r * width + c]`.
+    pub fn width(m: *const Model) usize {
+        return m.objective.width(m.num_class);
+    }
+
+    /// Raw scores (log-odds for logistic, per-class scores for softmax) for every row of `ds`.
     pub fn predictRaw(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
         m.predictScaled(pool, ds, out, false);
     }
 
-    /// Natural-scale predictions: probabilities for logistic, raw for regression. The sigmoid runs
-    /// in the workers, as `model.zig` does it, not in a serial pass after them.
+    /// Natural-scale predictions: probabilities for logistic and softmax, raw for regression. The
+    /// link runs in the workers, as `model.zig` does it, not in a serial pass after them.
     pub fn predict(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32) void {
-        m.predictScaled(pool, ds, out, m.objective == .logistic);
+        m.predictScaled(pool, ds, out, m.objective != .squared_error);
     }
 
     fn predictScaled(m: *const Model, pool: *Pool, ds: *const Dataset, out: []f32, prob: bool) void {
-        std.debug.assert(out.len == ds.n_rows);
+        std.debug.assert(out.len == ds.n_rows * m.width());
         var ctx = PredictCtx{ .m = m, .ds = ds, .out = out, .prob = prob };
         pool.parallelFor(ds.n_rows, &ctx, PredictCtx.run, 2048);
     }
@@ -131,11 +157,23 @@ const PredictCtx = struct {
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *PredictCtx = @ptrCast(@alignCast(ctx));
+        const m = self.m;
+        const k = m.width();
+        if (k > 1) {
+            const out = self.out[begin * k .. end * k];
+            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], m.class_base);
+            for (m.trees.items, 0..) |t, i| {
+                const c = i % k;
+                for (begin..end) |r| out[(r - begin) * k + c] += t.predictBinned(self.ds, r);
+            }
+            if (self.prob) for (begin..end) |r| softmaxRow(out[(r - begin) * k ..][0..k]);
+            return;
+        }
         const out = self.out[begin..end];
         // Trees outer, rows inner; see the note in `model.zig`'s TreeCtx.
         // Bit-exact: same trees, same order, same f32 rounding per row.
-        @memset(out, self.m.base_score);
-        for (self.m.trees.items) |t| {
+        @memset(out, m.base_score);
+        for (m.trees.items) |t| {
             for (out, begin..) |*o, r| o.* += t.predictBinned(self.ds, r);
         }
         if (self.prob) for (out) |*v| {
@@ -143,6 +181,19 @@ const PredictCtx = struct {
         };
     }
 };
+
+/// One row's raw class scores to probabilities, in place: shifted by the largest so no exp
+/// overflows, summed in f64.
+pub fn softmaxRow(row: []f32) void {
+    var top = row[0];
+    for (row[1..]) |v| top = @max(top, v);
+    var sum: f64 = 0;
+    for (row) |*v| {
+        v.* = @exp(v.* - top);
+        sum += v.*;
+    }
+    for (row) |*v| v.* = @floatCast(@as(f64, v.*) / sum);
+}
 
 pub inline fn sigmoid(x: f32) f32 {
     return 1.0 / (1.0 + @exp(-x));
@@ -193,6 +244,9 @@ const GradCtx = struct {
     grads: []hist.GradPair,
     scale_pos_weight: f32,
     objective: Objective,
+    /// Softmax: classes, and the hessian form. `grads` is then class-major, `grads[c * n + r]`.
+    num_class: usize = 1,
+    softmax_hessian: SoftmaxHessian = .xgboost,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -203,6 +257,7 @@ const GradCtx = struct {
     }
 
     fn runFor(self: *GradCtx, comptime obj: Objective, begin: usize, end: usize) void {
+        if (obj == .softmax) return self.softmaxRows(begin, end);
         var i = begin;
         if (obj == .logistic) {
             const one: F8 = @splat(1.0);
@@ -236,6 +291,46 @@ const GradCtx = struct {
                 .squared_error => {
                     self.grads[i] = .{ .g = self.raw[i] - y, .h = 1.0 };
                 },
+                .softmax => unreachable,
+            }
+        }
+    }
+
+    /// Every class's gradient for rows `[begin, end)`, computed as the reference the hessian
+    /// form names computes it: XGBoost in f32 (`multiclass_obj.cu`, including its running max
+    /// starting at the smallest positive float), LightGBM in f64 (`Common::Softmax`).
+    fn softmaxRows(self: *GradCtx, begin: usize, end: usize) void {
+        const k = self.num_class;
+        const n = self.labels.len;
+        for (begin..end) |r| {
+            const row = self.raw[r * k ..][0..k];
+            const y: usize = @intFromFloat(self.labels[r]);
+            switch (self.softmax_hessian) {
+                .xgboost => {
+                    var wmax: f32 = std.math.floatMin(f32);
+                    for (row) |v| wmax = @max(v, wmax);
+                    var wsum: f64 = 0;
+                    for (row) |v| wsum += @exp(v - wmax);
+                    for (row, 0..) |v, c| {
+                        const p: f32 = @exp(v - wmax) / @as(f32, @floatCast(wsum));
+                        const h = @max(2.0 * p * (1.0 - p), 1e-16);
+                        self.grads[c * n + r] = .{ .g = if (c == y) p - 1.0 else p, .h = h };
+                    }
+                },
+                .lightgbm => {
+                    var wmax: f64 = row[0];
+                    for (row[1..]) |v| wmax = @max(@as(f64, v), wmax);
+                    var wsum: f64 = 0;
+                    for (row) |v| wsum += @exp(@as(f64, v) - wmax);
+                    const factor = @as(f64, @floatFromInt(k)) / (@as(f64, @floatFromInt(k)) - 1.0);
+                    for (row, 0..) |v, c| {
+                        const p = @exp(@as(f64, v) - wmax) / wsum;
+                        self.grads[c * n + r] = .{
+                            .g = @floatCast(if (c == y) p - 1.0 else p),
+                            .h = @floatCast(factor * p * (1.0 - p)),
+                        };
+                    }
+                },
             }
         }
     }
@@ -251,6 +346,9 @@ const ApplyCtx = struct {
     spans: []const tree.LeafSpan,
     rows: []const u32,
     raw: []f32,
+    /// Row r's score is `raw[r * stride + off]`: one class's column under softmax.
+    stride: usize = 1,
+    off: usize = 0,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
@@ -268,7 +366,7 @@ const ApplyCtx = struct {
         while (i < end) : (si += 1) {
             const s = spans[si];
             const stop = @min(s.end, end);
-            for (self.rows[i..stop]) |r| self.raw[r] += s.weight;
+            for (self.rows[i..stop]) |r| self.raw[r * self.stride + self.off] += s.weight;
             i = @max(i, stop);
         }
     }
@@ -285,12 +383,14 @@ const ApplyAllCtx = struct {
     t: *const tree.Tree,
     ds: *const Dataset,
     raw: []f32,
+    stride: usize = 1,
+    off: usize = 0,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ApplyAllCtx = @ptrCast(@alignCast(ctx));
         var r = begin;
-        while (r < end) : (r += 1) self.raw[r] += self.t.predictBinned(self.ds, r);
+        while (r < end) : (r += 1) self.raw[r * self.stride + self.off] += self.t.predictBinned(self.ds, r);
     }
 };
 
@@ -318,12 +418,14 @@ const ValidCtx = struct {
     t: *const tree.Tree,
     ds: *const Dataset,
     raw: []f32,
+    stride: usize = 1,
+    off: usize = 0,
 
     fn run(ctx: *anyopaque, worker: usize, begin: usize, end: usize) void {
         _ = worker;
         const self: *ValidCtx = @ptrCast(@alignCast(ctx));
         var r = begin;
-        while (r < end) : (r += 1) self.raw[r] += self.t.predictBinned(self.ds, r);
+        while (r < end) : (r += 1) self.raw[r * self.stride + self.off] += self.t.predictBinned(self.ds, r);
     }
 };
 
@@ -354,6 +456,7 @@ fn evaluate(
     obj: Objective,
     raw: []const f32,
     labels: []const f32,
+    num_class: usize,
 ) !f64 {
     return switch (obj) {
         .logistic => blk: {
@@ -361,7 +464,31 @@ fn evaluate(
             break :blk try metric.auc(gpa, raw, labels);
         },
         .squared_error => metric.rmse(raw, labels),
+        .softmax => metric.mlogloss(raw, labels, num_class),
     };
+}
+
+/// Each class's starting score: the log of its share of the rows, less the mean of those logs
+/// (XGBoost's `InitEstimation`; LightGBM omits the centring, which shifts every class equally and
+/// so changes no probability, gradient or tree). A class with no rows gets XGBoost's floor.
+fn softmaxBase(labels: []const f32, out: []f32) void {
+    @memset(out, 0);
+    for (labels) |y| out[@intFromFloat(y)] += 1;
+    const n: f32 = @floatFromInt(labels.len);
+    var mean: f32 = 0;
+    for (out) |*v| {
+        v.* = @log(@max(v.* / n, 1e-6));
+        mean += v.*;
+    }
+    mean /= @floatFromInt(out.len);
+    for (out) |*v| v.* -= mean;
+}
+
+/// Every row's starting scores.
+fn fillBase(raw: []f32, m: *const Model) void {
+    if (m.class_base.len == 0) return @memset(raw, m.base_score);
+    const k = m.class_base.len;
+    for (0..raw.len / k) |r| @memcpy(raw[r * k ..][0..k], m.class_base);
 }
 
 /// LightGBM's `iter < static_cast<int>(1.0f / learning_rate)`, in f32 as there: 10 rounds at
@@ -392,7 +519,12 @@ pub fn train(
     errdefer model.deinit();
 
     // --- base score ---
-    model.base_score = if (cfg.base_score) |b| b else blk: {
+    const k: usize = cfg.objective.width(cfg.num_class);
+    if (k > 1) {
+        model.num_class = cfg.num_class;
+        model.class_base = try gpa.alloc(f32, k);
+        if (cfg.base_score) |b| @memset(model.class_base, b) else softmaxBase(ds.labels, model.class_base);
+    } else model.base_score = if (cfg.base_score) |b| b else blk: {
         var sum: f64 = 0;
         for (ds.labels) |y| sum += y;
         const mean = sum / @as(f64, @floatFromInt(ds.labels.len));
@@ -402,20 +534,23 @@ pub fn train(
                 break :b @floatCast(@log(p / (1 - p)));
             },
             .squared_error => @floatCast(mean),
+            .softmax => unreachable,
         };
     };
 
-    const raw = try gpa.alloc(f32, ds.n_rows);
+    // Row-major scores, `raw[r * k + c]`; class-major gradients, `grads[c * n + r]`, so each
+    // class's tree reads one contiguous slice.
+    const raw = try gpa.alloc(f32, ds.n_rows * k);
     defer gpa.free(raw);
-    @memset(raw, model.base_score);
+    fillBase(raw, &model);
 
-    const grads = try gpa.alloc(hist.GradPair, ds.n_rows);
-    defer gpa.free(grads);
+    const grads_all = try gpa.alloc(hist.GradPair, ds.n_rows * k);
+    defer gpa.free(grads_all);
 
     var valid_raw: []f32 = &.{};
     if (valid) |v| {
-        valid_raw = try gpa.alloc(f32, v.n_rows);
-        @memset(valid_raw, model.base_score);
+        valid_raw = try gpa.alloc(f32, v.n_rows * k);
+        fillBase(valid_raw, &model);
     }
     defer if (valid_raw.len != 0) gpa.free(valid_raw);
 
@@ -481,64 +616,80 @@ pub fn train(
         var gctx = GradCtx{
             .raw = raw,
             .labels = ds.labels,
-            .grads = grads,
+            .grads = grads_all,
             .scale_pos_weight = cfg.scale_pos_weight,
             .objective = cfg.objective,
+            .num_class = k,
+            .softmax_hessian = cfg.softmax_hessian,
         };
         const t_g = prof.start();
         pool.parallelFor(ds.n_rows, &gctx, GradCtx.run, 8192);
         prof.stop(.grad, t_g);
 
-        const subset: ?[]const u32 = if (cfg.sampling == .goss and !(cfg.goss_warmup and round < gossWarmupRounds(cfg.tree.learning_rate))) blk: {
-            const t_gs = prof.start();
-            defer prof.stop(.goss_select, t_gs);
-            break :blk gossSelect(pool, grads, goss_counts, goss_chunks, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
-        } else null;
+        // One tree per class, all from this round's gradients (as XGBoost and LightGBM do).
+        for (0..k) |cls| {
+            const grads = grads_all[cls * ds.n_rows ..][0..ds.n_rows];
 
-        if (sym) |*s| {
-            var t = try s.grow(grads, raw, ds.labels, cfg.objective, cfg.scale_pos_weight);
-            errdefer t.deinit(gpa);
-            try model.trees.append(gpa, t);
-            const t_ap = prof.start();
-            var sctx = SymApplyCtx{ .leaf = s.leaf_model, .values = s.values, .raw = raw };
-            pool.parallelFor(ds.n_rows, &sctx, SymApplyCtx.run, 8192);
-            prof.stop(.apply, t_ap);
-        } else {
-            const builder = &builder_opt.?;
-            var t = try builder.growRows(grads, subset);
-            errdefer t.deinit(gpa);
-            try model.trees.append(gpa, t);
+            const subset: ?[]const u32 = if (cfg.sampling == .goss and !(cfg.goss_warmup and round < gossWarmupRounds(cfg.tree.learning_rate))) blk: {
+                const t_gs = prof.start();
+                defer prof.stop(.goss_select, t_gs);
+                break :blk gossSelect(pool, grads, goss_counts, goss_chunks, goss_others, goss_mask, goss_rows, cfg.top_rate, cfg.other_rate, cfg.goss_rank, goss_rng.random());
+            } else null;
 
-            // Spans cover only rows the tree saw (all rows only without sampling).
-            const t_ap = prof.start();
-            // Span fast path needs constant leaves; a linear leaf has no single constant.
-            if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
-                const spans = span_buf[0..builder.leafSpans().len];
-                @memcpy(spans, builder.leafSpans());
-                std.sort.pdq(tree.LeafSpan, spans, {}, ApplyCtx.byStart);
-                var actx = ApplyCtx{
-                    .spans = spans,
-                    .rows = builder.rows,
-                    .raw = raw,
-                };
-                pool.parallelFor(builder.activeRows().len, &actx, ApplyCtx.run, 8192);
+            if (sym) |*s| {
+                var t = try s.grow(grads, raw, ds.labels, cfg.objective, cfg.scale_pos_weight);
+                errdefer t.deinit(gpa);
+                try model.trees.append(gpa, t);
+                const t_ap = prof.start();
+                var sctx = SymApplyCtx{ .leaf = s.leaf_model, .values = s.values, .raw = raw };
+                pool.parallelFor(ds.n_rows, &sctx, SymApplyCtx.run, 8192);
+                prof.stop(.apply, t_ap);
             } else {
-                var actx = ApplyAllCtx{
-                    .t = &model.trees.items[model.trees.items.len - 1],
-                    .ds = ds,
-                    .raw = raw,
-                };
-                pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
+                const builder = &builder_opt.?;
+                var t = try builder.growRows(grads, subset);
+                errdefer t.deinit(gpa);
+                try model.trees.append(gpa, t);
+
+                // Spans cover only rows the tree saw (all rows only without sampling).
+                const t_ap = prof.start();
+                // Span fast path needs constant leaves; a linear leaf has no single constant.
+                if (builder.activeRows().len == ds.n_rows and !cfg.tree.linear_leaves) {
+                    const spans = span_buf[0..builder.leafSpans().len];
+                    @memcpy(spans, builder.leafSpans());
+                    std.sort.pdq(tree.LeafSpan, spans, {}, ApplyCtx.byStart);
+                    var actx = ApplyCtx{
+                        .spans = spans,
+                        .rows = builder.rows,
+                        .raw = raw,
+                        .stride = k,
+                        .off = cls,
+                    };
+                    pool.parallelFor(builder.activeRows().len, &actx, ApplyCtx.run, 8192);
+                } else {
+                    var actx = ApplyAllCtx{
+                        .t = &model.trees.items[model.trees.items.len - 1],
+                        .ds = ds,
+                        .raw = raw,
+                        .stride = k,
+                        .off = cls,
+                    };
+                    pool.parallelFor(ds.n_rows, &actx, ApplyAllCtx.run, 4096);
+                }
+                prof.stop(.apply, t_ap);
             }
-            prof.stop(.apply, t_ap);
+
+            if (valid) |v| {
+                const wall_p = prof.now();
+                const t_vp = prof.start();
+                var vctx = ValidCtx{ .t = &model.trees.items[model.trees.items.len - 1], .ds = v, .raw = valid_raw, .stride = k, .off = cls };
+                pool.parallelFor(v.n_rows, &vctx, ValidCtx.run, valid_min_chunk);
+                prof.stop(.valid_predict, t_vp);
+                valid_ns += prof.now() - wall_p;
+            }
         }
 
         if (valid) |v| {
             const wall0 = prof.now();
-            const t_vp = prof.start();
-            var vctx = ValidCtx{ .t = &model.trees.items[model.trees.items.len - 1], .ds = v, .raw = valid_raw };
-            pool.parallelFor(v.n_rows, &vctx, ValidCtx.run, valid_min_chunk);
-            prof.stop(.valid_predict, t_vp);
 
             // Score only when consumed: early stopping (every round), a log line, or the
             // final round (`best_score`). Unguarded, the metric's single-thread sort ran
@@ -551,7 +702,7 @@ pub fn train(
             }
 
             const t_vm = prof.start();
-            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels);
+            const score = try evaluate(gpa, cfg.objective, valid_raw, v.labels, k);
             prof.stop(.valid_metric, t_vm);
             const improved = if (better) score > best_score else score < best_score;
             if (improved) {
@@ -589,7 +740,7 @@ pub fn train(
 
     // Drop the rounds that came after the best one; they only overfit.
     if (valid != null and cfg.early_stopping_rounds != 0) {
-        const keep = best_round + 1;
+        const keep = (best_round + 1) * k;
         while (model.trees.items.len > keep) {
             var t = model.trees.pop().?;
             t.deinit(gpa);
@@ -598,7 +749,7 @@ pub fn train(
 
     return .{
         .model = model,
-        .n_rounds = @intCast(model.trees.items.len),
+        .n_rounds = @intCast(model.trees.items.len / k),
         .rounds_run = round,
         .best_score = if (valid != null) best_score else std.math.nan(f64),
         .valid_ns = valid_ns,

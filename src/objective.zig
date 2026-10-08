@@ -20,4 +20,13 @@ pub const Objective = enum {
     /// default), `Lasso` once `alpha > 0`, elastic net with both,
     /// `LinearRegression` with neither.
     squared_error,
+    /// Multiclass softmax / cross-entropy over `num_class` classes (XGBoost `multi:softprob`,
+    /// LightGBM `multiclass`). Each row has one raw score per class; prediction = softmax.
+    /// Labels are class indices 0..num_class-1. Boosting grows one tree per class per round.
+    softmax,
+
+    /// Raw scores per row: one per class under softmax, else one.
+    pub fn width(o: Objective, num_class: u32) usize {
+        return if (o == .softmax) num_class else 1;
+    }
 };

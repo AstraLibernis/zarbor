@@ -79,3 +79,51 @@ pub fn rmse(pred: []const f32, labels: []const f32) f64 {
     }
     return @sqrt(acc / @as(f64, @floatFromInt(pred.len)));
 }
+
+/// Mean multiclass cross-entropy from raw scores, `raw[r * k + c]` for row r and class c:
+/// log-softmax per row in f64, shifted by the row's largest score so no exp overflows.
+pub fn mlogloss(raw: []const f32, labels: []const f32, k: usize) f64 {
+    const n = labels.len;
+    std.debug.assert(raw.len == n * k);
+    var acc: f64 = 0;
+    for (labels, 0..) |y, r| {
+        const row = raw[r * k ..][0..k];
+        var top: f64 = row[0];
+        for (row[1..]) |v| top = @max(top, @as(f64, v));
+        var sum: f64 = 0;
+        for (row) |v| sum += @exp(@as(f64, v) - top);
+        const c: usize = @intFromFloat(y);
+        acc += top + @log(sum) - @as(f64, row[c]);
+    }
+    return acc / @as(f64, @floatFromInt(n));
+}
+
+/// Mean multiclass cross-entropy from probabilities, each clamped up from 1e-15 (LightGBM's
+/// `kEpsilon`) so a class given exactly 0 does not make the loss infinite.
+pub fn mloglossProb(prob: []const f32, labels: []const f32, k: usize) f64 {
+    const n = labels.len;
+    std.debug.assert(prob.len == n * k);
+    var acc: f64 = 0;
+    for (labels, 0..) |y, r| {
+        const c: usize = @intFromFloat(y);
+        acc -= @log(@max(@as(f64, prob[r * k + c]), 1e-15));
+    }
+    return acc / @as(f64, @floatFromInt(n));
+}
+
+/// Fraction of rows whose highest score (raw or probability; the first on a tie) is their
+/// class.
+pub fn accuracy(scores: []const f32, labels: []const f32, k: usize) f64 {
+    const n = labels.len;
+    std.debug.assert(scores.len == n * k);
+    var hit: usize = 0;
+    for (labels, 0..) |y, r| {
+        const row = scores[r * k ..][0..k];
+        var best: usize = 0;
+        for (row, 0..) |v, c| if (v > row[best]) {
+            best = c;
+        };
+        hit += @intFromBool(@as(f32, @floatFromInt(best)) == y);
+    }
+    return @as(f64, @floatFromInt(hit)) / @as(f64, @floatFromInt(n));
+}

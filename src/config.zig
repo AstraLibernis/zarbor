@@ -114,6 +114,25 @@ pub const Config = struct {
         };
     }
 
+    /// Scores per row the model predicts: the class count under softmax, else 1.
+    pub fn width(c: Config) usize {
+        return if (c.algo == .gbdt) c.gbdt.objective.width(c.gbdt.num_class) else 1;
+    }
+
+    /// Whether the target is classes, which folds are stratified on.
+    pub fn classifies(c: Config) bool {
+        return c.objective() != .squared_error;
+    }
+
+    /// The metric a holdout is scored by: AUC, RMSE or multiclass log loss.
+    pub fn metricName(c: Config) []const u8 {
+        return switch (c.objective()) {
+            .logistic => "auc",
+            .squared_error => "rmse",
+            .softmax => "mlogloss",
+        };
+    }
+
     /// Standard name of the fitted model, so the run says what it is. Needed for
     /// `linear`, where `--objective` silently switches between two textbook models.
     pub fn modelName(c: Config) []const u8 {
@@ -142,6 +161,8 @@ pub const Config = struct {
                     "linear regression (L2 / ridge)"
                 else
                     "linear regression (ordinary least squares)",
+                // Refused by `validate` until multinomial logistic regression exists.
+                .softmax => "multinomial logistic regression (not available yet)",
             },
         };
     }
@@ -158,7 +179,7 @@ pub const Config = struct {
         if (n_features == 0) return;
         const p_f: f32 = @floatFromInt(n_features);
         const want: f32 = switch (c.random_forest.objective) {
-            .logistic => @sqrt(p_f),
+            .logistic, .softmax => @sqrt(p_f),
             .squared_error => p_f / 3.0,
         };
         c.random_forest.tree.colsample_bynode = std.math.clamp(want / p_f, 1.0 / p_f, 1.0);
@@ -167,6 +188,8 @@ pub const Config = struct {
     /// Binning plus the chosen model's own checks.
     pub fn validate(c: Config) !void {
         try c.bin.validate();
+        // Multiclass is boosting-only for now (docs/PLAN.md milestone 1, stages 1b and 1c).
+        if (c.algo != .gbdt and c.objective() == .softmax) return error.SoftmaxNeedsGbdt;
         switch (c.algo) {
             .gbdt => try c.gbdt.validate(),
             .random_forest => try c.random_forest.validate(),

@@ -35,7 +35,9 @@ pub const magic = "ZMDL";
 /// a sorted list of the level ids on the left. Versions 2 and 3 still load;
 /// their thresholds are read a byte at a time and their masks expanded into
 /// the list form, so a model saved before this change scores identically.
-pub const format_version: u32 = 5;
+/// 6 added the class count and each class's starting score (softmax). Older files
+/// have one class.
+pub const format_version: u32 = 6;
 
 pub const Kind = enum(u8) {
     /// Trees are summed onto `base_score`; logistic needs a sigmoid after.
@@ -51,6 +53,9 @@ pub const Bundle = struct {
     schema: data.Schema,
     objective: Objective,
     base_score: f32 = 0,
+    /// Softmax: classes and each one's starting score (owned); tree `i` is class `i % num_class`.
+    num_class: u32 = 1,
+    class_base: []f32 = &.{},
     trees: []tree.Tree = &.{},
     lin: ?linear.Linear = null,
     /// Target column the model was trained on. Empty when unknown.
@@ -62,6 +67,7 @@ pub const Bundle = struct {
     pub fn deinit(b: *Bundle) void {
         for (b.trees) |*t| t.deinit(b.gpa);
         if (b.trees.len != 0) b.gpa.free(b.trees);
+        if (b.class_base.len != 0) b.gpa.free(b.class_base);
         if (b.lin) |*l| l.deinit();
         b.schema.deinit();
         if (b.label.len != 0) b.gpa.free(b.label);
@@ -99,9 +105,14 @@ pub const Bundle = struct {
         return b.trees.len;
     }
 
+    /// Scores per row: the class count under softmax, else 1. Row-major.
+    pub fn width(b: *const Bundle) usize {
+        return b.objective.width(b.num_class);
+    }
+
     /// Predictions on the objective's natural scale.
     pub fn predict(b: *const Bundle, pool: *Pool, ds: *const data.Dataset, out: []f32) void {
-        std.debug.assert(out.len == ds.n_rows);
+        std.debug.assert(out.len == ds.n_rows * b.width());
         switch (b.kind) {
             .gbdt, .forest => {
                 var ctx = TreeCtx{ .b = b, .ds = ds, .out = out };
@@ -122,6 +133,18 @@ const TreeCtx = struct {
         const self: *TreeCtx = @ptrCast(@alignCast(ctx));
         const b = self.b;
         const inv: f32 = if (b.trees.len == 0) 0 else 1.0 / @as(f32, @floatFromInt(b.trees.len));
+        const k = b.width();
+        if (k > 1) {
+            // Softmax: each tree adds to its class's column, as `booster.Model` predicts.
+            const out = self.out[begin * k .. end * k];
+            for (begin..end) |r| @memcpy(out[(r - begin) * k ..][0..k], b.class_base);
+            for (b.trees, 0..) |t, i| {
+                const c = i % k;
+                for (begin..end) |r| out[(r - begin) * k + c] += t.predictBinned(self.ds, r);
+            }
+            for (begin..end) |r| booster.softmaxRow(out[(r - begin) * k ..][0..k]);
+            return;
+        }
         const out = self.out[begin..end];
 
         // Trees outer, rows inner, and the per-row `switch (b.kind)` hoisted
@@ -512,6 +535,8 @@ pub fn serialise(gpa: std.mem.Allocator, b: *const Bundle) ![]u8 {
     try putU8(gpa, &buf, @intFromEnum(b.kind));
     try putU8(gpa, &buf, @intFromEnum(b.objective));
     try putF32(gpa, &buf, b.base_score);
+    try putU32(gpa, &buf, b.num_class);
+    for (b.class_base) |v| try putF32(gpa, &buf, v);
     try putBytes(gpa, &buf, b.label);
     try putU32(gpa, &buf, @intCast(b.classes.len));
     for (b.classes) |c| try putBytes(gpa, &buf, c);
@@ -550,6 +575,18 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     const kind = std.enums.fromInt(Kind, try r.u8v()) orelse return error.BadModelFile;
     const obj = std.enums.fromInt(Objective, try r.u8v()) orelse return error.BadModelFile;
     const base = try r.f32v();
+    var num_class: u32 = 1;
+    var class_base: []f32 = &.{};
+    errdefer if (class_base.len != 0) gpa.free(class_base);
+    if (ver >= 6) {
+        num_class = try r.u32v();
+        if ((obj == .softmax) != (num_class >= 2) or num_class == 0) return error.BadModelFile;
+        if (num_class > 1) {
+            if (num_class > r.buf.len) return error.BadModelFile;
+            class_base = try gpa.alloc(f32, num_class);
+            for (class_base) |*v| v.* = try r.f32v();
+        }
+    } else if (obj == .softmax) return error.BadModelFile;
 
     var label: []u8 = &.{};
     errdefer if (label.len != 0) gpa.free(label);
@@ -562,7 +599,8 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
     if (ver >= 2) {
         label = try gpa.dupe(u8, try r.bytes());
         const nc = try r.u32v();
-        if (nc > 2) return error.BadModelFile;
+        // Softmax names every class; otherwise a string target has two.
+        if (if (obj == .softmax) nc != 0 and nc != num_class else nc > 2) return error.BadModelFile;
         classes = try gpa.alloc([]u8, nc);
         while (n_classes < nc) : (n_classes += 1) classes[n_classes] = try gpa.dupe(u8, try r.bytes());
     }
@@ -576,12 +614,18 @@ pub fn deserialise(gpa: std.mem.Allocator, bytes: []const u8) !Bundle {
         .schema = schema,
         .objective = obj,
         .base_score = base,
+        .num_class = num_class,
+        .class_base = class_base,
         .label = label,
         .classes = classes,
     };
 
     switch (kind) {
-        .gbdt, .forest => b.trees = try readTrees(gpa, &r, ver, b.schema.n_features),
+        .gbdt, .forest => {
+            b.trees = try readTrees(gpa, &r, ver, b.schema.n_features);
+            if (kind != .gbdt and num_class != 1) return error.BadModelFile;
+            if (b.trees.len % num_class != 0) return error.BadModelFile;
+        },
         .linear => {
             const intercept = try r.f32v();
             const nw = try r.count(4);
@@ -672,8 +716,12 @@ pub fn blend(
     }
     if (total <= 0) return error.WeightsSumToZero;
 
+    // Probabilities blend column by column, so every model must predict the same columns.
+    const cols = bundles[0].width();
+    for (bundles) |b| if (b.width() != cols) return error.BlendWidthMismatch;
+    std.debug.assert(out.len == ds.n_rows * cols);
     @memset(out, 0);
-    const scratch = try gpa.alloc(f32, ds.n_rows);
+    const scratch = try gpa.alloc(f32, ds.n_rows * cols);
     defer gpa.free(scratch);
 
     for (bundles, weights) |b, w| {
@@ -687,12 +735,16 @@ pub fn blend(
 // -------------------------------------------------------------- constructors
 
 pub fn fromBooster(gpa: std.mem.Allocator, m: *const booster.Model, schema: data.Schema) !Bundle {
+    const class_base = try gpa.dupe(f32, m.class_base);
+    errdefer gpa.free(class_base);
     return .{
         .gpa = gpa,
         .kind = .gbdt,
         .schema = schema,
         .objective = m.objective,
         .base_score = m.base_score,
+        .num_class = m.num_class,
+        .class_base = class_base,
         .trees = try dupeTrees(gpa, m.trees.items),
     };
 }

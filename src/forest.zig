@@ -231,5 +231,6 @@ fn evaluate(
     return switch (obj) {
         .logistic => try metric.auc(gpa, pred, labels),
         .squared_error => metric.rmse(pred, labels),
+        .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
     };
 }

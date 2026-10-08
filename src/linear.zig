@@ -330,6 +330,7 @@ pub fn train(
             break :blk @log(q / (1 - q));
         },
         .squared_error => mean,
+        .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
     };
 
     const n_f: f64 = @floatFromInt(ds.n_rows);
@@ -389,6 +390,7 @@ pub fn train(
         score = switch (cfg.objective) {
             .logistic => try metric.auc(gpa, pred, v.labels),
             .squared_error => metric.rmse(pred, v.labels),
+            .softmax => unreachable, // Refused by `Config.validate`: softmax is boosting-only for now.
         };
         valid_ns = prof.now() - wall0;
     }

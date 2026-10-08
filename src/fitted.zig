@@ -66,7 +66,9 @@ pub const Fitted = union(config.Algo) {
     /// What one step of `Result.steps` is.
     pub fn stepName(m: Fitted) []const u8 {
         return switch (m) {
-            .gbdt, .random_forest => "tree",
+            // Softmax grows one tree per class each round.
+            .gbdt => |x| if (x.num_class > 1) "round" else "tree",
+            .random_forest => "tree",
             .linear => "epoch",
         };
     }

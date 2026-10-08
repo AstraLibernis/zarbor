@@ -224,8 +224,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         group_idx = frame.columnIndex(name) orelse return error.GroupColumnNotFound;
         try drops.append(gpa, name);
     }
-    var enc = try data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label);
+    var enc = try data.LabelEncoder.forObjective(gpa, &frame, label_col, pos_label, cfg.objective());
     defer enc.deinit();
+    // Softmax: the label's classes are the model's, fixed before any fold or split can miss one.
+    if (cfg.objective() == .softmax) cfg.gbdt.num_class = @intCast(enc.classes.len);
     // `--bin_policy=auto`: choose once, by a 3-fold CV of each policy, before binning.
     if (cfg.bin.bin_policy == .auto) {
         var scores: [data.concrete_policies.len]zarbor.cv.PolicyScore = undefined;
@@ -277,9 +279,9 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     const fold_of = if (group_idx) |gi|
         try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fold_seed)
     else
-        try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.objective() == .logistic);
+        try cv.assignFolds(gpa, full.labels, n_folds, fold_seed, cfg.classifies());
     defer gpa.free(fold_of);
-    const oof = try gpa.alloc(f32, full.n_rows);
+    const oof = try gpa.alloc(f32, full.n_rows * cfg.width());
     defer gpa.free(oof);
 
     const ev = Evaluator{
@@ -559,7 +561,7 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
                 const folds2 = if (group_idx) |gi|
                     try cv.assignGroupFolds(gpa, frame.values[gi], n_folds, fs)
                 else
-                    try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.objective() == .logistic);
+                    try cv.assignFolds(gpa, full.labels, n_folds, fs, cfg.classifies());
                 defer gpa.free(folds2);
                 var ev2 = ev;
                 ev2.fold_of = folds2;

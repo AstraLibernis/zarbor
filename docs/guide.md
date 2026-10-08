@@ -28,7 +28,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 
 | Setting | Kind | When to touch it |
 |---|---|---|
-| `--label`, `--objective` | task | always: `logistic` for a yes/no target, `squared_error` for a number |
+| `--label`, `--objective` | task | always: `logistic` for a yes/no target, `softmax` for three or more classes, `squared_error` for a number |
 | `--pos-label` | task | when the sorted class order guesses wrong ("abnormal" < "normal") |
 | `--drop` | task | ID columns, and anything not known at prediction time (leakage) |
 | `--split-col`, `--valid-frac`, `--group-col` (cv) | task | when rows are not independent: a time split, or several rows per customer |
@@ -44,6 +44,7 @@ paid far more than tuning in past competitions); run `tune`; try another style a
 | `--cat_smooth`, `--max_cat_threshold`, `--max_cat_to_onehot`, `--min_data_per_group` | knob | only with `--cat_split=optimal` and many-level categoricals |
 | `--random_strength`, `--bagging_temperature`, `--mvs_reg`, `--model_size_reg` | knob | CatBoost style only; its defaults are sensible |
 | `--max_delta_step` | knob | logistic loss on extremely imbalanced data, if training is unstable |
+| `--softmax_hessian` | style | `xgboost` or `lightgbm`; matters only to match one library exactly |
 | `--algo`, `--grow_policy` | style | try depthwise, lossguide and symmetric; blend the best two |
 | `--cat_split` | style | `optimal` for categoricals with a handful of levels, `ctr` for many levels |
 | `--sampling=goss`, `--bootstrap_type` | style | LightGBM's and CatBoost's row sampling; GOSS was not faster on the arena data, so judge it by `cv` score |
@@ -112,12 +113,23 @@ training is treated as missing.
 
 ## 3. Targets
 
-Binary classification (`--objective=logistic`, the default) or regression
-(`--objective=squared_error`). A text target is encoded by sorted class order, as in
-scikit-learn's `LabelEncoder`, so `No < Yes` makes `Yes` the positive class; `--pos-label`
-overrides. Refused with a reason: more than two classes, a single class, missing target
-values, and numeric values outside [0, 1] under logistic. `--scale_pos_weight` weights the
-positives.
+Binary classification (`--objective=logistic`, the default), regression
+(`--objective=squared_error`), or multiclass (`--objective=softmax`). A text target is encoded
+by sorted class order, as in scikit-learn's `LabelEncoder`, so `No < Yes` makes `Yes` the
+positive class; `--pos-label` overrides. Refused with a reason: more than two classes under
+logistic, a single class, missing target values, and numeric values outside [0, 1] under
+logistic. `--scale_pos_weight` weights the positives.
+
+**Multiclass** (`--objective=softmax`, gbdt only for now): every distinct label is a class,
+text sorted as above and integers in numeric order (so `2 < 10`). Each round grows one tree per
+class, as XGBoost's `multi:softprob` and LightGBM's `multiclass` do, and each class starts from
+the log of its share of the training rows. `--softmax_hessian` picks the second derivative:
+`xgboost` (default, `2 p (1 - p)`) or `lightgbm` (`K / (K - 1) p (1 - p)`); they agree at two
+classes and give different trees above, and each matches its library exactly. `predict` writes
+one probability column per class (`prediction_<class>`); validation, `cv` and `tune` score by
+multiclass log loss and report accuracy. Folds are stratified on the class. Not yet with
+softmax: CatBoost-style trees, GOSS, linear leaves, target statistics, the forest and the
+linear model (docs/PLAN.md, milestone 1).
 
 ## 4. Models
 
@@ -352,7 +364,8 @@ Defaults in brackets. `random_forest` and `linear` override some of them (sectio
 **Binning:** `--max_bin` [256], `--min_data_in_bin` [3], `--bin_policy` [quantile; greedy,
 logsum, uniform, auto].
 
-**Boosting:** `--algo` [gbdt], `--objective` [logistic], `--n_rounds` [500],
+**Boosting:** `--algo` [gbdt], `--objective` [logistic; squared_error, softmax],
+`--softmax_hessian` [xgboost], `--n_rounds` [500],
 `--learning_rate` [0.1], `--base_score` [label mean], `--scale_pos_weight` [1],
 `--early_stopping_rounds` [0 = off], `--verbose_eval` [10], `--seed` [0].
 

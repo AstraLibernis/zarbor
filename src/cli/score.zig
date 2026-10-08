@@ -154,7 +154,8 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
         }
     }
 
-    const preds = try gpa.alloc(f32, ds.n_rows);
+    const width = bundles.items[0].width();
+    const preds = try gpa.alloc(f32, ds.n_rows * width);
     defer gpa.free(preds);
 
     if (mode == .predict) {
@@ -185,17 +186,24 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer, 
                 metric.loglossProb(preds, ds.labels),
             }),
             .squared_error => try out.print("score   rmse={d:.6}\n", .{metric.rmse(preds, ds.labels)}),
+            .softmax => try out.print("score   mlogloss={d:.6}  accuracy={d:.6}\n", .{
+                metric.mloglossProb(preds, ds.labels, width),
+                metric.accuracy(preds, ds.labels, width),
+            }),
         }
     }
 
     if (out_path) |op| {
-        try writePredictions(gpa, io, op, &frame, id_col, pred_col, preds);
+        try writePredictions(gpa, io, op, &frame, id_col, pred_col, preds, bundles.items[0].classes, width);
         try out.print("wrote   {s}\n", .{op});
     } else {
         // No destination: show the head so the command is still useful alone.
-        const show = @min(preds.len, 10);
+        const show = @min(ds.n_rows, 10);
         try out.print("\nfirst {d} predictions\n", .{show});
-        for (preds[0..show]) |p| try out.print("  {d:.6}\n", .{p});
+        for (0..show) |r| {
+            for (preds[r * width ..][0..width]) |p| try out.print("  {d:.6}", .{p});
+            try out.writeAll("\n");
+        }
     }
     try out.flush();
 }
@@ -209,6 +217,9 @@ fn writePredictions(
     id_col: ?[]const u8,
     pred_col: []const u8,
     preds: []const f32,
+    /// Softmax: one column per class, `<pred_col>_<class>`, in the model's class order.
+    classes: []const []const u8,
+    width: usize,
 ) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
@@ -219,13 +230,15 @@ fn writePredictions(
 
     const idx: ?usize = if (id_col) |name| frame.columnIndex(name) orelse return error.IdColumnNotFound else null;
 
-    if (idx) |i| {
-        try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{s},{s}\n", .{ frame.names[i], pred_col }));
-    } else {
+    if (idx) |i| try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{s},", .{frame.names[i]}));
+    if (width == 1) {
         try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{s}\n", .{pred_col}));
+    } else for (0..width) |c| {
+        const name = if (c < classes.len) classes[c] else "";
+        try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{s}_{s}{s}", .{ pred_col, name, if (c + 1 == width) "\n" else "," }));
     }
 
-    for (preds, 0..) |p, row| {
+    for (0..preds.len / width) |row| {
         if (idx) |i| {
             const v = frame.values[i][row];
             const txt = if (std.math.isNan(v))
@@ -243,7 +256,9 @@ fn writePredictions(
                 try std.fmt.bufPrint(&line, "{d},", .{v});
             try buf.appendSlice(gpa, txt);
         }
-        try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{d:.6}\n", .{p}));
+        for (preds[row * width ..][0..width], 0..) |p, c| {
+            try buf.appendSlice(gpa, try std.fmt.bufPrint(&line, "{d:.6}{s}", .{ p, if (c + 1 == width) "\n" else "," }));
+        }
     }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }

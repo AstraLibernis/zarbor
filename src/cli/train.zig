@@ -135,11 +135,13 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
     // dictionary, "1" would mean whichever class the first row happened to
     // hold, so the same data in a different row order would train the
     // opposite model.
-    var enc = data.LabelEncoder.fromColumn(gpa, &frame, label_col, pos_label) catch |err| {
+    var enc = data.LabelEncoder.forObjective(gpa, &frame, label_col, pos_label, cfg.objective()) catch |err| {
         try explainLabel(out, err, target);
         return err;
     };
     defer enc.deinit();
+    // Softmax: the label's classes are the model's, fixed before any fold or split can miss one.
+    if (cfg.objective() == .softmax) cfg.gbdt.num_class = @intCast(enc.classes.len);
 
     // --- train / validation split ---
     const perm = try gpa.alloc(u32, frame.n_rows);
@@ -278,10 +280,10 @@ pub fn run(init: std.process.Init, gpa: std.mem.Allocator, out: *std.Io.Writer) 
         try out.print("saved   {s}\n", .{sp});
     }
     if (valid_ds) |*v| {
-        const scores = try gpa.alloc(f32, v.n_rows);
+        const scores = try gpa.alloc(f32, v.n_rows * cfg.width());
         defer gpa.free(scores);
         const scale = res.model.predictForReport(pool, v, scores);
-        try report(gpa, out, cfg.objective(), scores, v.labels, scale);
+        try report(gpa, out, cfg.objective(), scores, v.labels, scale, cfg.width());
     }
     try prof.report(out);
     try out.flush();
@@ -325,6 +327,7 @@ fn report(
     pred: []const f32,
     labels: []const f32,
     scale: Scale,
+    width: usize,
 ) !void {
     switch (obj) {
         .logistic => {
@@ -337,6 +340,13 @@ fn report(
         },
         .squared_error => {
             try out.print("valid   rmse={d:.6}\n", .{metric.rmse(pred, labels)});
+        },
+        .softmax => {
+            const ll = switch (scale) {
+                .raw => metric.mlogloss(pred, labels, width),
+                .natural => metric.mloglossProb(pred, labels, width),
+            };
+            try out.print("valid   mlogloss={d:.6}  accuracy={d:.6}\n", .{ ll, metric.accuracy(pred, labels, width) });
         },
     }
 }

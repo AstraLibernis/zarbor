@@ -36,6 +36,34 @@ pub fn assignFolds(
     var order = try gpa.alloc(u32, n);
     defer gpa.free(order);
 
+    var top: f32 = 0;
+    for (labels) |y| top = @max(top, y);
+    if (stratify and top > 1) {
+        // Multiclass: each class's rows, highest class first, each shuffled alone, dealt from one
+        // counter. The binary case below is the same rule at two classes.
+        const n_class: usize = @as(usize, @intFromFloat(top)) + 1;
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const r = prng.random();
+        var at: usize = 0;
+        var c = n_class;
+        while (c > 0) {
+            c -= 1;
+            const start = at;
+            for (labels, 0..) |y, i| if (y == @as(f32, @floatFromInt(c))) {
+                order[at] = @intCast(i);
+                at += 1;
+            };
+            shuffle(r, order[start..at]);
+        }
+        var f: u32 = 0;
+        for (order) |row| {
+            fold[row] = f;
+            f += 1;
+            if (f == n_folds) f = 0;
+        }
+        return fold;
+    }
+
     var head: usize = 0;
     if (stratify) {
         // Positives then negatives, each shuffled alone, dealt from one counter.
@@ -182,7 +210,7 @@ pub const Opts = struct {
     /// hopeless config shows on two folds without paying for all `n_folds`.
     use_folds: u32 = 0,
     /// Filled with the out-of-fold prediction for every evaluated row; length
-    /// `full.n_rows`. Optional in type only: `crossValidate` pools from it and
+    /// `full.n_rows * cfg.width()`, row-major. Optional in type only: `crossValidate` pools from it and
     /// returns `error.PooledScoreNeedsOofBuffer` (after fitting every fold) if null.
     oof: ?[]f32 = null,
     /// One line per fold while it runs.
@@ -228,9 +256,9 @@ pub fn chooseBinPolicy(
         const fold_of = if (groups) |g|
             try assignGroupFolds(gpa, g, folds, 1)
         else
-            try assignFolds(gpa, ds.labels, folds, 1, cfg.objective() == .logistic);
+            try assignFolds(gpa, ds.labels, folds, 1, cfg.classifies());
         defer gpa.free(fold_of);
-        const oof = try gpa.alloc(f32, ds.n_rows);
+        const oof = try gpa.alloc(f32, ds.n_rows * cfg.width());
         defer gpa.free(oof);
         const o = try crossValidate(gpa, io, pool, ds, c, fold_of, folds, .{ .oof = oof, .groups = groups });
         sc.* = .{ .policy = p, .score = o.pooled };
@@ -248,12 +276,22 @@ pub fn writePolicyScores(out: *std.Io.Writer, scores: []const PolicyScore, chose
     try out.flush();
 }
 
-/// Higher AUC, lower RMSE is better. All config ranking goes through here so
+/// A holdout's score from natural-scale predictions (`width` per row): AUC, RMSE or multiclass
+/// log loss.
+pub fn holdoutScore(gpa: std.mem.Allocator, cfg: config.Config, pred: []const f32, labels: []const f32) !f64 {
+    return switch (cfg.objective()) {
+        .logistic => try metric.auc(gpa, pred, labels),
+        .squared_error => metric.rmse(pred, labels),
+        .softmax => metric.mloglossProb(pred, labels, cfg.width()),
+    };
+}
+
+/// Higher AUC, lower RMSE and log loss is better. All config ranking goes through here so
 /// the comparison cannot drift from the objective.
 pub fn better(obj: Objective, a: f64, b: f64) bool {
     return switch (obj) {
         .logistic => a > b,
-        .squared_error => a < b,
+        .squared_error, .softmax => a < b,
     };
 }
 
@@ -271,6 +309,7 @@ pub fn crossValidate(
 ) !Outcome {
     try cfg.validate();
     const run_folds = if (opts.use_folds == 0) n_folds else @min(opts.use_folds, n_folds);
+    const cols = cfg.width();
 
     const perm = try gpa.alloc(u32, full.n_rows);
     defer gpa.free(perm);
@@ -279,7 +318,7 @@ pub fn crossValidate(
     // the rows it is scored on, which would let the score pick its own stopping point.
     const stop_early = cfg.algo == .gbdt and cfg.gbdt.early_stopping_rounds != 0;
     const es_of: ?[]u32 = if (stop_early)
-        try assignEarlyStop(gpa, full.labels, opts.groups, opts.early_stop_seed, cfg.objective() == .logistic)
+        try assignEarlyStop(gpa, full.labels, opts.groups, opts.early_stop_seed, cfg.classifies())
     else
         null;
     defer if (es_of) |e| gpa.free(e);
@@ -335,7 +374,7 @@ pub fn crossValidate(
         var stop_ds: ?data.Dataset = if (es_of != null) try data.subset(gpa, full, fit_rows[n_fit..head]) else null;
         defer if (stop_ds) |*d| d.deinit();
 
-        const scores = try gpa.alloc(f32, valid_ds.n_rows);
+        const scores = try gpa.alloc(f32, valid_ds.n_rows * cols);
         defer gpa.free(scores);
 
         var res = try Fitted.train(gpa, pool, &train_ds, if (stop_ds) |*d| d else null, cfg, opts.progress);
@@ -343,19 +382,16 @@ pub fn crossValidate(
         steps_sum += @floatFromInt(res.steps);
         res.model.predict(pool, &valid_ds, scores);
 
-        if (opts.oof) |o| for (perm[head..], scores) |row, s| {
-            o[row] = s;
+        if (opts.oof) |o| for (perm[head..], 0..) |row, i| {
+            @memcpy(o[row * cols ..][0..cols], scores[i * cols ..][0..cols]);
         };
         try scored.appendSlice(gpa, perm[head..]);
 
-        per_fold[k] = switch (cfg.objective()) {
-            .logistic => try metric.auc(gpa, scores, valid_ds.labels),
-            .squared_error => metric.rmse(scores, valid_ds.labels),
-        };
+        per_fold[k] = try holdoutScore(gpa, cfg, scores, valid_ds.labels);
         if (opts.progress) |w| {
             try w.print("fold {d}  {d} train / {d} valid   {s}={d:.6}", .{
                 k,               n_fit,
-                valid_ds.n_rows, if (cfg.objective() == .logistic) "auc" else "rmse",
+                valid_ds.n_rows, cfg.metricName(),
                 per_fold[k],
             });
             if (stop_early) try w.print("   stopped at {d} rounds on {d} rows", .{ res.steps, head - n_fit });
@@ -376,19 +412,16 @@ pub fn crossValidate(
     sd = @sqrt(sd / @as(f64, @floatFromInt(run_folds)));
 
     // Pool over exactly the rows that were predicted.
-    const ps = try gpa.alloc(f32, scored.items.len);
+    const ps = try gpa.alloc(f32, scored.items.len * cols);
     defer gpa.free(ps);
     const ys = try gpa.alloc(f32, scored.items.len);
     defer gpa.free(ys);
     const src = opts.oof orelse return error.PooledScoreNeedsOofBuffer;
     for (scored.items, 0..) |row, i| {
-        ps[i] = src[row];
+        @memcpy(ps[i * cols ..][0..cols], src[row * cols ..][0..cols]);
         ys[i] = full.labels[row];
     }
-    const pooled = switch (cfg.objective()) {
-        .logistic => try metric.auc(gpa, ps, ys),
-        .squared_error => metric.rmse(ps, ys),
-    };
+    const pooled = try holdoutScore(gpa, cfg, ps, ys);
 
     return .{
         .pooled = pooled,
