@@ -75,8 +75,8 @@ test "percentile follows LightGBM's rules, plain and weighted" {
 
 fn params(opts: anytype) booster.Params {
     var cfg = config.Config.from(.{ .verbose_eval = 0 }).gbdt;
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-        if (@hasField(booster.Params, f.name)) @field(cfg, f.name) = @field(opts, f.name) else @field(cfg.tree, f.name) = @field(opts, f.name);
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".field_names, @typeInfo(@TypeOf(opts)).@"struct".field_types) |f_name, _| {
+        if (@hasField(booster.Params, f_name)) @field(cfg, f_name) = @field(opts, f_name) else @field(cfg.tree, f_name) = @field(opts, f_name);
     }
     return cfg;
 }

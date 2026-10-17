@@ -387,7 +387,7 @@ pub const SimdParser = struct {
     pub fn resetScratch(self: *SimdParser) void {
         // Debug-only: poison the reclaimed scratch so a retained unescaped `Field`
         // reads obvious garbage instead of stale-but-valid bytes. Zero cost in release.
-        if (builtin.mode == .Debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
+        if (builtin.mode == .debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
         self.scratch_used = 0;
     }
 

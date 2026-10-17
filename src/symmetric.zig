@@ -1138,7 +1138,7 @@ pub const Builder = struct {
         defer ids.deinit(b.gpa);
 
         var proto: [max_depth]tree.Node = undefined;
-        var inverted = [_]bool{false} ** max_depth;
+        var inverted: [max_depth]bool = @splat(false);
         var combos: std.ArrayList(tree.Combo) = .empty;
         errdefer {
             for (combos.items) |*x| x.deinit(b.gpa);

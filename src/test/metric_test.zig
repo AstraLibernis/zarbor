@@ -149,8 +149,8 @@ test "evaluate: raw and natural scales agree for every metric that takes either"
 }
 
 test "every objective's default metric fits it, and directions are right" {
-    inline for (@typeInfo(@import("../objective.zig").Objective).@"enum".fields) |f| {
-        const obj: @import("../objective.zig").Objective = @enumFromInt(f.value);
+    inline for (@typeInfo(@import("../objective.zig").Objective).@"enum".field_names, @typeInfo(@import("../objective.zig").Objective).@"enum".field_values) |_, f_value| {
+        const obj: @import("../objective.zig").Objective = @fromBackingInt(@intCast(f_value));
         try testing.expect(metric.Metric.defaultFor(obj).fits(obj));
     }
     try testing.expect(!metric.Metric.auc.fits(.squared_error));

@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run the zarbor CLI: train (GBDT, forest, linear), predict, blend, cv, tune, info").dependOn(&run.step);
 
     const tests = b.addTest(.{
@@ -63,10 +63,10 @@ pub fn build(b: *std.Build) void {
     }) });
     const run_golden = b.addRunArtifact(golden);
     run_golden.addArtifactArg(exe);
-    run_golden.addArg(b.pathFromRoot("test/golden"));
+    run_golden.addDirectoryArg2(b.path("test/golden"), .{ .make_absolute = true });
     _ = run_golden.addOutputDirectoryArg("scratch");
     run_golden.has_side_effects = true;
-    if (b.args) |args| run_golden.addArgs(args);
+    run_golden.addPassthruArgs();
     b.step("golden", "Compare CLI output with test/golden/expected (-- --update to re-baseline)")
         .dependOn(&run_golden.step);
 
@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark glue in Zig (bench/tools.zig; replaces the non-baseline Python/shell).
     const tools_paths = b.addOptions();
-    tools_paths.addOption([]const u8, "root", b.pathFromRoot("."));
+    tools_paths.addOption([]const u8, "root", b.root.toString(b.allocator) catch @panic("OOM"));
     const tools_mod = b.createModule(.{
         .root_source_file = b.path("bench/tools.zig"),
         .target = target,
@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&tools.step);
     b.installArtifact(tools);
     const run_tools = b.addRunArtifact(tools);
-    if (b.args) |args| run_tools.addArgs(args);
+    run_tools.addPassthruArgs();
     b.step("tools", "Benchmark glue: `zig build tools -- summarise|figure|grid|controls|solver-stress ...`").dependOn(&run_tools.step);
 
     // Standalone microbenchmarks, each answering one recorded question (see its header).

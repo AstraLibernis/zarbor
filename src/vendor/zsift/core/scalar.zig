@@ -59,7 +59,7 @@ pub const Parser = struct {
         // Debug-only: poison the region being reclaimed so any `Field.bytes` still
         // pointing into scratch (a retained unescaped field) reads obvious garbage
         // in tests instead of silently-valid stale bytes. Zero cost in release.
-        if (builtin.mode == .Debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
+        if (builtin.mode == .debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
         self.scratch_used = 0;
     }
 

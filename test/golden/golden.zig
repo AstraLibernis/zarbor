@@ -191,7 +191,7 @@ fn runCase(io: Io, gpa: Allocator, exe: []const u8, scratch: []const u8, case: C
 /// Lines whose presence depends on timing: `build` (optimize mode), and the
 /// `fit     N ms  (+M ms validating)` line, which prints only when validation
 /// took at least 1 ms. The linear model's `fit     converged` line stays.
-const dropped_prefixes = [_][]const u8{ "build " };
+const dropped_prefixes = [_][]const u8{"build "};
 
 fn isTimingFitLine(line: []const u8) bool {
     return std.mem.startsWith(u8, line, "fit ") and std.mem.find(u8, line, " ms  (+") != null;

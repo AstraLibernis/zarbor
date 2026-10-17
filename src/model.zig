@@ -261,7 +261,7 @@ fn writeSchema(gpa: std.mem.Allocator, b: *Buf, s: *const data.Schema) !void {
     try putU32(gpa, b, @intCast(s.n_features));
     for (0..s.n_features) |f| {
         try putBytes(gpa, b, s.names[f]);
-        try putU8(gpa, b, @intFromEnum(s.kinds[f]));
+        try putU8(gpa, b, @backingInt(s.kinds[f]));
         try putU16(gpa, b, s.n_bins[f]);
         try putU32(gpa, b, @intCast(s.edges[f].len));
         for (s.edges[f]) |e| try putF32(gpa, b, e);
@@ -330,7 +330,7 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
             try putU32(gpa, b, n.cat_ofs);
             try putU8(gpa, b, n.n_lin);
             try putU32(gpa, b, n.lin_ofs);
-            try putU8(gpa, b, @intFromEnum(n.kind));
+            try putU8(gpa, b, @backingInt(n.kind));
         }
         // After the nodes, the tree's two side tables that nodes index into:
         // the categorical level ids (`cat_ofs`/`n_cat`), then the linear-leaf
@@ -356,7 +356,7 @@ fn writeTrees(gpa: std.mem.Allocator, b: *Buf, trees: []const tree.Tree) !void {
         for (t.combos) |c| {
             try putU32(gpa, b, @intCast(c.parts.len));
             for (c.parts) |part| {
-                try putU8(gpa, b, @intFromEnum(part.kind));
+                try putU8(gpa, b, @backingInt(part.kind));
                 try putU32(gpa, b, part.feature);
                 try putU16(gpa, b, part.value);
             }
@@ -578,8 +578,8 @@ pub fn serialise(gpa: std.mem.Allocator, b: *const Bundle) ![]u8 {
 
     try buf.appendSlice(gpa, magic);
     try putU32(gpa, &buf, format_version);
-    try putU8(gpa, &buf, @intFromEnum(b.kind));
-    try putU8(gpa, &buf, @intFromEnum(b.objective));
+    try putU8(gpa, &buf, @backingInt(b.kind));
+    try putU8(gpa, &buf, @backingInt(b.objective));
     try putF32(gpa, &buf, b.base_score);
     try putU32(gpa, &buf, b.num_class);
     for (b.class_base) |v| try putF32(gpa, &buf, v);

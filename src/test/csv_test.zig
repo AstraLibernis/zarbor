@@ -398,7 +398,7 @@ test "blank lines are no records, and a well-formed file passes the shape check"
     var pool = try Pool.init(gpa, 1);
     defer pool.deinit();
     for ([_][]const u8{
-        "a,b\n1,2\n3,4\n",       "a,b\n1,2\n3,4",          "a,b\r\n1,2\r\n3,4\r\n",
+        "a,b\n1,2\n3,4\n",     "a,b\n1,2\n3,4",             "a,b\r\n1,2\r\n3,4\r\n",
         "a,b\n1,2\n\n3,4\n\n", "a,b\n1,2\n  \n3,4\r\n\r\n",
     }) |text| {
         var f = try readText(testing.io, gpa, pool, text);

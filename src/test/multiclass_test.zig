@@ -48,8 +48,8 @@ fn fixture(gpa: std.mem.Allocator, seed: u64) !data.Dataset {
 fn params(opts: anytype) booster.Params {
     var cfg = config.Config.from(.{ .objective = .softmax, .verbose_eval = 0 }).gbdt;
     cfg.num_class = n_class;
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-        if (@hasField(booster.Params, f.name)) @field(cfg, f.name) = @field(opts, f.name) else @field(cfg.tree, f.name) = @field(opts, f.name);
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".field_names, @typeInfo(@TypeOf(opts)).@"struct".field_types) |f_name, _| {
+        if (@hasField(booster.Params, f_name)) @field(cfg, f_name) = @field(opts, f_name) else @field(cfg.tree, f_name) = @field(opts, f_name);
     }
     return cfg;
 }
@@ -106,7 +106,7 @@ test "softmax: tree i adds only to class i mod K, from that class's starting sco
     };
 
     // The starting scores are the centred log class shares (XGBoost's `InitEstimation`).
-    var counts = [_]f32{0} ** n_class;
+    var counts: [n_class]f32 = @splat(0);
     for (ds.labels) |y| counts[@intFromFloat(y)] += 1;
     var logs: [n_class]f32 = undefined;
     var mean: f32 = 0;
@@ -296,8 +296,8 @@ test "stratified folds hold every class in near-equal shares" {
     const folds = 5;
     const fold_of = try cv.assignFolds(gpa, ds.labels, folds, 3, true);
     defer gpa.free(fold_of);
-    var count = [_][n_class]u32{[_]u32{0} ** n_class} ** folds;
-    var total = [_]u32{0} ** n_class;
+    var count: [folds][n_class]u32 = @splat(@splat(0));
+    var total: [n_class]u32 = @splat(0);
     for (fold_of, ds.labels) |f, y| {
         count[f][@intFromFloat(y)] += 1;
         total[@intFromFloat(y)] += 1;
@@ -330,7 +330,7 @@ const linear = @import("../linear.zig");
 fn linParams(opts: anytype) linear.Params {
     var cfg = config.Config.from(.{ .algo = .linear, .objective = .softmax, .verbose_eval = 0, .lin_tol = 1e-12, .lin_epochs = 3000 }).linear;
     cfg.num_class = n_class;
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| @field(cfg, f.name) = @field(opts, f.name);
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".field_names, @typeInfo(@TypeOf(opts)).@"struct".field_types) |f_name, _| @field(cfg, f_name) = @field(opts, f_name);
     return cfg;
 }
 

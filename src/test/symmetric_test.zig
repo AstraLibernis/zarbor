@@ -34,8 +34,8 @@ fn fixture(gpa: std.mem.Allocator, seed: u64) !data.Dataset {
 
 fn train(gpa: std.mem.Allocator, pool: *Pool, ds: *const data.Dataset, opts: anytype) !booster.Model {
     var cfg = config.Config.from(.{ .grow_policy = .symmetric, .verbose_eval = 0, .base_score = 0 }).gbdt;
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-        if (@hasField(booster.Params, f.name)) @field(cfg, f.name) = @field(opts, f.name) else @field(cfg.tree, f.name) = @field(opts, f.name);
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".field_names, @typeInfo(@TypeOf(opts)).@"struct".field_types) |f_name, _| {
+        if (@hasField(booster.Params, f_name)) @field(cfg, f_name) = @field(opts, f_name) else @field(cfg.tree, f_name) = @field(opts, f_name);
     }
     const res = try booster.train(gpa, pool, ds, null, cfg, null);
     return res.model;
@@ -81,8 +81,8 @@ test "every depth shares one split, and leaves are Newton steps over the rows th
 
     // Leaf index = sum over depths of [bin > threshold] << depth; base score 0 means p = 0.5,
     // g = 0.5 - y and h = 0.25 for every row.
-    var g = [_]f64{0} ** 8;
-    var h = [_]f64{0} ** 8;
+    var g: [8]f64 = @splat(0);
+    var h: [8]f64 = @splat(0);
     var idx: [n_rows]usize = undefined;
     for (0..n_rows) |r| {
         var i: usize = 0;
@@ -279,7 +279,7 @@ test "the MVS threshold solves sum min(1, c / mu) = sample" {
         }
     }
     // Equal candidates: every row gets the same probability.
-    var eq = [_]f64{2} ** 10;
+    var eq: [10]f64 = @splat(2);
     const mu = symmetric.mvsThreshold(&eq, 4);
     try testing.expectApproxEqRel(@as(f64, 5), mu, 1e-12);
 }
@@ -320,8 +320,8 @@ test "bootstrap weights reach split scoring only, never the leaves" {
     defer m.deinit();
     var sp: [16][2]u32 = undefined;
     const depth = try levelSplits(m.trees.items[0], &sp);
-    var g = [_]f64{0} ** 8;
-    var h = [_]f64{0} ** 8;
+    var g: [8]f64 = @splat(0);
+    var h: [8]f64 = @splat(0);
     var idx: [n_rows]usize = undefined;
     for (0..n_rows) |r| {
         var i: usize = 0;
@@ -453,8 +453,8 @@ test "under ordered boosting the model's leaves are still full-data Newton steps
     defer m.deinit();
     var sp: [16][2]u32 = undefined;
     const depth = try levelSplits(m.trees.items[0], &sp);
-    var g = [_]f64{0} ** 8;
-    var h = [_]f64{0} ** 8;
+    var g: [8]f64 = @splat(0);
+    var h: [8]f64 = @splat(0);
     var idx: [n_rows]usize = undefined;
     for (0..n_rows) |r| {
         var i: usize = 0;

@@ -522,7 +522,7 @@ test "catContains agrees with a linear scan, on every set it can hold" {
     const r = prng.random();
     var ids: [split.max_cat_ids]data.BinIdx = undefined;
     for (0..200) |_| {
-        var present = [_]bool{false} ** 512;
+        var present: [512]bool = @splat(false);
         const n = r.uintLessThan(usize, split.max_cat_ids) + 1;
         var k: usize = 0;
         while (k < n) : (k += 1) present[r.uintLessThan(u32, 512)] = true;
@@ -570,7 +570,7 @@ test "every policy gives a dominant value one bin and spends the budget on the r
         defer f.deinit();
         var ds = try data.quantise(gpa, pool, &f, .{ .bin_policy = policy, .max_bin = 256 }, null, &.{});
         defer ds.deinit();
-        var seen = [_]bool{false} ** 300;
+        var seen: [300]bool = @splat(false);
         var tail: usize = 0;
         var zero_bin: ?data.BinIdx = null;
         for (ds.columnNarrow(0), vals) |b, v| {
@@ -1054,7 +1054,7 @@ test "the categorical width limit is a policy now, and still holds by default" {
     }
 
     {
-        var f = try frameWith(gpa, levels[0..255], &[_]f32{0} ** 255);
+        var f = try frameWith(gpa, levels[0..255], &@as([255]f32, @splat(0)));
         defer f.deinit();
         var ds = try data.quantise(gpa, pool, &f, .{}, null, &.{});
         defer ds.deinit();
@@ -1070,7 +1070,7 @@ test "the categorical width limit is a policy now, and still holds by default" {
         // And the capability the widening exists for: raise the policy and a
         // column past the old ceiling bins correctly, into bins the u8 index
         // could not have addressed.
-        var f = try frameWith(gpa, levels[0..260], &[_]f32{0} ** 260);
+        var f = try frameWith(gpa, levels[0..260], &@as([260]f32, @splat(0)));
         defer f.deinit();
         var ds = try data.quantise(gpa, pool, &f, .{ .max_cat_levels = 4096 }, null, &.{});
         defer ds.deinit();
@@ -1088,7 +1088,7 @@ test "the categorical width limit is a policy now, and still holds by default" {
     }
 
     {
-        var f = try frameWith(gpa, levels[0..256], &[_]f32{0} ** 256);
+        var f = try frameWith(gpa, levels[0..256], &@as([256]f32, @splat(0)));
         defer f.deinit();
         // `quantise` checks width up front, on the columns that survived the
         // drop list, so the error names the real cause rather than the
@@ -1103,7 +1103,7 @@ test "the categorical width limit is a policy now, and still holds by default" {
         // And the whole point of checking after drops: a column too wide to
         // bin must not stop a run that excluded it. This used to fail during
         // the CSV read, before `quantise` had seen the drop list at all.
-        var f = try frameWith(gpa, levels[0..256], &[_]f32{0} ** 256);
+        var f = try frameWith(gpa, levels[0..256], &@as([256]f32, @splat(0)));
         defer f.deinit();
         try testing.expectError(
             error.NoFeatures,
@@ -1127,7 +1127,7 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     // between 0 and 1 (at their midpoint), so bin 1 is the zeros and bin 2 is
     // {1, 2, 3, 400}.
     const nums = [_]f32{ 0, 0, 0, 0, 0, 0, 1, 2, 3, 400 };
-    const colours = [_][]const u8{"a"} ** nums.len;
+    const colours: [nums.len][]const u8 = @splat("a");
     var f = try frameWith(gpa, &colours, &nums);
     defer f.deinit();
 
@@ -1163,7 +1163,11 @@ test "a numeric bin is represented by the mean of its values, not its midpoint" 
     // table can be compared against the means directly. Without this the
     // wiring could be cut and every other test would still pass, since the
     // hand-built fixtures all take the midpoint fallback.
-    const labels = [_][]const u8{ "No", "Yes" } ** (nums.len / 2);
+    const labels = comptime blk: {
+        var l: [nums.len][]const u8 = undefined;
+        for (&l, 0..) |*x, i| x.* = if (i % 2 == 0) "No" else "Yes";
+        break :blk l;
+    };
     var lf = try frameWith(gpa, &labels, &nums);
     defer lf.deinit();
     var enc = try data.LabelEncoder.fromColumn(gpa, &lf, 0, null);

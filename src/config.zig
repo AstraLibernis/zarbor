@@ -47,11 +47,12 @@ pub fn applyFlag(cfg: *Config, key: []const u8, val: []const u8) !bool {
 
 fn applyIn(ptr: anytype, key: []const u8, val: []const u8) !bool {
     var found = false;
-    inline for (@typeInfo(@TypeOf(ptr.*)).@"struct".fields) |f| {
-        if (@typeInfo(f.type) == .@"struct") {
-            if (try applyIn(&@field(ptr, f.name), key, val)) found = true;
-        } else if (std.mem.eql(u8, f.name, key)) {
-            @field(ptr, f.name) = try parseInto(f.type, val);
+    const info = @typeInfo(@TypeOf(ptr.*)).@"struct";
+    inline for (info.field_names, info.field_types) |fname, FT| {
+        if (@typeInfo(FT) == .@"struct") {
+            if (try applyIn(&@field(ptr, fname), key, val)) found = true;
+        } else if (std.mem.eql(u8, fname, key)) {
+            @field(ptr, fname) = try parseInto(FT, val);
             found = true;
         }
     }
@@ -64,10 +65,11 @@ pub fn hasField(key: []const u8) bool {
 }
 
 fn hasIn(comptime T: type, key: []const u8) bool {
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (@typeInfo(f.type) == .@"struct") {
-            if (hasIn(f.type, key)) return true;
-        } else if (std.mem.eql(u8, f.name, key)) return true;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |fname, FT| {
+        if (@typeInfo(FT) == .@"struct") {
+            if (hasIn(FT, key)) return true;
+        } else if (std.mem.eql(u8, fname, key)) return true;
     }
     return false;
 }
@@ -101,7 +103,7 @@ pub const Config = struct {
     /// `Config.from(.{ .algo = .linear, .lambda = 2 })`.
     pub fn from(flat: anytype) Config {
         var c: Config = .{};
-        inline for (@typeInfo(@TypeOf(flat)).@"struct".fields) |f| c.set(f.name, @field(flat, f.name));
+        inline for (@typeInfo(@TypeOf(flat)).@"struct".field_names, @typeInfo(@TypeOf(flat)).@"struct".field_types) |f_name, _| c.set(f_name, @field(flat, f_name));
         return c;
     }
 
@@ -112,11 +114,11 @@ pub const Config = struct {
     }
 
     fn setIn(ptr: anytype, comptime name: []const u8, value: anytype) void {
-        inline for (@typeInfo(@TypeOf(ptr.*)).@"struct".fields) |f| {
-            if (comptime @typeInfo(f.type) == .@"struct") {
-                if (comptime hasIn(f.type, name)) setIn(&@field(ptr, f.name), name, value);
-            } else if (comptime std.mem.eql(u8, f.name, name)) {
-                @field(ptr, f.name) = value;
+        inline for (@typeInfo(@TypeOf(ptr.*)).@"struct".field_names, @typeInfo(@TypeOf(ptr.*)).@"struct".field_types) |f_name, F_type| {
+            if (comptime @typeInfo(F_type) == .@"struct") {
+                if (comptime hasIn(F_type, name)) setIn(&@field(ptr, f_name), name, value);
+            } else if (comptime std.mem.eql(u8, f_name, name)) {
+                @field(ptr, f_name) = value;
             }
         }
     }

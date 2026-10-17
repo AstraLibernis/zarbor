@@ -251,7 +251,7 @@ test "colsample keeps floor(n * rate) columns: 6 of 13 at 0.5" {
     defer res.model.deinit();
     var most: usize = 0;
     for (res.model.trees.items) |t| {
-        var used = [_]bool{false} ** nf;
+        var used: [nf]bool = @splat(false);
         for (t.nodes) |nd| {
             if (!nd.is_leaf) used[nd.feature] = true;
         }

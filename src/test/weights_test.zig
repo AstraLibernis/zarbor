@@ -149,7 +149,7 @@ test "weighted metrics: weights of 1 are the plain metric, a weight of 2 a dupli
     const gpa = testing.allocator;
     const s = [_]f32{ 0.9, 0.2, 0.7, 0.7, 0.1, 0.5, 0.5, 0.3 };
     const y = [_]f32{ 1, 0, 1, 0, 0, 1, 0, 1 };
-    const one = [_]f32{1} ** 8;
+    const one: [8]f32 = @splat(1);
     try testing.expectApproxEqAbs(try metric.auc(gpa, &s, &y), try metric.aucW(gpa, &s, &y, &one), 1e-12);
     try testing.expectApproxEqAbs(metric.rmse(&s, &y), metric.rmseW(&s, &y, &one), 1e-12);
     try testing.expectApproxEqAbs(metric.loglossProb(&s, &y), metric.loglossProbW(&s, &y, &one), 1e-12);
@@ -241,9 +241,23 @@ test "weighted linear objective: the gradient is its derivative (central differe
         var loss_part: [1]f64 = undefined;
         var rsum_part: [2]f64 = undefined;
         var pr = lin_solve.Problem{
-            .pool = pool, .design = &design, .tables = tables, .ds = &ds, .objective = c[0], .scale_pos_weight = 1,
-            .l2 = 0.02, .l1 = 0, .theta = theta, .k = k, .wf = wf, .z = z, .resid = resid,
-            .loss_part = &loss_part, .rsum_part = rsum_part[0..k], .chunks = 1, .size = n_rows,
+            .pool = pool,
+            .design = &design,
+            .tables = tables,
+            .ds = &ds,
+            .objective = c[0],
+            .scale_pos_weight = 1,
+            .l2 = 0.02,
+            .l1 = 0,
+            .theta = theta,
+            .k = k,
+            .wf = wf,
+            .z = z,
+            .resid = resid,
+            .loss_part = &loss_part,
+            .rsum_part = rsum_part[0..k],
+            .chunks = 1,
+            .size = n_rows,
         };
         const g = try gpa.alloc(f64, theta.len);
         defer gpa.free(g);
@@ -338,7 +352,7 @@ test "balanced class weights: n / (K n_c), from weight sums when rows are weight
     for (ds.labels, 0..) |*y, i| y.* = @floatFromInt(i % 7 % 3);
     const ws = try Fitted.classWeights(gpa, &ds, soft);
     defer gpa.free(ws);
-    var per = [_]f64{0} ** 3;
+    var per: [3]f64 = @splat(0);
     for (ws, ds.labels) |v, y| per[@intFromFloat(y)] += v;
     for (per) |t| try testing.expectApproxEqRel(@as(f64, n_rows) / 3, t, 1e-6);
 

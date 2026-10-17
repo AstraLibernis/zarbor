@@ -126,7 +126,7 @@ test "every policy respects the budget, cuts ascending, never inside a value" {
             for (e[1..], e[0 .. e.len - 1]) |hi, lo| try testing.expect(hi > lo);
             // Data-driven policies put no bin out of reach of the training data.
             if (policy == .uniform) continue;
-            var used = [_]bool{false} ** 256;
+            var used: [256]bool = @splat(false);
             for (vals) |v| used[binOf(e, v)] = true;
             for (used[0 .. e.len + 1]) |u| try testing.expect(u);
         }
@@ -144,7 +144,7 @@ test "min_data_in_bin caps the bin count and floors every bin, under every polic
         try testing.expect(e.len <= 99);
         // Uniform cuts are not run boundaries; only the count cap applies to it.
         if (policy == .uniform) continue;
-        var counts = [_]usize{0} ** 256;
+        var counts: [256]usize = @splat(0);
         for (vals) |v| counts[binOf(e, v)] += 1;
         for (counts[0..e.len]) |c| try testing.expect(c >= 50);
     }

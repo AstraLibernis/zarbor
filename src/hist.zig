@@ -36,11 +36,14 @@ pub const Bin = extern struct {
     pub const Vec = @Vector(4, f64);
 
     pub inline fn vec(b: Bin) Vec {
-        return @bitCast(b);
+        // Zig 0.17 no longer @bitCasts extern structs; same bytes through a pointer.
+        return @as(*const Vec, @ptrCast(&b)).*;
     }
 
     pub inline fn fromVec(x: Vec) Bin {
-        return @bitCast(x);
+        var b: Bin = undefined;
+        @as(*Vec, @ptrCast(&b)).* = x;
+        return b;
     }
 
     pub inline fn add(a: Bin, b: Bin) Bin {

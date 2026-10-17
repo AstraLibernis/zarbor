@@ -60,7 +60,7 @@ pub fn as(bytes: []const u8, comptime T: type) ConvertError!T {
         .bool => asBool(bytes),
         .@"enum" => asEnum(bytes, T),
         .optional => |o| if (bytes.len == 0) null else @as(T, try as(bytes, o.child)),
-        .pointer => |p| if (p.size == .slice and p.child == u8 and p.is_const)
+        .pointer => |p| if (p.size == .slice and p.child == u8 and p.attrs.@"const")
             bytes // []const u8 — identity/borrow
         else
             @compileError("zsift: cannot convert a field to " ++ @typeName(T) ++

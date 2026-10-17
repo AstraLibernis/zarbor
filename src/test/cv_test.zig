@@ -26,7 +26,7 @@ test "folds are equally sized and cover every row exactly once" {
     const fold = try assignFolds(gpa, labels, 5, 7, true);
     defer gpa.free(fold);
 
-    var count = [_]usize{0} ** 5;
+    var count: [5]usize = @splat(0);
     for (fold) |k| {
         try testing.expect(k < 5);
         count[k] += 1;
@@ -46,8 +46,8 @@ test "stratification keeps each fold's class balance" {
     const fold = try assignFolds(gpa, labels, 5, 3, true);
     defer gpa.free(fold);
 
-    var pos = [_]usize{0} ** 5;
-    var tot = [_]usize{0} ** 5;
+    var pos: [5]usize = @splat(0);
+    var tot: [5]usize = @splat(0);
     for (fold, labels) |k, y| {
         tot[k] += 1;
         if (y >= 0.5) pos[k] += 1;
@@ -88,7 +88,7 @@ test "unstratified assignment still partitions completely" {
     const fold = try assignFolds(gpa, labels, 4, 11, false);
     defer gpa.free(fold);
 
-    var count = [_]usize{0} ** 4;
+    var count: [4]usize = @splat(0);
     for (fold) |k| count[k] += 1;
     var total: usize = 0;
     for (count) |c| {
@@ -136,7 +136,7 @@ test "grouped folds stay balanced when group sizes are uneven" {
     const fold = try assignGroupFolds(gpa, list.items, 5, 11);
     defer gpa.free(fold);
 
-    var load = [_]usize{0} ** 5;
+    var load: [5]usize = @splat(0);
     for (fold) |k| load[k] += 1;
     var lo: usize = std.math.maxInt(usize);
     var hi: usize = 0;

@@ -51,7 +51,7 @@ pub inline fn now() u64 {
 /// Off unless `--profile`, keeping timestamp calls out of ordinary runs.
 pub var enabled: bool = false;
 
-var totals: [@typeInfo(Phase).@"enum".fields.len]u64 = @splat(0);
+var totals: [@typeInfo(Phase).@"enum".field_names.len]u64 = @splat(0);
 
 pub inline fn start() u64 {
     return if (enabled) now() else 0;
@@ -59,7 +59,7 @@ pub inline fn start() u64 {
 
 pub inline fn stop(p: Phase, t0: u64) void {
     if (!enabled) return;
-    totals[@intFromEnum(p)] += now() - t0;
+    totals[@backingInt(p)] += now() - t0;
 }
 
 pub fn reset() void {
@@ -77,18 +77,18 @@ fn nested(p: Phase) bool {
 
 pub fn report(w: *std.Io.Writer) !void {
     var sum: u64 = 0;
-    inline for (@typeInfo(Phase).@"enum".fields) |f| {
-        if (comptime !nested(@field(Phase, f.name))) sum += totals[f.value];
+    inline for (@typeInfo(Phase).@"enum".field_names, @typeInfo(Phase).@"enum".field_values) |f_name, f_value| {
+        if (comptime !nested(@field(Phase, f_name))) sum += totals[f_value];
     }
     if (sum == 0) return;
     try w.print("\nphase breakdown (wall, main thread)\n", .{});
-    inline for (@typeInfo(Phase).@"enum".fields) |f| {
-        const t = totals[f.value];
+    inline for (@typeInfo(Phase).@"enum".field_names, @typeInfo(Phase).@"enum".field_values) |f_name, f_value| {
+        const t = totals[f_value];
         if (t != 0) {
-            const is_nested = comptime nested(@field(Phase, f.name));
+            const is_nested = comptime nested(@field(Phase, f_name));
             try w.print("  {s}{s:<14} {d:>7} ms  {d:>5.1}%{s}\n", .{
                 if (is_nested) "  " else "",
-                f.name,
+                f_name,
                 t / 1_000_000,
                 100.0 * @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(sum)),
                 if (is_nested) "  (nested)" else "",

@@ -1,0 +1,12 @@
+model                  reference                    zarbor          ref    z ms  ref ms  ratio
+GBDT, depthwise        XGBoost                    0.941425     0.941441     477     661   1.39x
+GBDT, leafwise         LightGBM                   0.941418     0.941427     456     528   1.16x
+GBDT + GOSS            LightGBM GOSS              0.941313     0.940247     591     678   1.15x
+Random forest          scikit-learn RF            0.938148     0.934829    3184    6479   2.03x
+Logistic regression    scikit-learn LogReg        0.937716     0.937729     171    1135   6.63x
+GBDT, symmetric        CatBoost                   0.940756     0.940803    3013    2200   0.73x
+Ordered boosting       CatBoost ordered           0.940786     0.940730   10519    5998   0.57x
+CatBoost defaults      CatBoost defaults          0.940505     0.940643   59328    6110   0.10x
+linear regression      sklearn LinearRegression 27922.123876 27922.154109     110     185   1.68x
+
+wrote /home/dev/workspace/zarbor/bench/arena/scoreboard.json

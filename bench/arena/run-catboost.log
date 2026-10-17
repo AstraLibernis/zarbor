@@ -1,0 +1,26 @@
+zarbor build: ReleaseFast
+
+parser (both CSVs, 40 MB / 668,665 rows), n=5
+  zarbor csv.zig        36 ms
+  pandas read_csv      177 ms   (4.91x zarbor)
+
+F  symmetric GBDT, target statistics  (parity, vs catboost)
+  F catboost-plain
+    auc    zarbor 0.940756 | catboost 0.940803 | gap 0.000047  env 0.000541  [self=referee: True]
+    prepare    102 |      22   fit   2942 |    2116   predict    38 |     62
+    MODEL     3082 |    2201 ms   (0.71x zarbor)
+    TOTAL     3119 |    2377 ms   (0.76x zarbor, incl. parse)
+G  CatBoost defaults: MVS, noise, combinations, permutations
+  G catboost-defaults
+    auc    zarbor 0.940505 | catboost 0.940643 | gap 0.000138  env 0.000549  [self=referee: True]
+    prepare    102 |      21   fit  59386 |    6023   predict    36 |     62
+    MODEL    59524 |    6107 ms   (0.10x zarbor)
+    TOTAL    59562 |    6284 ms   (0.11x zarbor, incl. parse)
+H  ordered boosting  (parity, vs catboost)
+  H catboost-ordered
+    auc    zarbor 0.940786 | catboost-ordered 0.940730 | gap 0.000055  env 0.000591  [self=referee: True]
+    prepare    101 |      21   fit  10370 |    5921   predict    38 |     62
+    MODEL    10509 |    6005 ms   (0.57x zarbor)
+    TOTAL    10546 |    6182 ms   (0.59x zarbor, incl. parse)
+
+wrote /home/dev/workspace/zarbor/bench/arena/results.json

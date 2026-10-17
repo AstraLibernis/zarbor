@@ -227,7 +227,7 @@ pub const Part = struct {
 
     /// Canonical order: by kind, then column, then value.
     pub fn lessThan(_: void, a: Part, b: Part) bool {
-        if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+        if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
         if (a.feature != b.feature) return a.feature < b.feature;
         return a.value < b.value;
     }

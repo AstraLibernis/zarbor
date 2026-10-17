@@ -90,7 +90,7 @@ language bindings and export formats are out of scope. See [docs/PLAN.md](docs/P
 
 ## Build and test
 
-Requires Zig 0.16.0.
+Requires Zig 0.17.0.
 
     zig build -Doptimize=ReleaseFast   # the binary; plain `zig build` is Debug, several times slower
     zig build test                     # unit tests

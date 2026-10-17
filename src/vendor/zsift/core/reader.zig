@@ -53,12 +53,12 @@ fn structFieldCount(comptime T: type) usize {
     const info = @typeInfo(T);
     if (info != .@"struct")
         @compileError("zsift.reader expects a struct type, got " ++ @typeName(T));
-    return info.@"struct".fields.len;
+    return info.@"struct".field_names.len;
 }
 
 fn ReaderCap(comptime T: type, comptime max_cols: usize) type {
-    const fields = @typeInfo(T).@"struct".fields;
-    const N = fields.len;
+    const info = @typeInfo(T).@"struct";
+    const N = info.field_names.len;
     if (max_cols < N)
         @compileError("zsift.reader: max_cols (" ++ std.fmt.comptimePrint("{d}", .{max_cols}) ++
             ") must be >= " ++ @typeName(T) ++ "'s field count (" ++ std.fmt.comptimePrint("{d}", .{N}) ++ ")");
@@ -90,8 +90,8 @@ fn ReaderCap(comptime T: type, comptime max_cols: usize) type {
         /// stores indices, so nothing borrows the (reused) row buffer afterward.
         pub fn withHeader(self: *Self) ReaderError!void {
             const hrec = (try self.parser.nextRecord(&self.row)) orelse return error.EmptyHeader;
-            inline for (fields, 0..) |field, i| {
-                self.perm[i] = indexOfName(hrec, field.name) orelse return error.MissingHeaderColumn;
+            inline for (info.field_names, 0..) |name, i| {
+                self.perm[i] = indexOfName(hrec, name) orelse return error.MissingHeaderColumn;
             }
         }
 
@@ -100,16 +100,16 @@ fn ReaderCap(comptime T: type, comptime max_cols: usize) type {
         pub fn next(self: *Self) ReaderError!?T {
             const rec = (try self.parser.nextRecord(&self.row)) orelse return null;
             var out: T = undefined;
-            inline for (fields, 0..) |field, i| {
+            inline for (info.field_names, info.field_types, 0..) |name, FT, i| {
                 const c = self.perm[i];
                 if (c >= rec.len) {
-                    if (@typeInfo(field.type) == .optional) {
-                        @field(out, field.name) = null;
+                    if (@typeInfo(FT) == .optional) {
+                        @field(out, name) = null;
                     } else {
                         return error.MissingColumn;
                     }
                 } else {
-                    @field(out, field.name) = try convert.as(rec[c], field.type);
+                    @field(out, name) = try convert.as(rec[c], FT);
                 }
             }
             return out;
